@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: dineflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dineflow_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dineflow_password}
+      POSTGRES_DB: dineflow_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - dineflow_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dineflow_user -d dineflow_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend/dineflow
+      dockerfile: DineFlow.Api/Dockerfile
+    container_name: dineflow-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=dineflow_db;Username=dineflow_user;Password=${POSTGRES_PASSWORD:-dineflow_password}
+      SeedOwner__Email: ${SEED_OWNER_EMAIL:-owner@dineflow.com}
+      SeedOwner__Password: ${SEED_OWNER_PASSWORD:-ChangeMe123!}
+      SeedOwner__FullName: ${SEED_OWNER_FULL_NAME:-DineFlow Owner}
+    ports:
+      - "5000:8080"
+
+  frontend:
+    build:
+      context: ./frontend/dineflow-web
+      dockerfile: Dockerfile
+    container_name: dineflow-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_PROXY_TARGET: http://backend:8080
+    ports:
+      - "5173:5173"
+
+volumes:
+  dineflow_postgres_data:
