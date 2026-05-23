@@ -38,6 +38,7 @@ app.MapGet("/health", () => Results.Ok(new
 }));
 
 app.MapControllers();
+Console.WriteLine("Applying database migrations...");
 using (var scope = app.Services.CreateScope())
 {
     var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
