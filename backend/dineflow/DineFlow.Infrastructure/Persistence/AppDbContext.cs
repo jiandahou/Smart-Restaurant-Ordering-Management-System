@@ -1,4 +1,5 @@
 using DineFlow.Infrastructure.Identity;
+using DineFlow.Infrastructure.Orders;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 
@@ -11,10 +12,6 @@ public class AppDbContext : IdentityDbContext<ApplicationUser>
     {
     }
 
-    // Later you will add business tables here:
-    // public DbSet<Restaurant> Restaurants => Set<Restaurant>();
-    // public DbSet<MenuCategory> MenuCategories => Set<MenuCategory>();
-    // public DbSet<MenuItem> MenuItems => Set<MenuItem>();
-    // public DbSet<Order> Orders => Set<Order>();
-    // public DbSet<OrderItem> OrderItems => Set<OrderItem>();
+    public DbSet<Order> Orders => Set<Order>();
+    public DbSet<OrderItem> OrderItems => Set<OrderItem>();
 }
