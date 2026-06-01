@@ -30,11 +30,55 @@ services:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8080
       ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=dineflow_db;Username=dineflow_user;Password=${POSTGRES_PASSWORD:-dineflow_password}
+      Jwt__Issuer: ${JWT_ISSUER:-DineFlow.Api}
+      Jwt__Audience: ${JWT_AUDIENCE:-DineFlow.Client}
+      Jwt__SecretKey: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required. Set it in a local .env file.}
+      Jwt__ExpirationMinutes: ${JWT_EXPIRATION_MINUTES:-60}
+      Email__From: ${AUTH_EMAIL_FROM:-noreply@theunknownfish.com}
+      Email__Server: ${EMAIL_SERVER:-}
+      Email__ResendApiKey: ${RESEND_API_KEY:-}
+      Email__FrontendBaseUrl: ${FRONTEND_BASE_URL:-http://localhost:5173}
+      EMAIL_FROM: ${EMAIL_FROM:-noreply@theunknownfish.com}
+      AUTH_EMAIL_FROM: ${AUTH_EMAIL_FROM:-noreply@theunknownfish.com}
+      EMAIL_SERVER: ${EMAIL_SERVER:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}
+      Authentication__Google__ClientId: ${GOOGLE_CLIENT_ID:-}
+      Authentication__Google__ClientSecret: ${GOOGLE_CLIENT_SECRET:-}
+      Authentication__Google__CallbackPath: ${GOOGLE_CALLBACK_PATH:-/api/auth/google/signin}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_CALLBACK_PATH: ${GOOGLE_CALLBACK_PATH:-/api/auth/google/signin}
+      Passkeys__ServerDomain: ${PASSKEY_SERVER_DOMAIN:-localhost}
+      Passkeys__ServerName: ${PASSKEY_SERVER_NAME:-DineFlow}
+      Passkeys__Origins__0: ${PASSKEY_ORIGINS:-http://localhost:5173}
+      PASSKEY_SERVER_DOMAIN: ${PASSKEY_SERVER_DOMAIN:-localhost}
+      PASSKEY_SERVER_NAME: ${PASSKEY_SERVER_NAME:-DineFlow}
+      PASSKEY_ORIGINS: ${PASSKEY_ORIGINS:-http://localhost:5173}
+      Stripe__SecretKey: ${STRIPE_SECRET_KEY:-}
+      Stripe__PublishableKey: ${STRIPE_PUBLISHABLE_KEY:-}
+      Stripe__WebhookSecret: ${STRIPE_WEBHOOK_SECRET:-}
+      Stripe__Currency: ${STRIPE_CURRENCY:-aud}
+      Stripe__SuccessUrl: ${STRIPE_SUCCESS_URL:-http://localhost:5173/payment/success}
+      Stripe__CancelUrl: ${STRIPE_CANCEL_URL:-http://localhost:5173/payment/cancelled}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_CURRENCY: ${STRIPE_CURRENCY:-aud}
+      STRIPE_SUCCESS_URL: ${STRIPE_SUCCESS_URL:-http://localhost:5173/payment/success}
+      STRIPE_CANCEL_URL: ${STRIPE_CANCEL_URL:-http://localhost:5173/payment/cancelled}
       SeedOwner__Email: ${SEED_OWNER_EMAIL:-owner@dineflow.com}
       SeedOwner__Password: ${SEED_OWNER_PASSWORD:-ChangeMe123!}
       SeedOwner__FullName: ${SEED_OWNER_FULL_NAME:-DineFlow Owner}
     ports:
       - "5000:8080"
+    volumes:
+      - dineflow_backend_uploads:/app/wwwroot/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --show-error http://localhost:8080/health/ready > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   frontend:
     build:
@@ -43,11 +87,20 @@ services:
     container_name: dineflow-frontend
     restart: unless-stopped
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     environment:
       VITE_API_PROXY_TARGET: http://backend:8080
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:5000}
+      CHOKIDAR_USEPOLLING: "true"
+      WATCHPACK_POLLING: "true"
+    volumes:
+      - ./frontend/dineflow-web:/app
+      - /app/node_modules
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
     ports:
       - "5173:5173"
 
 volumes:
   dineflow_postgres_data:
+  dineflow_backend_uploads:
