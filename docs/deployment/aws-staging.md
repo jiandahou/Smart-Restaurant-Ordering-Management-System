@@ -28,6 +28,9 @@ Frontend hosting
 ### Amazon ECR
 
 - Repository name: `dineflow-backend`
+- AWS region: `ap-southeast-2`
+- AWS account ID: `509399637411`
+- Repository URI: `509399637411.dkr.ecr.ap-southeast-2.amazonaws.com/dineflow-backend`
 - Image tags:
   - `latest`
   - Git commit SHA
