@@ -95,6 +95,20 @@ ECS_SERVICE_ARN=arn:aws:ecs:ap-southeast-2:509399637411:service/default/dineflow
 ECS_SECURITY_GROUP=
 ```
 
+### Amazon S3 Frontend Bucket
+
+- Bucket name: `dineflow-frontend-staging-509399637411`
+- AWS region: `ap-southeast-2`
+- Public access: blocked
+- Purpose: store the Vite production build output before CloudFront serves it.
+
+Record these values:
+
+```text
+FRONTEND_S3_BUCKET=dineflow-frontend-staging-509399637411
+FRONTEND_S3_REGION=ap-southeast-2
+```
+
 ## Required Backend Environment Variables
 
 Set these in the ECS task/container environment:
