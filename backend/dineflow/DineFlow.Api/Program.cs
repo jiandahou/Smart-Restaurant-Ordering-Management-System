@@ -41,41 +41,41 @@ builder.Services.AddSingleton<IPasskeyRegistrationOptionsStore, MemoryPasskeyReg
 builder.Services.Configure<EmailOptions>(options =>
 {
     builder.Configuration.GetSection(EmailOptions.SectionName).Bind(options);
-    options.From = FirstConfigured(options.From, builder.Configuration["AUTH_EMAIL_FROM"], builder.Configuration["EMAIL_FROM"]);
-    options.Server = FirstConfigured(options.Server, builder.Configuration["EMAIL_SERVER"]);
-    options.ResendApiKey = FirstConfigured(options.ResendApiKey, builder.Configuration["RESEND_API_KEY"]);
+    options.From = FirstConfigured(builder.Configuration["AUTH_EMAIL_FROM"], builder.Configuration["EMAIL_FROM"], options.From);
+    options.Server = FirstConfigured(builder.Configuration["EMAIL_SERVER"], options.Server);
+    options.ResendApiKey = FirstConfigured(builder.Configuration["RESEND_API_KEY"], options.ResendApiKey);
     options.FrontendBaseUrl = FirstConfigured(
-        options.FrontendBaseUrl,
         builder.Configuration["FRONTEND_BASE_URL"],
+        options.FrontendBaseUrl,
         "http://localhost:5173");
 });
 builder.Services.Configure<PasskeyOptions>(options =>
 {
     builder.Configuration.GetSection(PasskeyOptions.SectionName).Bind(options);
     options.ServerDomain = FirstConfigured(
-        options.ServerDomain,
         builder.Configuration["PASSKEY_SERVER_DOMAIN"],
+        options.ServerDomain,
         "localhost") ?? "localhost";
     options.ServerName = FirstConfigured(
-        options.ServerName,
         builder.Configuration["PASSKEY_SERVER_NAME"],
+        options.ServerName,
         "DineFlow") ?? "DineFlow";
     options.Origins = GetConfiguredPasskeyOrigins(builder.Configuration, options.Origins);
 });
 builder.Services.Configure<StripeOptions>(options =>
 {
     builder.Configuration.GetSection(StripeOptions.SectionName).Bind(options);
-    options.SecretKey = FirstConfigured(options.SecretKey, builder.Configuration["STRIPE_SECRET_KEY"]) ?? string.Empty;
-    options.PublishableKey = FirstConfigured(options.PublishableKey, builder.Configuration["STRIPE_PUBLISHABLE_KEY"]) ?? string.Empty;
-    options.WebhookSecret = FirstConfigured(options.WebhookSecret, builder.Configuration["STRIPE_WEBHOOK_SECRET"]) ?? string.Empty;
-    options.Currency = FirstConfigured(options.Currency, builder.Configuration["STRIPE_CURRENCY"], "aud") ?? "aud";
+    options.SecretKey = FirstConfigured(builder.Configuration["STRIPE_SECRET_KEY"], options.SecretKey) ?? string.Empty;
+    options.PublishableKey = FirstConfigured(builder.Configuration["STRIPE_PUBLISHABLE_KEY"], options.PublishableKey) ?? string.Empty;
+    options.WebhookSecret = FirstConfigured(builder.Configuration["STRIPE_WEBHOOK_SECRET"], options.WebhookSecret) ?? string.Empty;
+    options.Currency = FirstConfigured(builder.Configuration["STRIPE_CURRENCY"], options.Currency, "aud") ?? "aud";
     options.SuccessUrl = FirstConfigured(
-        options.SuccessUrl,
         builder.Configuration["STRIPE_SUCCESS_URL"],
+        options.SuccessUrl,
         $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/payment/success") ?? string.Empty;
     options.CancelUrl = FirstConfigured(
-        options.CancelUrl,
         builder.Configuration["STRIPE_CANCEL_URL"],
+        options.CancelUrl,
         $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/payment/cancelled") ?? string.Empty;
 });
 builder.Services.AddSingleton<IStripeClient>(serviceProvider =>
