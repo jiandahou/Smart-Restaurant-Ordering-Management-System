@@ -49,11 +49,25 @@ Frontend hosting
 Record these values after creation:
 
 ```text
-RDS_ENDPOINT=
+RDS_ENDPOINT=dineflow-postgres-staging.chysimg0snwm.ap-southeast-2.rds.amazonaws.com
 RDS_PORT=5432
 RDS_DATABASE=dineflow_db
 RDS_USERNAME=dineflow_user
 RDS_PASSWORD=
+```
+
+AWS console connection test command:
+
+```bash
+curl -o global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+export RDSHOST="dineflow-postgres-staging.chysimg0snwm.ap-southeast-2.rds.amazonaws.com"
+psql "host=$RDSHOST port=5432 dbname=postgres user=dineflow_user sslmode=verify-full sslrootcert=./global-bundle.pem"
+```
+
+For the DineFlow backend, use the application database in the connection string:
+
+```text
+ConnectionStrings__DefaultConnection=Host=dineflow-postgres-staging.chysimg0snwm.ap-southeast-2.rds.amazonaws.com;Port=5432;Database=dineflow_db;Username=dineflow_user;Password=<RDS_PASSWORD>
 ```
 
 ### AWS App Runner
