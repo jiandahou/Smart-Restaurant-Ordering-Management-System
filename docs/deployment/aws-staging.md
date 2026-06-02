@@ -85,12 +85,13 @@ ConnectionStrings__DefaultConnection=Host=dineflow-postgres-staging.chysimg0snwm
 Record these values after creation:
 
 ```text
-ECS_CLUSTER_NAME=
-ECS_SERVICE_NAME=
-ECS_TASK_DEFINITION_NAME=
-ECS_CONTAINER_NAME=
-ECS_BACKEND_URL=
-ECS_SERVICE_ARN=
+ECS_CLUSTER_NAME=default
+ECS_SERVICE_NAME=dineflow-backend-c40e
+ECS_TASK_DEFINITION_NAME=default-dineflow-backend-c40e
+ECS_CURRENT_TASK_ID=081b671f5dd446ec9514b10d8c3eafecc
+ECS_CONTAINER_NAME=Main
+ECS_BACKEND_URL=https://di-37cf36081c144f838d858d20f3e52abe.ecs.ap-southeast-2.on.aws
+ECS_SERVICE_ARN=arn:aws:ecs:ap-southeast-2:509399637411:service/default/dineflow-backend-c40e
 ECS_SECURITY_GROUP=
 ```
 
