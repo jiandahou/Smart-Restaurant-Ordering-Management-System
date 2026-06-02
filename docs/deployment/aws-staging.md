@@ -4,7 +4,7 @@
 
 Deploy DineFlow staging with:
 
-- Backend API on AWS App Runner
+- Backend API on Amazon ECS Express Mode / ECS Fargate
 - Backend Docker image stored in Amazon ECR
 - PostgreSQL database on Amazon RDS
 - Frontend deployed separately using Vercel, Netlify, or S3 + CloudFront
@@ -15,12 +15,12 @@ Deploy DineFlow staging with:
 GitHub Actions
   -> build backend Docker image
   -> push image to Amazon ECR
-  -> trigger AWS App Runner deployment
+  -> deploy the image to Amazon ECS
   -> backend connects to Amazon RDS PostgreSQL
 
 Frontend hosting
   -> Vercel / Netlify / S3 + CloudFront
-  -> calls App Runner backend URL
+  -> calls ECS backend URL
 ```
 
 ## AWS Resources
@@ -70,10 +70,12 @@ For the DineFlow backend, use the application database in the connection string:
 ConnectionStrings__DefaultConnection=Host=dineflow-postgres-staging.chysimg0snwm.ap-southeast-2.rds.amazonaws.com;Port=5432;Database=dineflow_db;Username=dineflow_user;Password=<RDS_PASSWORD>
 ```
 
-### AWS App Runner
+### Amazon ECS Backend Service
 
-- Service name: `dineflow-backend-staging`
-- Source: ECR image
+- Deployment mode: ECS Express Mode / Fargate
+- Service name: record after creation
+- Cluster name: record after creation
+- Source: ECR image `509399637411.dkr.ecr.ap-southeast-2.amazonaws.com/dineflow-backend:latest`
 - Container port: `8080`
 - Health check path: `/health/ready`
 - Runtime:
@@ -83,13 +85,18 @@ ConnectionStrings__DefaultConnection=Host=dineflow-postgres-staging.chysimg0snwm
 Record these values after creation:
 
 ```text
-APP_RUNNER_BACKEND_SERVICE_ARN=
-APP_RUNNER_BACKEND_URL=
+ECS_CLUSTER_NAME=
+ECS_SERVICE_NAME=
+ECS_TASK_DEFINITION_NAME=
+ECS_CONTAINER_NAME=
+ECS_BACKEND_URL=
+ECS_SERVICE_ARN=
+ECS_SECURITY_GROUP=
 ```
 
 ## Required Backend Environment Variables
 
-Set these in App Runner:
+Set these in the ECS task/container environment:
 
 ```text
 ASPNETCORE_ENVIRONMENT=Staging
@@ -130,15 +137,24 @@ SeedOwner__FullName=DineFlow Owner
 
 ## GitHub Secrets
 
-Add these repository secrets in GitHub:
+Prefer GitHub OIDC instead of long-lived AWS access keys.
+
+Add this repository variable or secret in GitHub:
 
 ```text
-AWS_ACCESS_KEY_ID=
-AWS_SECRET_ACCESS_KEY=
-AWS_REGION=
-AWS_ACCOUNT_ID=
+AWS_GITHUB_ACTIONS_ROLE_ARN=arn:aws:iam::509399637411:role/DineFlowGitHubActionsDeployRole
+```
+
+Add these repository variables or secrets in GitHub:
+
+```text
+AWS_REGION=ap-southeast-2
+AWS_ACCOUNT_ID=509399637411
 ECR_BACKEND_REPOSITORY=dineflow-backend
-APP_RUNNER_BACKEND_SERVICE_ARN=
+ECS_CLUSTER_NAME=
+ECS_SERVICE_NAME=
+ECS_TASK_DEFINITION_NAME=
+ECS_CONTAINER_NAME=
 ```
 
 Optional frontend/deployment secrets:
@@ -154,12 +170,12 @@ BACKEND_STAGING_URL=
 2. Create the ECR repository `dineflow-backend`.
 3. Create the RDS PostgreSQL database.
 4. Build and push one initial backend Docker image to ECR, or use the CD workflow after it exists.
-5. Create the App Runner service from the ECR backend image.
-6. Set all required backend environment variables in App Runner.
+5. Create the ECS backend service from the ECR backend image.
+6. Set all required backend environment variables in the ECS task/container.
 7. Add GitHub repository secrets.
 8. Run the backend CD workflow.
 9. Verify the backend health endpoints.
-10. Deploy the frontend separately and point it at the App Runner backend URL.
+10. Deploy the frontend separately and point it at the ECS backend URL.
 
 ## Health Checks
 
@@ -226,10 +242,10 @@ For custom domains, update these values after DNS is configured.
 ## Follow-up Tickets
 
 - CD: push backend Docker image to ECR
-- CD: deploy backend to App Runner
+- CD: deploy backend to ECS
 - Frontend CD: deploy Vite app
 - Staging: configure custom domain and HTTPS
 - Staging: configure Stripe webhook endpoint
 - Staging: configure Google OAuth redirect URIs
-- Staging: configure App Runner/RDS network access
-- Observability: App Runner logs and request tracing
+- Staging: configure ECS/RDS network access
+- Observability: ECS logs and request tracing
