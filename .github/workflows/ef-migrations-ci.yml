@@ -1,0 +1,50 @@
+name: EF Migration CI
+
+on:
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/ef-migrations-ci.yml"
+  push:
+    branches:
+      - main
+      - jianda
+    paths:
+      - "backend/**"
+      - ".github/workflows/ef-migrations-ci.yml"
+
+jobs:
+  ef-migrations:
+    name: EF migration consistency
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: backend/dineflow
+
+    env:
+      ASPNETCORE_ENVIRONMENT: Development
+      Jwt__SecretKey: development-migration-secret-key-development-migration-secret-key
+      ConnectionStrings__DefaultConnection: Host=localhost;Port=5432;Database=dineflow;Username=postgres;Password=postgres
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore DineFlow.sln
+
+      - name: Install dotnet ef
+        run: dotnet tool install --global dotnet-ef --version 8.0.8
+
+      - name: Check pending model changes
+        run: >
+          dotnet ef migrations has-pending-model-changes
+          --project DineFlow.Infrastructure
+          --startup-project DineFlow.Api
+          --context AppDbContext

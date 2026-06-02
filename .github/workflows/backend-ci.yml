@@ -1,0 +1,38 @@
+name: Backend CI
+
+on:
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+  push:
+    branches:
+      - main
+      - jianda
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+
+jobs:
+  backend:
+    name: Backend build
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: backend/dineflow
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore DineFlow.sln
+
+      - name: Build
+        run: dotnet build DineFlow.sln --configuration Release --no-restore

@@ -292,7 +292,7 @@ app.MapGet("/health/ready", async (AppDbContext dbContext) =>
     });
 });
 
-console.WriteLine("Health check endpoint registered at /health");
+Console.WriteLine("Health check endpoint registered at /health");
 app.MapControllers();
 Console.WriteLine("Applying database migrations...");
 using (var scope = app.Services.CreateScope())
