@@ -109,6 +109,23 @@ FRONTEND_S3_BUCKET=dineflow-frontend-staging-509399637411
 FRONTEND_S3_REGION=ap-southeast-2
 ```
 
+### Amazon CloudFront Frontend Distribution
+
+- Distribution name: `dineflow-frontend-staging`
+- Distribution ID: `E1X144O3LC6KZF`
+- Domain name: `d1dst4u6mrspvz.cloudfront.net`
+- Origin: `dineflow-frontend-staging-509399637411`
+- Origin access: CloudFront OAC/private S3 bucket access
+- SPA fallback: configure `403` and `404` to return `/index.html` with HTTP `200`
+
+Record these values:
+
+```text
+CLOUDFRONT_DISTRIBUTION_ID=E1X144O3LC6KZF
+CLOUDFRONT_DOMAIN_NAME=d1dst4u6mrspvz.cloudfront.net
+FRONTEND_STAGING_URL=https://d1dst4u6mrspvz.cloudfront.net
+```
+
 ## Required Backend Environment Variables
 
 Set these in the ECS task/container environment:
@@ -170,7 +187,17 @@ ECS_CLUSTER_NAME=
 ECS_SERVICE_NAME=
 ECS_TASK_DEFINITION_NAME=
 ECS_CONTAINER_NAME=
+FRONTEND_S3_BUCKET=dineflow-frontend-staging-509399637411
+CLOUDFRONT_DISTRIBUTION_ID=E1X144O3LC6KZF
 ```
+
+The GitHub OIDC deployment role needs permissions for:
+
+- ECR image push
+- ECS task definition registration and service update
+- `s3:ListBucket` on `arn:aws:s3:::dineflow-frontend-staging-509399637411`
+- `s3:PutObject` and `s3:DeleteObject` on `arn:aws:s3:::dineflow-frontend-staging-509399637411/*`
+- `cloudfront:CreateInvalidation` on distribution `E1X144O3LC6KZF`
 
 Optional frontend/deployment secrets:
 

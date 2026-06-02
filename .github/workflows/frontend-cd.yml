@@ -1,0 +1,64 @@
+name: Frontend CD
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - jianda
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-cd.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-southeast-2
+  AWS_GITHUB_ACTIONS_ROLE_ARN: arn:aws:iam::509399637411:role/DineFlowGitHubActionsDeployRole
+  FRONTEND_S3_BUCKET: dineflow-frontend-staging-509399637411
+  CLOUDFRONT_DISTRIBUTION_ID: E1X144O3LC6KZF
+  VITE_API_BASE_URL: https://di-37cf36081c144f838d858d20f3e52abe.ecs.ap-southeast-2.on.aws
+
+jobs:
+  deploy:
+    name: Build and deploy frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        working-directory: frontend/dineflow-web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/dineflow-web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload frontend build to S3
+        run: aws s3 sync dist "s3://$FRONTEND_S3_BUCKET" --delete
+
+      - name: Invalidate CloudFront cache
+        run: >
+          aws cloudfront create-invalidation
+          --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID"
+          --paths "/*"
