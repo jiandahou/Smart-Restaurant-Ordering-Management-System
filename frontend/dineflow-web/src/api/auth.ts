@@ -105,6 +105,15 @@ export type UpdateCurrentUserResponse = {
   user: AuthUser
 }
 
+export type CreateAvatarUploadUrlResponse = {
+  provider: 'S3' | string
+  uploadUrl: string
+  objectKey: string
+  avatarUrl: string
+  expiresAt: string
+  headers: Record<string, string>
+}
+
 export type UserListItem = AuthUser & {
   createdAt: string
   updatedAt: string | null
@@ -434,7 +443,7 @@ export function updateCurrentUser(payload: UpdateCurrentUserRequest) {
   })
 }
 
-export function uploadCurrentUserAvatar(file: File) {
+function uploadCurrentUserAvatarMultipart(file: File) {
   const formData = new FormData()
   formData.set('file', file)
 
@@ -442,6 +451,46 @@ export function uploadCurrentUserAvatar(file: File) {
     method: 'POST',
     body: formData,
   })
+}
+
+async function uploadCurrentUserAvatarWithPresignedUrl(file: File) {
+  const upload = await request<CreateAvatarUploadUrlResponse>('/api/auth/me/avatar/upload-url', {
+    method: 'POST',
+    body: JSON.stringify({
+      contentType: file.type,
+      fileSize: file.size,
+    }),
+  })
+  const response = await fetch(upload.uploadUrl, {
+    method: 'PUT',
+    headers: upload.headers,
+    body: file,
+  })
+
+  if (!response.ok) {
+    throw new Error(`Avatar storage upload failed with HTTP ${response.status}`)
+  }
+
+  return request<UpdateCurrentUserResponse>('/api/auth/me/avatar/complete', {
+    method: 'POST',
+    body: JSON.stringify({
+      objectKey: upload.objectKey,
+    }),
+  })
+}
+
+export async function uploadCurrentUserAvatar(file: File) {
+  try {
+    return await uploadCurrentUserAvatarWithPresignedUrl(file)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+
+    if (message.includes('Presigned avatar uploads are not enabled')) {
+      return uploadCurrentUserAvatarMultipart(file)
+    }
+
+    throw error
+  }
 }
 
 export function requestEmailChange(payload: RequestEmailChangeRequest) {
