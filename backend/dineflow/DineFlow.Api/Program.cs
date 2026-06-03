@@ -15,7 +15,6 @@ using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.HttpOverrides;
-using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
@@ -175,10 +174,6 @@ var googleCallbackPath = FirstConfigured(
     builder.Configuration["Authentication:Google:CallbackPath"],
     builder.Configuration["GOOGLE_CALLBACK_PATH"],
     "/api/auth/google/signin");
-var googlePublicCallbackUrl = FirstConfigured(
-    builder.Configuration["Authentication:Google:PublicCallbackUrl"],
-    builder.Configuration["GOOGLE_PUBLIC_CALLBACK_URL"],
-    BuildPublicGoogleCallbackUrl(builder.Configuration, googleCallbackPath));
 
 var authenticationBuilder = builder.Services
     .AddAuthentication(options =>
@@ -211,28 +206,6 @@ if (!string.IsNullOrWhiteSpace(googleClientId) && !string.IsNullOrWhiteSpace(goo
         options.CallbackPath = googleCallbackPath;
         options.SignInScheme = IdentityConstants.ExternalScheme;
         options.SaveTokens = false;
-        options.Events.OnRedirectToAuthorizationEndpoint = context =>
-        {
-            if (string.IsNullOrWhiteSpace(googlePublicCallbackUrl))
-            {
-                context.Response.Redirect(context.RedirectUri);
-                return Task.CompletedTask;
-            }
-
-            var authorizationUri = new Uri(context.RedirectUri);
-            var queryParameters = new Dictionary<string, string?>(StringComparer.Ordinal);
-
-            foreach (var parameter in QueryHelpers.ParseQuery(authorizationUri.Query))
-            {
-                queryParameters[parameter.Key] = parameter.Value.ToString();
-            }
-
-            queryParameters["redirect_uri"] = googlePublicCallbackUrl;
-
-            var authorizationBaseUri = authorizationUri.GetLeftPart(UriPartial.Path);
-            context.Response.Redirect(QueryHelpers.AddQueryString(authorizationBaseUri, queryParameters));
-            return Task.CompletedTask;
-        };
         options.Events.OnCreatingTicket = context =>
         {
             if (context.User.TryGetProperty("picture", out var picture))
@@ -371,20 +344,6 @@ app.Run();
 static string? FirstConfigured(params string?[] values)
 {
     return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
-}
-
-static string? BuildPublicGoogleCallbackUrl(IConfiguration configuration, string? googleCallbackPath)
-{
-    var frontendBaseUrl = FirstConfigured(
-        configuration["FRONTEND_BASE_URL"],
-        configuration[$"{EmailOptions.SectionName}:FrontendBaseUrl"]);
-
-    if (string.IsNullOrWhiteSpace(frontendBaseUrl) || string.IsNullOrWhiteSpace(googleCallbackPath))
-    {
-        return null;
-    }
-
-    return $"{frontendBaseUrl.TrimEnd('/')}/{googleCallbackPath.TrimStart('/')}";
 }
 
 static string[] GetConfiguredPasskeyOrigins(IConfiguration configuration, string[] configuredOrigins)
