@@ -106,6 +106,7 @@ builder.Services.AddSingleton<IAmazonS3>(serviceProvider =>
     if (!string.IsNullOrWhiteSpace(options.ServiceUrl))
     {
         config.ServiceURL = options.ServiceUrl;
+        config.UseHttp = options.ServiceUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
     }
     else
     {

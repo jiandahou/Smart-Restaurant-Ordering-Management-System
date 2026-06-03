@@ -12,6 +12,8 @@ public sealed class AvatarStorageOptions
 
     public string? ServiceUrl { get; set; }
 
+    public string? UploadBaseUrl { get; set; }
+
     public string? PublicBaseUrl { get; set; }
 
     public bool ForcePathStyle { get; set; }

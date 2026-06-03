@@ -113,6 +113,7 @@ services:
       AvatarStorage__Bucket: ${AVATAR_STORAGE_BUCKET:-dineflow-avatars-local}
       AvatarStorage__Region: ${AVATAR_STORAGE_REGION:-ap-southeast-2}
       AvatarStorage__ServiceUrl: ${AVATAR_STORAGE_SERVICE_URL:-http://minio:9000}
+      AvatarStorage__UploadBaseUrl: ${AVATAR_STORAGE_UPLOAD_BASE_URL:-http://localhost:9000}
       AvatarStorage__PublicBaseUrl: ${AVATAR_STORAGE_PUBLIC_BASE_URL:-http://localhost:9000/dineflow-avatars-local}
       AvatarStorage__ForcePathStyle: ${AVATAR_STORAGE_FORCE_PATH_STYLE:-true}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}

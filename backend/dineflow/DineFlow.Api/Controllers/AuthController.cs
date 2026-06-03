@@ -827,7 +827,21 @@ public class AuthController : ControllerBase
             Expires = expiresAt.UtcDateTime,
             ContentType = request.ContentType
         };
-        var uploadUrl = await _s3Client.GetPreSignedURLAsync(presignedRequest);
+        string uploadUrl;
+
+        try
+        {
+            uploadUrl = RewriteUploadUrlForClient(await _s3Client.GetPreSignedURLAsync(presignedRequest));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to create avatar upload URL for bucket {Bucket}.", _avatarStorageOptions.Bucket);
+
+            return StatusCode(StatusCodes.Status500InternalServerError, new
+            {
+                message = "Failed to create avatar upload URL. Check avatar storage credentials and bucket configuration."
+            });
+        }
 
         return Ok(new CreateAvatarUploadUrlResponse
         {
@@ -1681,6 +1695,25 @@ public class AuthController : ControllerBase
         }
 
         return $"https://{_avatarStorageOptions.Bucket}.s3.{_avatarStorageOptions.Region}.amazonaws.com/{objectKey}";
+    }
+
+    private string RewriteUploadUrlForClient(string uploadUrl)
+    {
+        if (string.IsNullOrWhiteSpace(_avatarStorageOptions.UploadBaseUrl) ||
+            !Uri.TryCreate(uploadUrl, UriKind.Absolute, out var generatedUri) ||
+            !Uri.TryCreate(_avatarStorageOptions.UploadBaseUrl, UriKind.Absolute, out var clientBaseUri))
+        {
+            return uploadUrl;
+        }
+
+        var builder = new UriBuilder(generatedUri)
+        {
+            Scheme = clientBaseUri.Scheme,
+            Host = clientBaseUri.Host,
+            Port = clientBaseUri.IsDefaultPort ? -1 : clientBaseUri.Port
+        };
+
+        return builder.Uri.ToString();
     }
 
     private async Task DeleteStoredAvatarAsync(string? avatarUrl, string userId, CancellationToken cancellationToken)
