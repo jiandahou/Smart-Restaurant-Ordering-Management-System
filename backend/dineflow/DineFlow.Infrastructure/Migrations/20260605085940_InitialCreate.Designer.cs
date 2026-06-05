@@ -3,17 +3,20 @@ using System;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 #nullable disable
 
-namespace DineFlow.Infrastructure.Persistence.Migrations
+namespace DineFlow.Infrastructure.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260605085940_InitialCreate")]
+    partial class InitialCreate
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -95,6 +98,8 @@ namespace DineFlow.Infrastructure.Persistence.Migrations
                         .IsUnique()
                         .HasDatabaseName("UserNameIndex");
 
+                    b.HasIndex("RestaurantId");
+
                     b.ToTable("AspNetUsers", (string)null);
                 });
 
@@ -127,6 +132,8 @@ namespace DineFlow.Infrastructure.Persistence.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("RestaurantId");
 
                     b.ToTable("MenuCategories");
                 });
@@ -200,7 +207,7 @@ namespace DineFlow.Infrastructure.Persistence.Migrations
                     b.Property<int>("OrderType")
                         .HasColumnType("integer");
 
-                    b.Property<Guid>("RestaurantId")
+                    b.Property<Guid?>("RestaurantId")
                         .HasColumnType("uuid");
 
                     b.Property<DateTime?>("ScheduledTime")
@@ -285,6 +292,46 @@ namespace DineFlow.Infrastructure.Persistence.Migrations
                     b.HasIndex("OrderId");
 
                     b.ToTable("OrderStatusHistories");
+                });
+
+            modelBuilder.Entity("DineFlow.Infrastructure.Restaurant.Restaurant", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Address")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Phone")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Timezone")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Restaurants");
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Restaurant.RestaurantTable", b =>
@@ -453,6 +500,26 @@ namespace DineFlow.Infrastructure.Persistence.Migrations
                     b.ToTable("AspNetUserTokens", (string)null);
                 });
 
+            modelBuilder.Entity("DineFlow.Infrastructure.Identity.ApplicationUser", b =>
+                {
+                    b.HasOne("DineFlow.Infrastructure.Restaurant.Restaurant", "Restaurant")
+                        .WithMany("Users")
+                        .HasForeignKey("RestaurantId");
+
+                    b.Navigation("Restaurant");
+                });
+
+            modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuCategory", b =>
+                {
+                    b.HasOne("DineFlow.Infrastructure.Restaurant.Restaurant", "Restaurant")
+                        .WithMany("MenuCategories")
+                        .HasForeignKey("RestaurantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Restaurant");
+                });
+
             modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuItem", b =>
                 {
                     b.HasOne("DineFlow.Infrastructure.Menu.MenuCategory", "Category")
@@ -553,6 +620,13 @@ namespace DineFlow.Infrastructure.Persistence.Migrations
                     b.Navigation("OrderItems");
 
                     b.Navigation("StatusHistory");
+                });
+
+            modelBuilder.Entity("DineFlow.Infrastructure.Restaurant.Restaurant", b =>
+                {
+                    b.Navigation("MenuCategories");
+
+                    b.Navigation("Users");
                 });
 #pragma warning restore 612, 618
         }

@@ -4,7 +4,7 @@ public class OrderResponse
 {
     public Guid Id { get; set; }
 
-    public Guid RestaurantId { get; set; }
+    public Guid? RestaurantId { get; set; }
 
     public Guid? TableId { get; set; }
 

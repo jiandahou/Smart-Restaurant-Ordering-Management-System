@@ -1,13 +1,10 @@
-using System;
-using System.Collections.Generic;
-
 namespace DineFlow.Infrastructure.Orders;
 
 public class Order
 {
     public Guid Id { get; set; } = Guid.NewGuid();
 
-    public Guid RestaurantId { get; set; }
+    public Guid? RestaurantId { get; set; }
 
     public Guid? TableId { get; set; }
 

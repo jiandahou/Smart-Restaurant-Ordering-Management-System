@@ -1,5 +1,4 @@
-using System;
-using System.Collections.Generic;
+using DineFlow.Infrastructure.Restaurant;
 
 namespace DineFlow.Infrastructure.Menu;
 
@@ -22,4 +21,6 @@ public class MenuCategory
     public DateTime? UpdatedAt { get; set; }
 
     public ICollection<MenuItem> MenuItems { get; set; } = [];
+
+    public Restaurant.Restaurant? Restaurant { get; set; }
 }

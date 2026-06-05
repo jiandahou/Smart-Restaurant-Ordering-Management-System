@@ -2,7 +2,7 @@ namespace DineFlow.Api.Contracts.Order;
 
 public class CreateOrderRequest
 {
-    public Guid RestaurantId { get; set; }
+    public Guid? RestaurantId { get; set; }
 
     public Guid? TableId { get; set; }
 
