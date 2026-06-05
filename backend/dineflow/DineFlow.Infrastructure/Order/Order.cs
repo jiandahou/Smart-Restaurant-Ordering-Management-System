@@ -15,6 +15,7 @@ public class Order
 
     public string OrderNumber { get; set; } = string.Empty;
 
+
     public OrderType OrderType { get; set; } = OrderType.DineIn;
 
     public OrderStatus Status { get; set; } = OrderStatus.Pending;
@@ -29,7 +30,9 @@ public class Order
 
     public DateTime? UpdatedAt { get; set; }
 
-    public ICollection<OrderItem> OrderItems { get; set; } = new List<OrderItem>();
+    public ICollection<OrderItem> OrderItems { get; set; } = [];
+
+    public ICollection<OrderStatusHistory> StatusHistory { get; set; } = [];
 }
 
 public enum OrderType

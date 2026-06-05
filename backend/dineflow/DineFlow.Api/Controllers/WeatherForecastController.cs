@@ -4,6 +4,7 @@ namespace DineFlow.Api.Controllers;
 
 [ApiController]
 [Route("[controller]")]
+// /WeatherForecast
 public class WeatherForecastController : ControllerBase
 {
     private static readonly string[] Summaries = new[]
