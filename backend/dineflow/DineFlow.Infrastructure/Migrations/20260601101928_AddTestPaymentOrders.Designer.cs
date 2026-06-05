@@ -9,11 +9,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 #nullable disable
 
-namespace DineFlow.Infrastructure.Migrations
+namespace DineFlow.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20260605085940_InitialCreate")]
-    partial class InitialCreate
+    [Migration("20260601101928_AddTestPaymentOrders")]
+    partial class AddTestPaymentOrders
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -32,6 +32,9 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.Property<int>("AccessFailedCount")
                         .HasColumnType("integer");
+
+                    b.Property<string>("AvatarUrl")
+                        .HasColumnType("text");
 
                     b.Property<string>("ConcurrencyStamp")
                         .IsConcurrencyToken()
@@ -98,91 +101,108 @@ namespace DineFlow.Infrastructure.Migrations
                         .IsUnique()
                         .HasDatabaseName("UserNameIndex");
 
-                    b.HasIndex("RestaurantId");
-
                     b.ToTable("AspNetUsers", (string)null);
                 });
 
-            modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuCategory", b =>
+            modelBuilder.Entity("DineFlow.Infrastructure.Identity.UserMfaSettings", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                    b.Property<string>("UserId")
+                        .HasColumnType("text");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<string>("Description")
-                        .HasColumnType("text");
-
-                    b.Property<int>("DisplayOrder")
-                        .HasColumnType("integer");
-
-                    b.Property<bool>("IsActive")
+                    b.Property<bool>("EmailEnabled")
                         .HasColumnType("boolean");
 
-                    b.Property<string>("Name")
+                    b.Property<string>("PreferredMethod")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("totp");
 
-                    b.Property<Guid>("RestaurantId")
-                        .HasColumnType("uuid");
+                    b.Property<bool>("RequireForLogin")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("RequireForPayment")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("RequireForSensitiveActions")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("TotpEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("TotpSecret")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
 
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.HasKey("Id");
+                    b.HasKey("UserId");
 
-                    b.HasIndex("RestaurantId");
-
-                    b.ToTable("MenuCategories");
+                    b.ToTable("UserMfaSettings");
                 });
 
-            modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuItem", b =>
+            modelBuilder.Entity("DineFlow.Infrastructure.Identity.UserPasskey", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<Guid>("CategoryId")
+                    b.Property<Guid?>("AaGuid")
                         .HasColumnType("uuid");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<string>("Description")
-                        .HasColumnType("text");
+                    b.Property<byte[]>("CredentialId")
+                        .IsRequired()
+                        .HasColumnType("bytea");
 
-                    b.Property<int>("DisplayOrder")
-                        .HasColumnType("integer");
+                    b.Property<string>("CredentialType")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
 
-                    b.Property<string>("ImageUrl")
-                        .HasColumnType("text");
+                    b.Property<string>("DeviceName")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
 
-                    b.Property<bool>("IsAvailable")
+                    b.Property<bool>("IsBackedUp")
                         .HasColumnType("boolean");
 
-                    b.Property<bool>("IsSoldOut")
-                        .HasColumnType("boolean");
+                    b.Property<DateTime?>("LastUsedAt")
+                        .HasColumnType("timestamp with time zone");
 
-                    b.Property<string>("Name")
+                    b.Property<byte[]>("PublicKey")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<long>("SignCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Transports")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<byte[]>("UserHandle")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<string>("UserId")
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<decimal>("Price")
-                        .HasColumnType("numeric");
-
-                    b.Property<Guid>("RestaurantId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
                     b.HasKey("Id");
 
-                    b.HasIndex("CategoryId");
+                    b.HasIndex("CredentialId")
+                        .IsUnique();
 
-                    b.ToTable("MenuItems");
+                    b.HasIndex("UserId");
+
+                    b.ToTable("UserPasskeys");
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Orders.Order", b =>
@@ -207,7 +227,7 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<int>("OrderType")
                         .HasColumnType("integer");
 
-                    b.Property<Guid?>("RestaurantId")
+                    b.Property<Guid>("RestaurantId")
                         .HasColumnType("uuid");
 
                     b.Property<DateTime?>("ScheduledTime")
@@ -264,108 +284,62 @@ namespace DineFlow.Infrastructure.Migrations
                     b.ToTable("OrderItems");
                 });
 
-            modelBuilder.Entity("DineFlow.Infrastructure.Orders.OrderStatusHistory", b =>
+            modelBuilder.Entity("DineFlow.Infrastructure.Payments.TestPaymentOrder", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<string>("ChangedByUserId")
-                        .HasColumnType("text");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("NewStatus")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid>("OrderId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("PreviousStatus")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ChangedByUserId");
-
-                    b.HasIndex("OrderId");
-
-                    b.ToTable("OrderStatusHistories");
-                });
-
-            modelBuilder.Entity("DineFlow.Infrastructure.Restaurant.Restaurant", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Address")
-                        .IsRequired()
-                        .HasColumnType("text");
+                    b.Property<long>("AmountCents")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Currency")
                         .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)");
 
                     b.Property<string>("Name")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasMaxLength(180)
+                        .HasColumnType("character varying(180)");
 
-                    b.Property<string>("Phone")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Timezone")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<DateTime?>("UpdatedAt")
+                    b.Property<DateTime?>("PaidAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.HasKey("Id");
-
-                    b.ToTable("Restaurants");
-                });
-
-            modelBuilder.Entity("DineFlow.Infrastructure.Restaurant.RestaurantTable", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("Capacity")
+                    b.Property<int>("Quantity")
                         .HasColumnType("integer");
 
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("QrToken")
+                    b.Property<string>("Status")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
 
-                    b.Property<Guid>("RestaurantId")
-                        .HasColumnType("uuid");
+                    b.Property<string>("StripeCheckoutSessionId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
 
-                    b.Property<string>("TableNumber")
-                        .IsRequired()
-                        .HasColumnType("text");
+                    b.Property<string>("StripePaymentIntentId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
 
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("UserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("character varying(450)");
+
                     b.HasKey("Id");
 
-                    b.ToTable("RestaurantTables");
+                    b.HasIndex("StripeCheckoutSessionId")
+                        .IsUnique();
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("TestPaymentOrders");
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole", b =>
@@ -500,35 +474,26 @@ namespace DineFlow.Infrastructure.Migrations
                     b.ToTable("AspNetUserTokens", (string)null);
                 });
 
-            modelBuilder.Entity("DineFlow.Infrastructure.Identity.ApplicationUser", b =>
+            modelBuilder.Entity("DineFlow.Infrastructure.Identity.UserMfaSettings", b =>
                 {
-                    b.HasOne("DineFlow.Infrastructure.Restaurant.Restaurant", "Restaurant")
-                        .WithMany("Users")
-                        .HasForeignKey("RestaurantId");
-
-                    b.Navigation("Restaurant");
-                });
-
-            modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuCategory", b =>
-                {
-                    b.HasOne("DineFlow.Infrastructure.Restaurant.Restaurant", "Restaurant")
-                        .WithMany("MenuCategories")
-                        .HasForeignKey("RestaurantId")
+                    b.HasOne("DineFlow.Infrastructure.Identity.ApplicationUser", "User")
+                        .WithOne()
+                        .HasForeignKey("DineFlow.Infrastructure.Identity.UserMfaSettings", "UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.Navigation("Restaurant");
+                    b.Navigation("User");
                 });
 
-            modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuItem", b =>
+            modelBuilder.Entity("DineFlow.Infrastructure.Identity.UserPasskey", b =>
                 {
-                    b.HasOne("DineFlow.Infrastructure.Menu.MenuCategory", "Category")
-                        .WithMany("MenuItems")
-                        .HasForeignKey("CategoryId")
+                    b.HasOne("DineFlow.Infrastructure.Identity.ApplicationUser", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.Navigation("Category");
+                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Orders.OrderItem", b =>
@@ -538,23 +503,6 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasForeignKey("OrderId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
-
-                    b.Navigation("Order");
-                });
-
-            modelBuilder.Entity("DineFlow.Infrastructure.Orders.OrderStatusHistory", b =>
-                {
-                    b.HasOne("DineFlow.Infrastructure.Identity.ApplicationUser", "ChangedByUser")
-                        .WithMany()
-                        .HasForeignKey("ChangedByUserId");
-
-                    b.HasOne("DineFlow.Infrastructure.Orders.Order", "Order")
-                        .WithMany("StatusHistory")
-                        .HasForeignKey("OrderId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("ChangedByUser");
 
                     b.Navigation("Order");
                 });
@@ -610,23 +558,9 @@ namespace DineFlow.Infrastructure.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuCategory", b =>
-                {
-                    b.Navigation("MenuItems");
-                });
-
             modelBuilder.Entity("DineFlow.Infrastructure.Orders.Order", b =>
                 {
                     b.Navigation("OrderItems");
-
-                    b.Navigation("StatusHistory");
-                });
-
-            modelBuilder.Entity("DineFlow.Infrastructure.Restaurant.Restaurant", b =>
-                {
-                    b.Navigation("MenuCategories");
-
-                    b.Navigation("Users");
                 });
 #pragma warning restore 612, 618
         }

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import { useState } from 'react'
 import heroImg from './assets/hero.png'
 import { OrdersPage } from './pages/OrdersPage'
@@ -118,6 +119,67 @@ function App() {
 
       {currentPage === 'orders' && <OrdersPage />}
     </div>
+=======
+import { Navigate, Route, Routes } from 'react-router-dom'
+import './App.css'
+import { AppLayout } from './layout/AppLayout'
+import {
+  AdminDashboardPage,
+  AdminMenuPage,
+  AdminReportsPage,
+  AdminRestaurantsPage,
+} from './pages/AdminPlaceholderPage'
+import { AdminOrdersPage } from './pages/AdminOrdersPage'
+import { AdminPaymentsPage } from './pages/AdminPaymentsPage'
+import { AdminUsersPage } from './pages/AdminUsersPage'
+import { ChangeEmailPage } from './pages/ChangeEmailPage'
+import { CheckEmailPage } from './pages/CheckEmailPage'
+import { ConfirmEmailPage } from './pages/ConfirmEmailPage'
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
+import { LoginPage } from './pages/LoginPage'
+import { MagicLinkLoginPage } from './pages/MagicLinkLoginPage'
+import { OAuthCallbackPage } from './pages/OAuthCallbackPage'
+import { PaymentResultPage } from './pages/PaymentResultPage'
+import { ProfilePage } from './pages/ProfilePage'
+import { RegisterCustomerPage } from './pages/RegisterCustomerPage'
+import { ResetPasswordPage } from './pages/ResetPasswordPage'
+import { ProtectedRoute } from './routes/ProtectedRoute'
+import { Toaster } from './components/ui/sonner'
+
+function App() {
+  return (
+    <>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<RegisterCustomerPage />} />
+        <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
+        <Route path="/change-email" element={<ChangeEmailPage />} />
+        <Route path="/check-email" element={<CheckEmailPage />} />
+        <Route path="/confirm-email" element={<ConfirmEmailPage />} />
+        <Route path="/magic-login" element={<MagicLinkLoginPage />} />
+        <Route path="/oauth/callback" element={<OAuthCallbackPage />} />
+        <Route path="/payment/success" element={<PaymentResultPage result="success" />} />
+        <Route path="/payment/cancelled" element={<PaymentResultPage result="cancelled" />} />
+        <Route element={<ProtectedRoute />}>
+          <Route element={<AppLayout />}>
+            <Route path="/me" element={<ProfilePage />} />
+            <Route element={<ProtectedRoute roles={['PlatformOwner', 'RestaurantOwner', 'Admin']} />}>
+              <Route path="/admin" element={<AdminDashboardPage />} />
+              <Route path="/admin/users" element={<AdminUsersPage />} />
+              <Route path="/admin/restaurants" element={<AdminRestaurantsPage />} />
+              <Route path="/admin/orders" element={<AdminOrdersPage />} />
+              <Route path="/admin/menu" element={<AdminMenuPage />} />
+              <Route path="/admin/payments" element={<AdminPaymentsPage />} />
+              <Route path="/admin/reports" element={<AdminReportsPage />} />
+            </Route>
+          </Route>
+        </Route>
+        <Route path="*" element={<Navigate to="/me" replace />} />
+      </Routes>
+      <Toaster position="top-center" richColors />
+    </>
+>>>>>>> origin/main
   )
 }
 

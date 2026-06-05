@@ -1,0 +1,4 @@
+interface:
+  display_name: "Shadcn UI"
+  short_description: "Install official shadcn components first."
+  default_prompt: "Use this skill when adding, replacing, or styling shadcn/ui components in a frontend project."

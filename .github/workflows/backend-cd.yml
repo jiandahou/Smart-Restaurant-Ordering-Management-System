@@ -1,0 +1,171 @@
+name: Backend CD
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - jianda
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-cd.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-southeast-2
+  AWS_ACCOUNT_ID: "509399637411"
+  AWS_GITHUB_ACTIONS_ROLE_ARN: arn:aws:iam::509399637411:role/DineFlowGitHubActionsDeployRole
+  ECR_BACKEND_REPOSITORY: dineflow-backend
+  ECS_CLUSTER_NAME: default
+  ECS_SERVICE_NAME: dineflow-backend-c40e
+  ECS_CONTAINER_NAME: Main
+  BACKEND_HEALTH_URL: https://di-37cf36081c144f838d858d20f3e52abe.ecs.ap-southeast-2.on.aws
+
+jobs:
+  deploy:
+    name: Build and deploy backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend image
+        id: image
+        env:
+          ECR_REGISTRY: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          image_uri="$ECR_REGISTRY/$ECR_BACKEND_REPOSITORY:$IMAGE_TAG"
+          latest_uri="$ECR_REGISTRY/$ECR_BACKEND_REPOSITORY:latest"
+
+          docker build \
+            -t "$image_uri" \
+            -t "$latest_uri" \
+            -f backend/dineflow/DineFlow.Api/Dockerfile \
+            backend/dineflow
+
+          docker push "$image_uri"
+          docker push "$latest_uri"
+
+          echo "image_uri=$image_uri" >> "$GITHUB_OUTPUT"
+
+      - name: Create updated task definition
+        id: task-definition
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.image_uri }}
+        run: |
+          current_task_definition="$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER_NAME" \
+            --services "$ECS_SERVICE_NAME" \
+            --query 'services[0].deployments[?status==`PRIMARY`].taskDefinition | [0]' \
+            --output text)"
+
+          aws ecs describe-task-definition \
+            --task-definition "$current_task_definition" \
+            --query "taskDefinition" \
+            --output json > task-definition.json
+
+          jq \
+            --arg container "$ECS_CONTAINER_NAME" \
+            --arg image "$IMAGE_URI" \
+            'del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )
+            | .containerDefinitions = (
+              .containerDefinitions
+              | map(if .name == $container then .image = $image else . end)
+            )' \
+            task-definition.json > new-task-definition.json
+
+          new_task_definition="$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-definition.json \
+            --query "taskDefinition.taskDefinitionArn" \
+            --output text)"
+
+          echo "task_definition=$new_task_definition" >> "$GITHUB_OUTPUT"
+
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER_NAME" \
+            --service "$ECS_SERVICE_NAME" \
+            --task-definition "${{ steps.task-definition.outputs.task_definition }}"
+
+      - name: Wait for ECS service stability
+        run: |
+          for i in {1..120}; do
+            rollout_state="$(aws ecs describe-services \
+              --cluster "$ECS_CLUSTER_NAME" \
+              --services "$ECS_SERVICE_NAME" \
+              --query 'services[0].deployments[?status==`PRIMARY`].rolloutState | [0]' \
+              --output text)"
+
+            running_count="$(aws ecs describe-services \
+              --cluster "$ECS_CLUSTER_NAME" \
+              --services "$ECS_SERVICE_NAME" \
+              --query 'services[0].runningCount' \
+              --output text)"
+
+            pending_count="$(aws ecs describe-services \
+              --cluster "$ECS_CLUSTER_NAME" \
+              --services "$ECS_SERVICE_NAME" \
+              --query 'services[0].pendingCount' \
+              --output text)"
+
+            echo "rollout_state=$rollout_state running=$running_count pending=$pending_count"
+
+            if [ "$rollout_state" = "COMPLETED" ] && [ "$running_count" -ge 1 ] && [ "$pending_count" = "0" ]; then
+              exit 0
+            fi
+
+            if [ "$rollout_state" = "FAILED" ]; then
+              aws ecs describe-services \
+                --cluster "$ECS_CLUSTER_NAME" \
+                --services "$ECS_SERVICE_NAME" \
+                --query 'services[0].events[0:10].message' \
+                --output text
+              exit 1
+            fi
+
+            sleep 15
+          done
+
+          aws ecs describe-services \
+            --cluster "$ECS_CLUSTER_NAME" \
+            --services "$ECS_SERVICE_NAME" \
+            --query 'services[0].events[0:10].message' \
+            --output text
+          exit 1
+
+      - name: Verify backend health
+        run: |
+          for i in {1..20}; do
+            if curl -fsS "$BACKEND_HEALTH_URL/health" && curl -fsS "$BACKEND_HEALTH_URL/health/ready"; then
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          curl -fsS "$BACKEND_HEALTH_URL/health"
+          curl -fsS "$BACKEND_HEALTH_URL/health/ready"

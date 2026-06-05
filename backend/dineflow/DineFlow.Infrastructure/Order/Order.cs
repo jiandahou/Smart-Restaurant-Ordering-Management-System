@@ -1,3 +1,7 @@
+using System;
+using System.Collections.Generic;
+using DineFlow.Infrastructure.Payments;
+
 namespace DineFlow.Infrastructure.Orders;
 
 public class Order
@@ -17,6 +21,8 @@ public class Order
 
     public OrderStatus Status { get; set; } = OrderStatus.Pending;
 
+    public PaymentStatus PaymentStatus { get; set; } = PaymentStatus.Pending;
+
     public decimal TotalAmount { get; set; }
 
     public string? CustomerNote { get; set; }
@@ -30,6 +36,8 @@ public class Order
     public ICollection<OrderItem> OrderItems { get; set; } = [];
 
     public ICollection<OrderStatusHistory> StatusHistory { get; set; } = [];
+
+    public ICollection<Payment> Payments { get; set; } = [];
 }
 
 public enum OrderType

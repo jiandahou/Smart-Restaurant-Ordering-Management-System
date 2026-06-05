@@ -1,0 +1,62 @@
+name: Docker Compose Smoke CI
+
+on:
+  pull_request:
+    paths:
+      - "backend/**"
+      - "docker-compose.yml"
+      - ".env.example"
+      - ".github/workflows/docker-compose-smoke-ci.yml"
+  push:
+    branches:
+      - main
+      - jianda
+    paths:
+      - "backend/**"
+      - "docker-compose.yml"
+      - ".env.example"
+      - ".github/workflows/docker-compose-smoke-ci.yml"
+
+jobs:
+  smoke:
+    name: Docker compose smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create CI env file
+        run: cp .env.example .env
+
+      - name: Build backend image
+        run: docker compose build backend
+
+      - name: Start backend stack
+        run: docker compose up -d postgres backend
+
+      - name: Wait for backend health
+        run: |
+          for i in {1..40}; do
+            if curl -fsS http://localhost:5000/health; then
+              exit 0
+            fi
+
+            sleep 3
+          done
+
+          docker compose ps
+          docker compose logs backend
+          exit 1
+
+      - name: Check database readiness
+        run: curl -fsS http://localhost:5000/health/ready
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v
