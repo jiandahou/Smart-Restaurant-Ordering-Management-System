@@ -19,7 +19,7 @@ env:
   AWS_GITHUB_ACTIONS_ROLE_ARN: arn:aws:iam::509399637411:role/DineFlowGitHubActionsDeployRole
   FRONTEND_S3_BUCKET: dineflow-frontend-staging-509399637411
   CLOUDFRONT_DISTRIBUTION_ID: E1X144O3LC6KZF
-  VITE_API_BASE_URL: https://di-37cf36081c144f838d858d20f3e52abe.ecs.ap-southeast-2.on.aws
+  VITE_API_BASE_URL: ""
 
 jobs:
   deploy:

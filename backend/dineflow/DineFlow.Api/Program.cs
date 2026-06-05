@@ -1,5 +1,7 @@
 using System.Text;
 using System.Security.Claims;
+using Amazon;
+using Amazon.S3;
 using DineFlow.Api.Authorization;
 using DineFlow.Application.Authorization;
 using DineFlow.Application.Authentication;
@@ -12,6 +14,7 @@ using Fido2NetLib;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
@@ -22,6 +25,15 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 builder.Services.AddMemoryCache();
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders =
+        ForwardedHeaders.XForwardedFor |
+        ForwardedHeaders.XForwardedHost |
+        ForwardedHeaders.XForwardedProto;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
 
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
@@ -77,6 +89,30 @@ builder.Services.Configure<StripeOptions>(options =>
         builder.Configuration["STRIPE_CANCEL_URL"],
         options.CancelUrl,
         $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/payment/cancelled") ?? string.Empty;
+});
+builder.Services.Configure<AvatarStorageOptions>(
+    builder.Configuration.GetSection(AvatarStorageOptions.SectionName));
+builder.Services.AddSingleton<IAmazonS3>(serviceProvider =>
+{
+    var options = serviceProvider
+        .GetRequiredService<Microsoft.Extensions.Options.IOptions<AvatarStorageOptions>>()
+        .Value;
+    var config = new AmazonS3Config
+    {
+        ForcePathStyle = options.ForcePathStyle
+    };
+
+    if (!string.IsNullOrWhiteSpace(options.ServiceUrl))
+    {
+        config.ServiceURL = options.ServiceUrl;
+        config.UseHttp = options.ServiceUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
+    }
+    else
+    {
+        config.RegionEndpoint = RegionEndpoint.GetBySystemName(options.Region);
+    }
+
+    return new AmazonS3Client(config);
 });
 builder.Services.AddSingleton<IStripeClient>(serviceProvider =>
 {
@@ -241,6 +277,8 @@ builder.Services.AddSwaggerGen(options =>
 });
 
 var app = builder.Build();
+
+app.UseForwardedHeaders();
 
 app.UseSwagger();
 app.UseSwaggerUI();

@@ -1,3 +1,5 @@
+using Amazon.S3;
+using Amazon.S3.Model;
 using DineFlow.Api.Authorization;
 using DineFlow.Api.Options;
 using DineFlow.Api.Services;
@@ -43,6 +45,8 @@ public class AuthController : ControllerBase
     private readonly IMfaLoginChallengeStore _mfaLoginChallengeStore;
     private readonly AppDbContext _dbContext;
     private readonly EmailOptions _emailOptions;
+    private readonly AvatarStorageOptions _avatarStorageOptions;
+    private readonly IAmazonS3 _s3Client;
     private readonly IWebHostEnvironment _environment;
     private readonly ILogger<AuthController> _logger;
 
@@ -57,6 +61,8 @@ public class AuthController : ControllerBase
         IMfaLoginChallengeStore mfaLoginChallengeStore,
         AppDbContext dbContext,
         IOptions<EmailOptions> emailOptions,
+        IOptions<AvatarStorageOptions> avatarStorageOptions,
+        IAmazonS3 s3Client,
         IWebHostEnvironment environment,
         ILogger<AuthController> logger)
     {
@@ -70,6 +76,8 @@ public class AuthController : ControllerBase
         _mfaLoginChallengeStore = mfaLoginChallengeStore;
         _dbContext = dbContext;
         _emailOptions = emailOptions.Value;
+        _avatarStorageOptions = avatarStorageOptions.Value;
+        _s3Client = s3Client;
         _environment = environment;
         _logger = logger;
     }
@@ -754,8 +762,207 @@ public class AuthController : ControllerBase
     }
 
     [Authorize]
+    [HttpPost("me/avatar/upload-url")]
+    public async Task<IActionResult> CreateAvatarUploadUrl(CreateAvatarUploadUrlRequest request)
+    {
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        if (string.IsNullOrWhiteSpace(currentUserId))
+        {
+            return Unauthorized(new
+            {
+                message = "Invalid token."
+            });
+        }
+
+        var user = await _userManager.FindByIdAsync(currentUserId);
+
+        if (user is null)
+        {
+            return NotFound(new
+            {
+                message = "User not found."
+            });
+        }
+
+        if (!IsS3AvatarStorageEnabled())
+        {
+            return BadRequest(new
+            {
+                message = "Presigned avatar uploads are not enabled."
+            });
+        }
+
+        if (request.FileSize <= 0)
+        {
+            return BadRequest(new
+            {
+                message = "Avatar image is required."
+            });
+        }
+
+        if (request.FileSize > MaxAvatarBytes)
+        {
+            return BadRequest(new
+            {
+                message = "Avatar image must be 2MB or smaller."
+            });
+        }
+
+        if (!AllowedAvatarExtensionsByContentType.TryGetValue(request.ContentType, out var extension))
+        {
+            return BadRequest(new
+            {
+                message = "Avatar image must be a JPG, PNG, or WebP file."
+            });
+        }
+
+        var objectKey = $"uploads/avatars/{user.Id}/{Guid.NewGuid():N}{extension}";
+        var expiresAt = DateTimeOffset.UtcNow.AddMinutes(Math.Max(1, _avatarStorageOptions.UploadUrlExpirationMinutes));
+        var presignedRequest = new GetPreSignedUrlRequest
+        {
+            BucketName = _avatarStorageOptions.Bucket,
+            Key = objectKey,
+            Verb = HttpVerb.PUT,
+            Expires = expiresAt.UtcDateTime,
+            ContentType = request.ContentType
+        };
+        string uploadUrl;
+
+        try
+        {
+            uploadUrl = RewriteUploadUrlForClient(await _s3Client.GetPreSignedURLAsync(presignedRequest));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to create avatar upload URL for bucket {Bucket}.", _avatarStorageOptions.Bucket);
+
+            return StatusCode(StatusCodes.Status500InternalServerError, new
+            {
+                message = "Failed to create avatar upload URL. Check avatar storage credentials and bucket configuration."
+            });
+        }
+
+        return Ok(new CreateAvatarUploadUrlResponse
+        {
+            Provider = "S3",
+            UploadUrl = uploadUrl,
+            ObjectKey = objectKey,
+            AvatarUrl = BuildAvatarPublicUrl(objectKey),
+            ExpiresAt = expiresAt,
+            Headers = new Dictionary<string, string>
+            {
+                ["Content-Type"] = request.ContentType
+            }
+        });
+    }
+
+    [Authorize]
+    [HttpPost("me/avatar/complete")]
+    public async Task<IActionResult> CompleteAvatarUpload(CompleteAvatarUploadRequest request, CancellationToken cancellationToken)
+    {
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        if (string.IsNullOrWhiteSpace(currentUserId))
+        {
+            return Unauthorized(new
+            {
+                message = "Invalid token."
+            });
+        }
+
+        var user = await _userManager.FindByIdAsync(currentUserId);
+
+        if (user is null)
+        {
+            return NotFound(new
+            {
+                message = "User not found."
+            });
+        }
+
+        if (!IsS3AvatarStorageEnabled())
+        {
+            return BadRequest(new
+            {
+                message = "Presigned avatar uploads are not enabled."
+            });
+        }
+
+        var objectKey = request.ObjectKey?.Trim();
+
+        if (string.IsNullOrWhiteSpace(objectKey) ||
+            !objectKey.StartsWith($"uploads/avatars/{user.Id}/", StringComparison.Ordinal))
+        {
+            return BadRequest(new
+            {
+                message = "Invalid avatar upload key."
+            });
+        }
+
+        GetObjectMetadataResponse metadata;
+
+        try
+        {
+            metadata = await _s3Client.GetObjectMetadataAsync(
+                _avatarStorageOptions.Bucket,
+                objectKey,
+                cancellationToken);
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return BadRequest(new
+            {
+                message = "Uploaded avatar was not found."
+            });
+        }
+
+        if (metadata.Headers.ContentLength <= 0 || metadata.Headers.ContentLength > MaxAvatarBytes)
+        {
+            return BadRequest(new
+            {
+                message = "Uploaded avatar is invalid."
+            });
+        }
+
+        if (!AllowedAvatarExtensionsByContentType.ContainsKey(metadata.Headers.ContentType))
+        {
+            return BadRequest(new
+            {
+                message = "Uploaded avatar image must be a JPG, PNG, or WebP file."
+            });
+        }
+
+        var previousAvatarUrl = user.AvatarUrl;
+        user.AvatarUrl = BuildAvatarPublicUrl(objectKey);
+        user.UpdatedAt = DateTime.UtcNow;
+
+        var result = await _userManager.UpdateAsync(user);
+
+        if (!result.Succeeded)
+        {
+            return BadRequest(new
+            {
+                message = "Failed to update avatar.",
+                errors = result.Errors
+            });
+        }
+
+        await DeleteStoredAvatarAsync(previousAvatarUrl, user.Id, cancellationToken);
+
+        var roles = await _userManager.GetRolesAsync(user);
+        var userPayload = await BuildUserPayloadAsync(user, roles);
+
+        return Ok(new
+        {
+            message = "Avatar updated.",
+            user = userPayload
+        });
+    }
+
+    [Authorize]
     [HttpPost("me/avatar")]
-    public async Task<IActionResult> UploadAvatar([FromForm] IFormFile? file)
+    public async Task<IActionResult> UploadAvatar([FromForm] IFormFile? file, CancellationToken cancellationToken)
     {
         var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
 
@@ -810,7 +1017,7 @@ public class AuthController : ControllerBase
 
         await using (var stream = System.IO.File.Create(filePath))
         {
-            await file.CopyToAsync(stream);
+            await file.CopyToAsync(stream, cancellationToken);
         }
 
         var previousAvatarUrl = user.AvatarUrl;
@@ -830,7 +1037,7 @@ public class AuthController : ControllerBase
             });
         }
 
-        DeleteLocalAvatar(previousAvatarUrl, webRootPath);
+        await DeleteStoredAvatarAsync(previousAvatarUrl, user.Id, cancellationToken);
 
         var roles = await _userManager.GetRolesAsync(user);
         var userPayload = await BuildUserPayloadAsync(user, roles);
@@ -1472,6 +1679,90 @@ public class AuthController : ControllerBase
         return string.IsNullOrWhiteSpace(_environment.WebRootPath)
             ? Path.Combine(AppContext.BaseDirectory, "wwwroot")
             : _environment.WebRootPath;
+    }
+
+    private bool IsS3AvatarStorageEnabled()
+    {
+        return string.Equals(_avatarStorageOptions.Provider, "S3", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(_avatarStorageOptions.Bucket);
+    }
+
+    private string BuildAvatarPublicUrl(string objectKey)
+    {
+        if (!string.IsNullOrWhiteSpace(_avatarStorageOptions.PublicBaseUrl))
+        {
+            return $"{_avatarStorageOptions.PublicBaseUrl.TrimEnd('/')}/{objectKey}";
+        }
+
+        return $"https://{_avatarStorageOptions.Bucket}.s3.{_avatarStorageOptions.Region}.amazonaws.com/{objectKey}";
+    }
+
+    private string RewriteUploadUrlForClient(string uploadUrl)
+    {
+        if (string.IsNullOrWhiteSpace(_avatarStorageOptions.UploadBaseUrl) ||
+            !Uri.TryCreate(uploadUrl, UriKind.Absolute, out var generatedUri) ||
+            !Uri.TryCreate(_avatarStorageOptions.UploadBaseUrl, UriKind.Absolute, out var clientBaseUri))
+        {
+            return uploadUrl;
+        }
+
+        var builder = new UriBuilder(generatedUri)
+        {
+            Scheme = clientBaseUri.Scheme,
+            Host = clientBaseUri.Host,
+            Port = clientBaseUri.IsDefaultPort ? -1 : clientBaseUri.Port
+        };
+
+        return builder.Uri.ToString();
+    }
+
+    private async Task DeleteStoredAvatarAsync(string? avatarUrl, string userId, CancellationToken cancellationToken)
+    {
+        DeleteLocalAvatar(avatarUrl, GetWebRootPath());
+
+        if (!TryGetOwnedS3AvatarObjectKey(avatarUrl, userId, out var objectKey))
+        {
+            return;
+        }
+
+        try
+        {
+            await _s3Client.DeleteObjectAsync(_avatarStorageOptions.Bucket, objectKey, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to delete previous S3 avatar object {ObjectKey}.", objectKey);
+        }
+    }
+
+    private bool TryGetOwnedS3AvatarObjectKey(string? avatarUrl, string userId, out string objectKey)
+    {
+        objectKey = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(avatarUrl) ||
+            string.IsNullOrWhiteSpace(_avatarStorageOptions.PublicBaseUrl))
+        {
+            return false;
+        }
+
+        var publicBaseUrl = _avatarStorageOptions.PublicBaseUrl.TrimEnd('/');
+
+        if (!avatarUrl.StartsWith($"{publicBaseUrl}/", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var candidateKey = avatarUrl[(publicBaseUrl.Length + 1)..];
+        candidateKey = Uri.UnescapeDataString(candidateKey);
+        var ownedPrefix = $"uploads/avatars/{userId}/";
+
+        if (!candidateKey.StartsWith(ownedPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        objectKey = candidateKey;
+        return true;
     }
 
     private void DeleteLocalAvatar(string? avatarUrl, string webRootPath)
