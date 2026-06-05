@@ -1,20 +1,24 @@
 using DineFlow.Infrastructure.Identity;
+using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Orders;
+using DineFlow.Infrastructure.Restaurant;
+using RestaurantEntity = DineFlow.Infrastructure.Restaurant.Restaurant;
 using DineFlow.Infrastructure.Payments;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 
 namespace DineFlow.Infrastructure.Persistence;
 
-public class AppDbContext : IdentityDbContext<ApplicationUser>
+public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbContext<ApplicationUser>(options)
 {
-    public AppDbContext(DbContextOptions<AppDbContext> options)
-        : base(options)
-    {
-    }
-
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
+    public DbSet<OrderStatusHistory> OrderStatusHistories => Set<OrderStatusHistory>();
+    public DbSet<MenuCategory> MenuCategories => Set<MenuCategory>();
+    public DbSet<MenuItem> MenuItems => Set<MenuItem>();
+    public DbSet<RestaurantTable> RestaurantTables => Set<RestaurantTable>();
+    public DbSet<RestaurantEntity> Restaurants => Set<RestaurantEntity>();
+
     public DbSet<Payment> Payments => Set<Payment>();
     public DbSet<TestPaymentOrder> TestPaymentOrders => Set<TestPaymentOrder>();
     public DbSet<UserPasskey> UserPasskeys => Set<UserPasskey>();

@@ -8,13 +8,14 @@ public class Order
 {
     public Guid Id { get; set; } = Guid.NewGuid();
 
-    public Guid RestaurantId { get; set; }
+    public Guid? RestaurantId { get; set; }
 
     public Guid? TableId { get; set; }
 
     public Guid? CustomerId { get; set; }
 
     public string OrderNumber { get; set; } = string.Empty;
+
 
     public OrderType OrderType { get; set; } = OrderType.DineIn;
 
@@ -32,9 +33,11 @@ public class Order
 
     public DateTime? UpdatedAt { get; set; }
 
-    public ICollection<OrderItem> OrderItems { get; set; } = new List<OrderItem>();
+    public ICollection<OrderItem> OrderItems { get; set; } = [];
 
-    public ICollection<Payment> Payments { get; set; } = new List<Payment>();
+    public ICollection<OrderStatusHistory> StatusHistory { get; set; } = [];
+
+    public ICollection<Payment> Payments { get; set; } = [];
 }
 
 public enum OrderType
