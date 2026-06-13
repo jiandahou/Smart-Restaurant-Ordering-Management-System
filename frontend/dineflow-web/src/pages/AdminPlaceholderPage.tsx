@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
-import { BarChart3, ClipboardList, LayoutDashboard, ListOrdered, Store, Utensils } from 'lucide-react'
+import { BarChart3, ClipboardList, LayoutDashboard, ListOrdered } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 
 type AdminPlaceholderPageProps = {
@@ -48,17 +48,6 @@ export function AdminDashboardPage() {
   )
 }
 
-export function AdminRestaurantsPage() {
-  return (
-    <AdminPlaceholderPage
-      title="Restaurant Management"
-      description="Manage restaurant profiles, ownership, and operating status."
-      icon={Store}
-      items={['Restaurant directory', 'Ownership assignment', 'Operating status', 'Location details']}
-    />
-  )
-}
-
 export function AdminOrdersPage() {
   return (
     <AdminPlaceholderPage
@@ -66,17 +55,6 @@ export function AdminOrdersPage() {
       description="Review incoming, active, and historical restaurant orders."
       icon={ClipboardList}
       items={['Live order queue', 'Order history', 'Payment state', 'Fulfillment exceptions']}
-    />
-  )
-}
-
-export function AdminMenuPage() {
-  return (
-    <AdminPlaceholderPage
-      title="Menu Management"
-      description="Create menu sections, items, pricing, and availability controls."
-      icon={Utensils}
-      items={['Menu sections', 'Menu items', 'Pricing rules', 'Availability schedule']}
     />
   )
 }
