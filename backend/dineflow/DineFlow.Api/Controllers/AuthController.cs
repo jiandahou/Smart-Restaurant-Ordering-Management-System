@@ -962,7 +962,7 @@ public class AuthController : ControllerBase
 
     [Authorize]
     [HttpPost("me/avatar")]
-    public async Task<IActionResult> UploadAvatar([FromForm] IFormFile? file, CancellationToken cancellationToken)
+    public async Task<IActionResult> UploadAvatar(IFormFile? file, CancellationToken cancellationToken)
     {
         var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
 
@@ -1624,15 +1624,8 @@ public class AuthController : ControllerBase
                 return null;
             }
 
-            var webRootPath = GetWebRootPath();
-            var avatarDirectory = Path.Combine(webRootPath, "uploads", "avatars");
-            Directory.CreateDirectory(avatarDirectory);
-
-            var fileName = $"{userId}-google-{Guid.NewGuid():N}{extension}";
-            var filePath = Path.Combine(avatarDirectory, fileName);
-
             await using var remoteStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            await using var localStream = System.IO.File.Create(filePath);
+            await using var avatarBytes = new MemoryStream();
 
             var buffer = new byte[81920];
             long totalBytes = 0;
@@ -1650,15 +1643,49 @@ public class AuthController : ControllerBase
 
                 if (totalBytes > MaxAvatarBytes)
                 {
-                    localStream.Close();
-                    System.IO.File.Delete(filePath);
                     _logger.LogWarning("Google avatar for user {UserId} exceeded the avatar size limit.", userId);
 
                     return null;
                 }
 
-                await localStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
+                await avatarBytes.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
             }
+
+            if (avatarBytes.Length == 0)
+            {
+                _logger.LogWarning("Google avatar for user {UserId} was empty.", userId);
+
+                return null;
+            }
+
+            avatarBytes.Position = 0;
+
+            if (IsS3AvatarStorageEnabled())
+            {
+                var objectKey = $"uploads/avatars/{userId}/google-{Guid.NewGuid():N}{extension}";
+                var putRequest = new PutObjectRequest
+                {
+                    BucketName = _avatarStorageOptions.Bucket,
+                    Key = objectKey,
+                    InputStream = avatarBytes,
+                    ContentType = mediaType
+                };
+                putRequest.Headers.ContentLength = avatarBytes.Length;
+
+                await _s3Client.PutObjectAsync(putRequest, cancellationToken);
+
+                return BuildAvatarPublicUrl(objectKey);
+            }
+
+            var webRootPath = GetWebRootPath();
+            var avatarDirectory = Path.Combine(webRootPath, "uploads", "avatars");
+            Directory.CreateDirectory(avatarDirectory);
+
+            var fileName = $"{userId}-google-{Guid.NewGuid():N}{extension}";
+            var filePath = Path.Combine(avatarDirectory, fileName);
+
+            await using var localStream = System.IO.File.Create(filePath);
+            await avatarBytes.CopyToAsync(localStream, cancellationToken);
 
             return $"/uploads/avatars/{fileName}";
         }
