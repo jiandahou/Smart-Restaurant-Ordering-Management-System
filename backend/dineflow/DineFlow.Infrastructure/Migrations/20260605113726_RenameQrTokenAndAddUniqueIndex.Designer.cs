@@ -3,6 +3,7 @@ using System;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace DineFlow.Infrastructure.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260605113726_RenameQrTokenAndAddUniqueIndex")]
+    partial class RenameQrTokenAndAddUniqueIndex
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -245,9 +248,6 @@ namespace DineFlow.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<string>("Allergens")
-                        .HasColumnType("text");
-
                     b.Property<Guid>("CategoryId")
                         .HasColumnType("uuid");
 
@@ -266,19 +266,7 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<bool>("IsAvailable")
                         .HasColumnType("boolean");
 
-                    b.Property<bool>("IsGlutenFree")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("IsHalal")
-                        .HasColumnType("boolean");
-
                     b.Property<bool>("IsSoldOut")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("IsVegan")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("IsVegetarian")
                         .HasColumnType("boolean");
 
                     b.Property<string>("Name")
@@ -298,105 +286,7 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.HasIndex("CategoryId");
 
-                    b.HasIndex("RestaurantId");
-
                     b.ToTable("MenuItems");
-                });
-
-            modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuItemOption", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("AdjustmentType")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("DisplayOrder")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid>("GroupId")
-                        .HasColumnType("uuid");
-
-                    b.Property<bool>("IsAvailable")
-                        .HasColumnType("boolean");
-
-                    b.Property<Guid>("MenuItemId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(120)
-                        .HasColumnType("character varying(120)");
-
-                    b.Property<decimal>("PriceAdjustment")
-                        .HasColumnType("numeric(10,2)");
-
-                    b.Property<Guid>("RestaurantId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("GroupId");
-
-                    b.HasIndex("MenuItemId");
-
-                    b.HasIndex("RestaurantId");
-
-                    b.ToTable("MenuItemOptions");
-                });
-
-            modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuItemOptionGroup", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("DisplayOrder")
-                        .HasColumnType("integer");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("IsRequired")
-                        .HasColumnType("boolean");
-
-                    b.Property<int>("MaxSelections")
-                        .HasColumnType("integer");
-
-                    b.Property<Guid>("MenuItemId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("MinSelections")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(120)
-                        .HasColumnType("character varying(120)");
-
-                    b.Property<Guid>("RestaurantId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("MenuItemId");
-
-                    b.HasIndex("RestaurantId");
-
-                    b.ToTable("MenuItemOptionGroups");
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Orders.Order", b =>
@@ -457,25 +347,14 @@ namespace DineFlow.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<string>("AllergyInfo")
-                        .HasColumnType("text");
-
-                    b.Property<decimal>("BasePriceSnapshot")
-                        .HasColumnType("numeric(10,2)");
-
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("ItemInstructions")
-                        .HasColumnType("text");
 
                     b.Property<Guid?>("MenuItemId")
                         .HasColumnType("uuid");
 
-                    b.Property<string>("MenuItemNameSnapshot")
-                        .IsRequired()
-                        .HasMaxLength(240)
-                        .HasColumnType("character varying(240)");
+                    b.Property<string>("Note")
+                        .HasColumnType("text");
 
                     b.Property<Guid>("OrderId")
                         .HasColumnType("uuid");
@@ -484,7 +363,7 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasColumnType("integer");
 
                     b.Property<decimal>("UnitPrice")
-                        .HasColumnType("numeric(10,2)");
+                        .HasColumnType("numeric");
 
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -494,41 +373,6 @@ namespace DineFlow.Infrastructure.Migrations
                     b.HasIndex("OrderId");
 
                     b.ToTable("OrderItems");
-                });
-
-            modelBuilder.Entity("DineFlow.Infrastructure.Orders.OrderItemOption", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("GroupNameSnapshot")
-                        .IsRequired()
-                        .HasMaxLength(120)
-                        .HasColumnType("character varying(120)");
-
-                    b.Property<Guid?>("MenuItemOptionId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("OptionNameSnapshot")
-                        .IsRequired()
-                        .HasMaxLength(120)
-                        .HasColumnType("character varying(120)");
-
-                    b.Property<Guid>("OrderItemId")
-                        .HasColumnType("uuid");
-
-                    b.Property<decimal>("PriceAdjustmentSnapshot")
-                        .HasColumnType("numeric(10,2)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("OrderItemId");
-
-                    b.ToTable("OrderItemOptions");
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Orders.OrderStatusHistory", b =>
@@ -943,28 +787,6 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Navigation("Category");
                 });
 
-            modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuItemOption", b =>
-                {
-                    b.HasOne("DineFlow.Infrastructure.Menu.MenuItemOptionGroup", "Group")
-                        .WithMany("Options")
-                        .HasForeignKey("GroupId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Group");
-                });
-
-            modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuItemOptionGroup", b =>
-                {
-                    b.HasOne("DineFlow.Infrastructure.Menu.MenuItem", "MenuItem")
-                        .WithMany("OptionGroups")
-                        .HasForeignKey("MenuItemId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("MenuItem");
-                });
-
             modelBuilder.Entity("DineFlow.Infrastructure.Orders.OrderItem", b =>
                 {
                     b.HasOne("DineFlow.Infrastructure.Orders.Order", "Order")
@@ -974,17 +796,6 @@ namespace DineFlow.Infrastructure.Migrations
                         .IsRequired();
 
                     b.Navigation("Order");
-                });
-
-            modelBuilder.Entity("DineFlow.Infrastructure.Orders.OrderItemOption", b =>
-                {
-                    b.HasOne("DineFlow.Infrastructure.Orders.OrderItem", "OrderItem")
-                        .WithMany("SelectedOptions")
-                        .HasForeignKey("OrderItemId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("OrderItem");
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Orders.OrderStatusHistory", b =>
@@ -1071,16 +882,6 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Navigation("MenuItems");
                 });
 
-            modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuItem", b =>
-                {
-                    b.Navigation("OptionGroups");
-                });
-
-            modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuItemOptionGroup", b =>
-                {
-                    b.Navigation("Options");
-                });
-
             modelBuilder.Entity("DineFlow.Infrastructure.Orders.Order", b =>
                 {
                     b.Navigation("OrderItems");
@@ -1088,11 +889,6 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Navigation("Payments");
 
                     b.Navigation("StatusHistory");
-                });
-
-            modelBuilder.Entity("DineFlow.Infrastructure.Orders.OrderItem", b =>
-                {
-                    b.Navigation("SelectedOptions");
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Restaurant.Restaurant", b =>

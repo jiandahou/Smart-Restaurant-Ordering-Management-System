@@ -171,6 +171,34 @@ export type CreateCheckoutSessionResponse = {
   testOrderId: string
 }
 
+export type OrderItem = {
+  id: string
+  orderId: string
+  menuItemId: string | null
+  quantity: number
+  unitPrice: number
+  totalPrice: number
+  note: string | null
+  createdAt: string
+  updatedAt: string | null
+}
+
+export type Order = {
+  id: string
+  restaurantId: string | null
+  tableId: string | null
+  customerId: string | null
+  orderNumber: string
+  orderType: number
+  status: number
+  totalAmount: number
+  customerNote: string | null
+  scheduledTime: string | null
+  createdAt: string
+  updatedAt: string | null
+  orderItems: OrderItem[]
+}
+
 export type TestPaymentOrder = {
   id: string
   userId: string | null
@@ -507,6 +535,9 @@ export function createTestCheckoutSession(payload: CreateTestCheckoutSessionRequ
 
 export function getTestPaymentOrders() {
   return request<TestPaymentOrder[]>('/api/payments/test-orders')
+}
+export function getRealOrders() {
+  return request<Order[]>('/api/order')
 }
 
 export function getPasskeys() {

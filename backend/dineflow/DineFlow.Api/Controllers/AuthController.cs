@@ -755,6 +755,8 @@ public class AuthController : ControllerBase
 
     [Authorize]
     [HttpPost("me/avatar")]
+    [Consumes("multipart/form-data")]
+    [ApiExplorerSettings(IgnoreApi = true)]
     public async Task<IActionResult> UploadAvatar([FromForm] IFormFile? file)
     {
         var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);

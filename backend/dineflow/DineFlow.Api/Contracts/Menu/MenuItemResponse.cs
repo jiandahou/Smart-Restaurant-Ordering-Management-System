@@ -12,7 +12,13 @@ public class MenuItemResponse
     public string? ImageUrl { get; set; }
     public bool IsAvailable { get; set; }
     public bool IsSoldOut { get; set; }
+    public bool IsVegetarian { get; set; }
+    public bool IsVegan { get; set; }
+    public bool IsGlutenFree { get; set; }
+    public bool IsHalal { get; set; }
+    public string? Allergens { get; set; }
     public int DisplayOrder { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime? UpdatedAt { get; set; }
+    public List<MenuOptionGroupResponse> OptionGroups { get; set; } = new();
 }

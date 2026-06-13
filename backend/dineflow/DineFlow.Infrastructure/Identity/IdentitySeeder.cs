@@ -65,11 +65,11 @@ public static class IdentitySeeder
             // ── Tables (Restaurant One) ──────────────────────────────────────
             var tables = new List<RestaurantTable>
             {
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T1", QrToken = Guid.NewGuid().ToString("N"), Capacity = 2, IsActive = true },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T2", QrToken = Guid.NewGuid().ToString("N"), Capacity = 4, IsActive = true },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T3", QrToken = Guid.NewGuid().ToString("N"), Capacity = 4, IsActive = true },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T4", QrToken = Guid.NewGuid().ToString("N"), Capacity = 6, IsActive = true },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T5", QrToken = Guid.NewGuid().ToString("N"), Capacity = 8, IsActive = true },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T1", QrCodeToken = Guid.NewGuid().ToString("N"), Capacity = 2, IsActive = true },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T2", QrCodeToken = Guid.NewGuid().ToString("N"), Capacity = 4, IsActive = true },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T3", QrCodeToken = Guid.NewGuid().ToString("N"), Capacity = 4, IsActive = true },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T4", QrCodeToken = Guid.NewGuid().ToString("N"), Capacity = 6, IsActive = true },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T5", QrCodeToken = Guid.NewGuid().ToString("N"), Capacity = 8, IsActive = true },
             };
 
             await dbContext.RestaurantTables.AddRangeAsync(tables);
@@ -119,7 +119,7 @@ public static class IdentitySeeder
                 TotalAmount = 1100, CreatedAt = DateTime.UtcNow.AddMinutes(-20)
             };
             preparingOrder.OrderItems.Add(new OrderItem { Id = Guid.NewGuid(), OrderId = preparingOrder.Id, MenuItemId = menuItems.First(m => m.Name == "Grilled Salmon").Id,  Quantity = 1, UnitPrice = 950, CreatedAt = preparingOrder.CreatedAt });
-            preparingOrder.OrderItems.Add(new OrderItem { Id = Guid.NewGuid(), OrderId = preparingOrder.Id, MenuItemId = menuItems.First(m => m.Name == "Fresh Lime Soda").Id, Quantity = 1, UnitPrice = 150, Note = "Extra ice", CreatedAt = preparingOrder.CreatedAt });
+            preparingOrder.OrderItems.Add(new OrderItem { Id = Guid.NewGuid(), OrderId = preparingOrder.Id, MenuItemId = menuItems.First(m => m.Name == "Fresh Lime Soda").Id, Quantity = 1, UnitPrice = 150, ItemInstructions = "Extra ice", CreatedAt = preparingOrder.CreatedAt });
 
             var pendingOrder = new Order
             {
