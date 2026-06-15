@@ -3,12 +3,12 @@ import './App.css'
 import { AppLayout } from './layout/AppLayout'
 import {
   AdminDashboardPage,
-  AdminMenuPage,
   AdminReportsPage,
-  AdminRestaurantsPage,
 } from './pages/AdminPlaceholderPage'
+import { AdminMenuPage } from './pages/AdminMenuPage'
 import { AdminOrdersPage } from './pages/AdminOrdersPage'
 import { AdminPaymentsPage } from './pages/AdminPaymentsPage'
+import { AdminRestaurantsPage } from './pages/AdminRestaurantsPage'
 import { AdminUsersPage } from './pages/AdminUsersPage'
 import { ChangeEmailPage } from './pages/ChangeEmailPage'
 import { CheckEmailPage } from './pages/CheckEmailPage'

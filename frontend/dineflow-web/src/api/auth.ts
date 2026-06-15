@@ -105,6 +105,15 @@ export type UpdateCurrentUserResponse = {
   user: AuthUser
 }
 
+export type CreateAvatarUploadUrlResponse = {
+  provider: 'S3' | string
+  uploadUrl: string
+  objectKey: string
+  avatarUrl: string
+  expiresAt: string
+  headers: Record<string, string>
+}
+
 export type UserListItem = AuthUser & {
   createdAt: string
   updatedAt: string | null
@@ -145,6 +154,158 @@ export type UpdateUserResponse = {
 export type DeleteUserResponse = {
   message: string
   userId: string
+}
+
+export type Restaurant = {
+  id: string
+  name: string
+  address: string
+  phone: string
+  timezone: string
+  currency: string
+  isActive: boolean
+  createdAt: string
+  updatedAt: string | null
+}
+
+export type RestaurantRequest = {
+  name: string
+  address: string
+  phone: string
+  timezone: string
+  currency: string
+  isActive: boolean
+}
+
+export type UpdateRestaurantResponse = {
+  message: string
+  restaurant: Restaurant
+}
+
+export type DeleteRestaurantResponse = {
+  message: string
+  restaurantId: string
+}
+
+export type RestaurantTable = {
+  id: string
+  restaurantId: string
+  tableNumber: string
+  qrToken: string | null
+  capacity: number
+  isActive: boolean
+  createdAt: string
+  updatedAt: string | null
+}
+
+export type UpdateRestaurantTableRequest = {
+  tableNumber: string
+  capacity: number
+  isActive: boolean
+}
+
+export type UpdateRestaurantTableResponse = {
+  message: string
+  table: RestaurantTable
+}
+
+export type CreateRestaurantTableResponse = UpdateRestaurantTableResponse
+
+export type MenuCategory = {
+  id: string
+  restaurantId: string
+  name: string
+  description: string | null
+  displayOrder: number
+  isActive: boolean
+  createdAt: string
+  updatedAt: string | null
+}
+
+export type CreateMenuCategoryRequest = {
+  restaurantId: string
+  name: string
+  description?: string | null
+  displayOrder: number
+  isActive: boolean
+}
+
+export type UpdateMenuCategoryRequest = Omit<CreateMenuCategoryRequest, 'restaurantId'>
+
+export type MenuCategoryMutationResponse = {
+  message: string
+  category: MenuCategory
+}
+
+export type DeleteMenuCategoryResponse = {
+  message: string
+  categoryId: string
+}
+
+export type MenuItem = {
+  id: string
+  restaurantId: string
+  categoryId: string
+  categoryName: string
+  name: string
+  description: string | null
+  price: number
+  imageUrl: string | null
+  isAvailable: boolean
+  isSoldOut: boolean
+  displayOrder: number
+  createdAt: string
+  updatedAt: string | null
+}
+
+export type CreateMenuItemRequest = {
+  restaurantId: string
+  categoryId: string
+  name: string
+  description?: string | null
+  price: number
+  imageUrl?: string | null
+  isAvailable: boolean
+  isSoldOut: boolean
+  displayOrder: number
+}
+
+export type UpdateMenuItemRequest = Omit<CreateMenuItemRequest, 'restaurantId'>
+
+export type MenuItemMutationResponse = {
+  message: string
+  item: MenuItem
+}
+
+export type DeleteMenuItemResponse = {
+  message: string
+  itemId: string
+}
+
+export type UpdateMenuItemAvailabilityResponse = {
+  message: string
+  itemId: string
+  isAvailable: boolean
+}
+
+export type UpdateMenuItemSoldOutResponse = {
+  message: string
+  itemId: string
+  isSoldOut: boolean
+}
+
+export type CreateMenuItemImageUploadUrlResponse = {
+  provider: 'S3' | string
+  uploadUrl: string
+  objectKey: string
+  imageUrl: string
+  expiresAt: string
+  headers: Record<string, string>
+}
+
+export type CompleteMenuItemImageUploadResponse = {
+  objectKey: string
+  imageUrl: string
 }
 
 export type SendTestEmailRequest = {
@@ -462,7 +623,7 @@ export function updateCurrentUser(payload: UpdateCurrentUserRequest) {
   })
 }
 
-export function uploadCurrentUserAvatar(file: File) {
+function uploadCurrentUserAvatarMultipart(file: File) {
   const formData = new FormData()
   formData.set('file', file)
 
@@ -470,6 +631,46 @@ export function uploadCurrentUserAvatar(file: File) {
     method: 'POST',
     body: formData,
   })
+}
+
+async function uploadCurrentUserAvatarWithPresignedUrl(file: File) {
+  const upload = await request<CreateAvatarUploadUrlResponse>('/api/auth/me/avatar/upload-url', {
+    method: 'POST',
+    body: JSON.stringify({
+      contentType: file.type,
+      fileSize: file.size,
+    }),
+  })
+  const response = await fetch(upload.uploadUrl, {
+    method: 'PUT',
+    headers: upload.headers,
+    body: file,
+  })
+
+  if (!response.ok) {
+    throw new Error(`Avatar storage upload failed with HTTP ${response.status}`)
+  }
+
+  return request<UpdateCurrentUserResponse>('/api/auth/me/avatar/complete', {
+    method: 'POST',
+    body: JSON.stringify({
+      objectKey: upload.objectKey,
+    }),
+  })
+}
+
+export async function uploadCurrentUserAvatar(file: File) {
+  try {
+    return await uploadCurrentUserAvatarWithPresignedUrl(file)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+
+    if (message.includes('Presigned avatar uploads are not enabled')) {
+      return uploadCurrentUserAvatarMultipart(file)
+    }
+
+    throw error
+  }
 }
 
 export function requestEmailChange(payload: RequestEmailChangeRequest) {
@@ -516,6 +717,149 @@ export function updateUser(userId: string, payload: UpdateUserRequest) {
 export function deleteUser(userId: string) {
   return request<DeleteUserResponse>(`/api/users/${userId}`, {
     method: 'DELETE',
+  })
+}
+
+export function getRestaurants() {
+  return request<Restaurant[]>('/api/restaurant')
+}
+
+export function createRestaurant(payload: RestaurantRequest) {
+  return request<Restaurant>('/api/restaurant', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateRestaurant(restaurantId: string, payload: RestaurantRequest) {
+  return request<UpdateRestaurantResponse>(`/api/restaurant/${restaurantId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function deleteRestaurant(restaurantId: string) {
+  return request<DeleteRestaurantResponse>(`/api/restaurant/${restaurantId}`, {
+    method: 'DELETE',
+  })
+}
+
+export function getRestaurantTables(restaurantId: string) {
+  return request<RestaurantTable[]>(`/api/table/restaurant/${restaurantId}`)
+}
+
+export function createRestaurantTable(restaurantId: string, payload: UpdateRestaurantTableRequest) {
+  return request<CreateRestaurantTableResponse>(`/api/table/restaurant/${restaurantId}`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateRestaurantTable(tableId: string, payload: UpdateRestaurantTableRequest) {
+  return request<UpdateRestaurantTableResponse>(`/api/table/${tableId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function getAdminMenuCategories(restaurantId: string) {
+  return request<MenuCategory[]>(`/api/admin/menu/categories?restaurantId=${encodeURIComponent(restaurantId)}`)
+}
+
+export function getAdminMenuCategory(categoryId: string) {
+  return request<MenuCategory>(`/api/admin/menu/categories/${categoryId}`)
+}
+
+export function createMenuCategory(payload: CreateMenuCategoryRequest) {
+  return request<MenuCategoryMutationResponse>('/api/admin/menu/categories', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateMenuCategory(categoryId: string, payload: UpdateMenuCategoryRequest) {
+  return request<MenuCategoryMutationResponse>(`/api/admin/menu/categories/${categoryId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function deleteMenuCategory(categoryId: string) {
+  return request<DeleteMenuCategoryResponse>(`/api/admin/menu/categories/${categoryId}`, {
+    method: 'DELETE',
+  })
+}
+
+export function getAdminMenuItems(restaurantId: string, categoryId?: string) {
+  const search = new URLSearchParams({ restaurantId })
+  if (categoryId) search.set('categoryId', categoryId)
+
+  return request<MenuItem[]>(`/api/admin/menu/items?${search.toString()}`)
+}
+
+export function getAdminMenuItem(itemId: string) {
+  return request<MenuItem>(`/api/admin/menu/items/${itemId}`)
+}
+
+export function createMenuItem(payload: CreateMenuItemRequest) {
+  return request<MenuItemMutationResponse>('/api/admin/menu/items', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateMenuItem(itemId: string, payload: UpdateMenuItemRequest) {
+  return request<MenuItemMutationResponse>(`/api/admin/menu/items/${itemId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateMenuItemAvailability(itemId: string, isAvailable: boolean) {
+  return request<UpdateMenuItemAvailabilityResponse>(`/api/admin/menu/items/${itemId}/availability`, {
+    method: 'PATCH',
+    body: JSON.stringify({ isAvailable }),
+  })
+}
+
+export function updateMenuItemSoldOut(itemId: string, isSoldOut: boolean) {
+  return request<UpdateMenuItemSoldOutResponse>(`/api/admin/menu/items/${itemId}/sold-out`, {
+    method: 'PATCH',
+    body: JSON.stringify({ isSoldOut }),
+  })
+}
+
+export function deleteMenuItem(itemId: string) {
+  return request<DeleteMenuItemResponse>(`/api/admin/menu/items/${itemId}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function uploadMenuItemImage(restaurantId: string, file: File) {
+  const upload = await request<CreateMenuItemImageUploadUrlResponse>('/api/admin/menu/items/image-upload-url', {
+    method: 'POST',
+    body: JSON.stringify({
+      restaurantId,
+      contentType: file.type,
+      fileSize: file.size,
+    }),
+  })
+  const uploadResponse = await fetch(upload.uploadUrl, {
+    method: 'PUT',
+    headers: upload.headers,
+    body: file,
+  })
+
+  if (!uploadResponse.ok) {
+    throw new Error(`Menu image storage upload failed with HTTP ${uploadResponse.status}`)
+  }
+
+  return request<CompleteMenuItemImageUploadResponse>('/api/admin/menu/items/image-upload-complete', {
+    method: 'POST',
+    body: JSON.stringify({
+      restaurantId,
+      objectKey: upload.objectKey,
+    }),
   })
 }
 
