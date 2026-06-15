@@ -65,11 +65,11 @@ public static class IdentitySeeder
             // ── Tables (Restaurant One) ──────────────────────────────────────
             var tables = new List<RestaurantTable>
             {
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T1", QrToken = Guid.NewGuid().ToString("N"), Capacity = 2, IsActive = true },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T2", QrToken = Guid.NewGuid().ToString("N"), Capacity = 4, IsActive = true },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T3", QrToken = Guid.NewGuid().ToString("N"), Capacity = 4, IsActive = true },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T4", QrToken = Guid.NewGuid().ToString("N"), Capacity = 6, IsActive = true },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T5", QrToken = Guid.NewGuid().ToString("N"), Capacity = 8, IsActive = true },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T1", QrToken = RestaurantTableTokenGenerator.Generate(), Capacity = 2, IsActive = true },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T2", QrToken = RestaurantTableTokenGenerator.Generate(), Capacity = 4, IsActive = true },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T3", QrToken = RestaurantTableTokenGenerator.Generate(), Capacity = 4, IsActive = true },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T4", QrToken = RestaurantTableTokenGenerator.Generate(), Capacity = 6, IsActive = true },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, TableNumber = "T5", QrToken = RestaurantTableTokenGenerator.Generate(), Capacity = 8, IsActive = true },
             };
 
             await dbContext.RestaurantTables.AddRangeAsync(tables);

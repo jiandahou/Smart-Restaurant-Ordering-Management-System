@@ -11,6 +11,7 @@ using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Persistence;
 using DineFlow.Api.Options;
 using DineFlow.Api.Services;
+using DineFlow.Api.Hubs;
 using Fido2NetLib;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -25,6 +26,7 @@ using Stripe;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
+builder.Services.AddSignalR();
 builder.Services.AddMemoryCache();
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -46,6 +48,8 @@ builder.Services.Configure<DataProtectionTokenProviderOptions>(options =>
     options.TokenLifespan = UnconfirmedCustomerCleanupService.ConfirmationWindow;
 });
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
+builder.Services.AddScoped<CartAccessService>();
+builder.Services.AddScoped<CartRealtimeNotifier>();
 builder.Services.AddSingleton<IOAuthLoginCodeStore, MemoryOAuthLoginCodeStore>();
 builder.Services.AddSingleton<IMfaLoginChallengeStore, MemoryMfaLoginChallengeStore>();
 builder.Services.AddSingleton<IMfaEmailSetupCodeStore, MemoryMfaEmailSetupCodeStore>();
@@ -333,6 +337,7 @@ app.MapGet("/health/ready", async (AppDbContext dbContext) =>
 
 Console.WriteLine("Health check endpoint registered at /health");
 app.MapControllers();
+app.MapHub<CartHub>("/api/hubs/carts");
 Console.WriteLine("Applying database migrations...");
 using (var scope = app.Services.CreateScope())
 {
