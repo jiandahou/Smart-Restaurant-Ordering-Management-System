@@ -1,5 +1,4 @@
 using System.Text;
-using System.Data;
 using System.Security.Claims;
 using Amazon;
 using Amazon.S3;
@@ -342,110 +341,10 @@ Console.WriteLine("Applying database migrations...");
 using (var scope = app.Services.CreateScope())
 {
     var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    await StampLegacyInitialMigrationAsync(dbContext);
     await dbContext.Database.MigrateAsync();
 }
 await IdentitySeeder.SeedAsync(app.Services);
 app.Run();
-
-static async Task StampLegacyInitialMigrationAsync(AppDbContext dbContext)
-{
-    const string initialMigrationId = "20260605104824_InitialCreate";
-    const string productVersion = "8.0.8";
-
-    var appliedMigrations = await dbContext.Database.GetAppliedMigrationsAsync();
-    if (appliedMigrations.Any())
-    {
-        return;
-    }
-
-    var pendingMigrations = await dbContext.Database.GetPendingMigrationsAsync();
-    if (!pendingMigrations.Contains(initialMigrationId, StringComparer.Ordinal))
-    {
-        return;
-    }
-
-    await using var connection = dbContext.Database.GetDbConnection();
-    var shouldCloseConnection = connection.State != ConnectionState.Open;
-
-    if (shouldCloseConnection)
-    {
-        await connection.OpenAsync();
-    }
-
-    try
-    {
-        var hasLegacySchema =
-            await TableExistsAsync(connection, "AspNetRoles") &&
-            await TableExistsAsync(connection, "AspNetUsers") &&
-            await TableExistsAsync(connection, "Restaurants");
-
-        if (!hasLegacySchema)
-        {
-            return;
-        }
-
-        await using var transaction = await connection.BeginTransactionAsync();
-
-        var createHistoryCommand = connection.CreateCommand();
-        createHistoryCommand.Transaction = transaction;
-        createHistoryCommand.CommandText = @"
-CREATE TABLE IF NOT EXISTS ""__EFMigrationsHistory"" (
-    ""MigrationId"" character varying(150) NOT NULL,
-    ""ProductVersion"" character varying(32) NOT NULL,
-    CONSTRAINT ""PK___EFMigrationsHistory"" PRIMARY KEY (""MigrationId"")
-);";
-        await createHistoryCommand.ExecuteNonQueryAsync();
-
-        var insertHistoryCommand = connection.CreateCommand();
-        insertHistoryCommand.Transaction = transaction;
-        insertHistoryCommand.CommandText = @"
-INSERT INTO ""__EFMigrationsHistory"" (""MigrationId"", ""ProductVersion"")
-VALUES (@migrationId, @productVersion)
-ON CONFLICT (""MigrationId"") DO NOTHING;";
-
-        var migrationIdParameter = insertHistoryCommand.CreateParameter();
-        migrationIdParameter.ParameterName = "@migrationId";
-        migrationIdParameter.Value = initialMigrationId;
-        insertHistoryCommand.Parameters.Add(migrationIdParameter);
-
-        var productVersionParameter = insertHistoryCommand.CreateParameter();
-        productVersionParameter.ParameterName = "@productVersion";
-        productVersionParameter.Value = productVersion;
-        insertHistoryCommand.Parameters.Add(productVersionParameter);
-
-        await insertHistoryCommand.ExecuteNonQueryAsync();
-        await transaction.CommitAsync();
-
-        Console.WriteLine($"Stamped legacy EF migration history with {initialMigrationId}.");
-    }
-    finally
-    {
-        if (shouldCloseConnection)
-        {
-            await connection.CloseAsync();
-        }
-    }
-}
-
-static async Task<bool> TableExistsAsync(System.Data.Common.DbConnection connection, string tableName)
-{
-    var command = connection.CreateCommand();
-    command.CommandText = @"
-SELECT EXISTS (
-    SELECT 1
-    FROM information_schema.tables
-    WHERE table_schema = 'public' AND table_name = @tableName
-);";
-
-    var tableNameParameter = command.CreateParameter();
-    tableNameParameter.ParameterName = "@tableName";
-    tableNameParameter.Value = tableName;
-    command.Parameters.Add(tableNameParameter);
-
-    var result = await command.ExecuteScalarAsync();
-    return result is bool exists && exists;
-}
 
 static string? FirstConfigured(params string?[] values)
 {
