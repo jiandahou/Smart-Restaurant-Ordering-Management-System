@@ -11,6 +11,7 @@ using DineFlow.Infrastructure.Persistence;
 using DineFlow.Api.Options;
 using DineFlow.Api.Services;
 using Fido2NetLib;
+using Microsoft.AspNetCore.Authentication.Facebook;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
@@ -216,6 +217,41 @@ if (!string.IsNullOrWhiteSpace(googleClientId) && !string.IsNullOrWhiteSpace(goo
             if (context.User.TryGetProperty("email_verified", out var emailVerified))
             {
                 context.Identity?.AddClaim(new Claim("email_verified", emailVerified.GetBoolean().ToString()));
+            }
+
+            return Task.CompletedTask;
+        };
+    });
+}
+
+var facebookAppId = FirstConfigured(
+    builder.Configuration["Authentication:Facebook:AppId"],
+    builder.Configuration["FACEBOOK_APP_ID"]);
+var facebookAppSecret = FirstConfigured(
+    builder.Configuration["Authentication:Facebook:AppSecret"],
+    builder.Configuration["FACEBOOK_APP_SECRET"]);
+var facebookCallbackPath = FirstConfigured(
+    builder.Configuration["Authentication:Facebook:CallbackPath"],
+    builder.Configuration["FACEBOOK_CALLBACK_PATH"],
+    "/api/auth/facebook/signin");
+
+if (!string.IsNullOrWhiteSpace(facebookAppId) && !string.IsNullOrWhiteSpace(facebookAppSecret))
+{
+    authenticationBuilder.AddFacebook(FacebookDefaults.AuthenticationScheme, options =>
+    {
+        options.AppId = facebookAppId;
+        options.AppSecret = facebookAppSecret;
+        options.CallbackPath = facebookCallbackPath;
+        options.SignInScheme = IdentityConstants.ExternalScheme;
+        options.SaveTokens = false;
+        options.Fields.Add("picture");
+        options.Events.OnCreatingTicket = context =>
+        {
+            if (context.User.TryGetProperty("picture", out var picture) &&
+                picture.TryGetProperty("data", out var pictureData) &&
+                pictureData.TryGetProperty("url", out var pictureUrl))
+            {
+                context.Identity?.AddClaim(new Claim("picture", pictureUrl.GetString() ?? string.Empty));
             }
 
             return Task.CompletedTask;

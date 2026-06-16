@@ -9,6 +9,7 @@ using DineFlow.Application.Authentication;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Facebook;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
@@ -637,7 +638,141 @@ public class AuthController : ControllerBase
 
         var code = _oauthLoginCodeStore.CreateCode(user.Id);
 
-        return Redirect(BuildFrontendUrl($"/oauth/callback?code={Uri.EscapeDataString(code)}"));
+        return Redirect(BuildFrontendUrl($"/oauth/callback?code={Uri.EscapeDataString(code)}&provider=google"));
+    }
+
+    [AllowAnonymous]
+    [HttpGet("facebook/login")]
+    public IActionResult FacebookLogin()
+    {
+        var redirectUrl = Url.Action(nameof(FacebookCallback), "Auth");
+        var properties = _signInManager.ConfigureExternalAuthenticationProperties(
+            FacebookDefaults.AuthenticationScheme,
+            redirectUrl);
+
+        return Challenge(properties, FacebookDefaults.AuthenticationScheme);
+    }
+
+    [AllowAnonymous]
+    [HttpGet("facebook/callback")]
+    public async Task<IActionResult> FacebookCallback(CancellationToken cancellationToken)
+    {
+        var authenticateResult = await HttpContext.AuthenticateAsync(IdentityConstants.ExternalScheme);
+
+        if (!authenticateResult.Succeeded || authenticateResult.Principal is null)
+        {
+            return Redirect(BuildFrontendUrl("/login?oauthError=facebook_failed"));
+        }
+
+        var principal = authenticateResult.Principal;
+        var providerKey = principal.FindFirstValue(ClaimTypes.NameIdentifier);
+        var email = principal.FindFirstValue(ClaimTypes.Email);
+        var fullName = principal.FindFirstValue(ClaimTypes.Name);
+        var avatarUrl = principal.FindFirstValue("picture");
+
+        if (string.IsNullOrWhiteSpace(providerKey) || string.IsNullOrWhiteSpace(email))
+        {
+            await HttpContext.SignOutAsync(IdentityConstants.ExternalScheme);
+
+            return Redirect(BuildFrontendUrl("/login?oauthError=facebook_missing_profile"));
+        }
+
+        var user = await _userManager.FindByLoginAsync(FacebookDefaults.AuthenticationScheme, providerKey);
+
+        if (user is null)
+        {
+            user = await _userManager.FindByEmailAsync(email);
+
+            if (user is null)
+            {
+                user = new ApplicationUser
+                {
+                    UserName = email,
+                    Email = email,
+                    FullName = string.IsNullOrWhiteSpace(fullName) ? email : fullName,
+                    EmailConfirmed = true,
+                    CreatedAt = DateTime.UtcNow
+                };
+
+                var createResult = await _userManager.CreateAsync(user);
+
+                if (!createResult.Succeeded)
+                {
+                    await HttpContext.SignOutAsync(IdentityConstants.ExternalScheme);
+                    _logger.LogWarning("Facebook sign-in failed to create user for {Email}: {Errors}", email, createResult.Errors);
+
+                    return Redirect(BuildFrontendUrl("/login?oauthError=facebook_create_failed"));
+                }
+
+                await _userManager.AddToRoleAsync(user, ApplicationRoles.Customer);
+
+                var localAvatarUrl = await SaveRemoteGoogleAvatarAsync(avatarUrl, user.Id, cancellationToken);
+
+                if (!string.IsNullOrWhiteSpace(localAvatarUrl))
+                {
+                    user.AvatarUrl = localAvatarUrl;
+                    user.UpdatedAt = DateTime.UtcNow;
+                    await _userManager.UpdateAsync(user);
+                }
+            }
+            else
+            {
+                var changed = false;
+
+                if (!user.EmailConfirmed)
+                {
+                    user.EmailConfirmed = true;
+                    changed = true;
+                }
+
+                if (string.IsNullOrWhiteSpace(user.AvatarUrl) && !string.IsNullOrWhiteSpace(avatarUrl))
+                {
+                    var localAvatarUrl = await SaveRemoteGoogleAvatarAsync(avatarUrl, user.Id, cancellationToken);
+
+                    if (!string.IsNullOrWhiteSpace(localAvatarUrl))
+                    {
+                        user.AvatarUrl = localAvatarUrl;
+                        changed = true;
+                    }
+                }
+
+                if (changed)
+                {
+                    user.UpdatedAt = DateTime.UtcNow;
+                    await _userManager.UpdateAsync(user);
+                }
+            }
+
+            var addLoginResult = await _userManager.AddLoginAsync(
+                user,
+                new UserLoginInfo(FacebookDefaults.AuthenticationScheme, providerKey, "Facebook"));
+
+            if (!addLoginResult.Succeeded)
+            {
+                await HttpContext.SignOutAsync(IdentityConstants.ExternalScheme);
+                _logger.LogWarning("Facebook sign-in failed to link login for {Email}: {Errors}", email, addLoginResult.Errors);
+
+                return Redirect(BuildFrontendUrl("/login?oauthError=facebook_link_failed"));
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(user.AvatarUrl) && !string.IsNullOrWhiteSpace(avatarUrl))
+        {
+            var localAvatarUrl = await SaveRemoteGoogleAvatarAsync(avatarUrl, user.Id, cancellationToken);
+
+            if (!string.IsNullOrWhiteSpace(localAvatarUrl))
+            {
+                user.AvatarUrl = localAvatarUrl;
+                user.UpdatedAt = DateTime.UtcNow;
+                await _userManager.UpdateAsync(user);
+            }
+        }
+
+        await HttpContext.SignOutAsync(IdentityConstants.ExternalScheme);
+
+        var code = _oauthLoginCodeStore.CreateCode(user.Id);
+
+        return Redirect(BuildFrontendUrl($"/oauth/callback?code={Uri.EscapeDataString(code)}&provider=facebook"));
     }
 
     [AllowAnonymous]
@@ -662,7 +797,7 @@ public class AuthController : ControllerBase
             });
         }
 
-        return await BuildAuthenticatedResponseAsync(user, "Google sign-in successful.");
+        return await BuildAuthenticatedResponseAsync(user, "Sign-in successful.");
     }
 
     [Authorize]
