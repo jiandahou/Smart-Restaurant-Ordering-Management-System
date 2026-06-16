@@ -36,7 +36,7 @@ public class TableController : ControllerBase
             return BadRequest(new { message = "QR token is required." });
 
         var table = await _dbContext.RestaurantTables
-            .FirstOrDefaultAsync(t => t.QrCodeToken == token && t.IsActive);
+            .FirstOrDefaultAsync(t => t.QrToken == token && t.IsActive);
 
         if (table is null)
             return NotFound(new { message = "Table not found or QR code is invalid." });

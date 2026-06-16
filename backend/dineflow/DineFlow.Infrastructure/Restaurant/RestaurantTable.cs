@@ -10,7 +10,7 @@ public class RestaurantTable
 
     public string TableNumber { get; set; } = string.Empty;
 
-    public string QrCodeToken { get; set; } = string.Empty;
+    public string QrToken { get; set; } = string.Empty;
 
     public int Capacity { get; set; }
 

@@ -65,7 +65,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         builder.Entity<RestaurantTable>(entity =>
         {
             entity.HasKey(t => t.Id);
-            entity.HasIndex(t => t.QrCodeToken).IsUnique();
+            entity.HasIndex(t => t.QrToken).IsUnique();
             entity.HasIndex(t => t.RestaurantId);
         });
 
