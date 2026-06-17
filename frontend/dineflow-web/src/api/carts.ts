@@ -155,6 +155,22 @@ export async function checkoutCart(cartId: string, participantToken: string) {
   )
 }
 
+export type CreatePublicPaymentSessionResponse = {
+  message: string
+  sessionId: string
+  checkoutUrl: string
+  orderId: string
+  paymentId: string
+}
+
+export async function createPublicPaymentSession(cartId: string, participantToken: string) {
+  return cartRequest<CreatePublicPaymentSessionResponse>(
+    `/api/public/carts/${cartId}/payment-session`,
+    { method: 'POST' },
+    participantToken,
+  )
+}
+
 async function cartRequest<T>(
   path: string,
   options: RequestInit,

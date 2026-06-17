@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
@@ -235,6 +235,8 @@ export function AdminOrdersPage() {
     direction: 'desc',
   })
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null)
+  const tableWrapRef = useRef<HTMLDivElement | null>(null)
+  const [tableViewportWidth, setTableViewportWidth] = useState<number | null>(null)
 
   const restaurantOptions = useMemo(() => {
     return Array.from(
@@ -335,6 +337,29 @@ export function AdminOrdersPage() {
 
   useEffect(() => {
     void loadOrders()
+  }, [])
+
+  useEffect(() => {
+    const element = tableWrapRef.current
+
+    if (!element) {
+      return undefined
+    }
+
+    const updateWidth = () => {
+      setTableViewportWidth(element.clientWidth)
+    }
+
+    updateWidth()
+
+    const resizeObserver = new ResizeObserver(updateWidth)
+    resizeObserver.observe(element)
+    window.addEventListener('resize', updateWidth)
+
+    return () => {
+      resizeObserver.disconnect()
+      window.removeEventListener('resize', updateWidth)
+    }
   }, [])
 
   const updateSort = (key: SortKey) => {
@@ -466,7 +491,7 @@ export function AdminOrdersPage() {
             </Button>
           </div>
 
-          <div className="table-wrap">
+          <div className="table-wrap" ref={tableWrapRef}>
             <table className="data-table payment-orders-table">
               <thead>
                 <tr>
@@ -593,9 +618,13 @@ export function AdminOrdersPage() {
                         <td>{formatDate(order.createdAt)}</td>
                       </tr>
                       {isExpanded && (
-                        <tr key={`${order.id}-details`} className="order-detail-row">
+                        <tr className="order-detail-row">
                           <td colSpan={8}>
-                            <div className="order-detail-panel">
+                            <div
+                              className="order-detail-panel"
+                              style={tableViewportWidth ? { width: `${tableViewportWidth}px` } : undefined}
+                              aria-live="polite"
+                            >
                               <section className="order-detail-section order-detail-section-wide">
                                 <div className="order-detail-heading">
                                   <ReceiptText size={16} />

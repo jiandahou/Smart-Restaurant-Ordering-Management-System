@@ -486,7 +486,17 @@ export function AdminPaymentsPage() {
           </div>
 
           <div className="table-wrap">
-            <table className="data-table payment-orders-table">
+            <table className="data-table payment-orders-table admin-payments-table">
+              <colgroup>
+                <col className="payment-col-order" />
+                <col className="payment-col-restaurant" />
+                <col className="payment-col-status" />
+                <col className="payment-col-payment" />
+                <col className="payment-col-amount" />
+                <col className="payment-col-latest" />
+                <col className="payment-col-created" />
+                <col className="payment-col-action" />
+              </colgroup>
               <thead>
                 <tr>
                   <th>
@@ -589,16 +599,17 @@ export function AdminPaymentsPage() {
                         </span>
                       </td>
                       <td>{formatDate(order.createdAt)}</td>
-                      <td>
+                      <td className="payment-action-cell">
                         {payable ? (
                           <Button
                             type="button"
                             size="sm"
+                            className="payment-checkout-button"
                             onClick={() => handleCheckout(order)}
                             disabled={loading || submittingOrderId !== null}
                           >
                             <ExternalLink size={16} />
-                            {submitting ? 'Opening' : 'Open checkout'}
+                            {submitting ? 'Opening' : 'Checkout'}
                           </Button>
                         ) : (
                           <span className="muted-action">

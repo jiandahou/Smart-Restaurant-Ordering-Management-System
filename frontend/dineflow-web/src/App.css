@@ -383,6 +383,16 @@
   border-color: var(--danger-border);
 }
 
+.spinner {
+  animation: ui-spin 0.85s linear infinite;
+}
+
+@keyframes ui-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .admin-grid {
   display: grid;
   grid-template-columns: minmax(320px, 0.95fr) minmax(280px, 0.7fr);
@@ -451,6 +461,46 @@
 
 .create-user-dialog {
   max-width: min(560px, calc(100% - 32px));
+}
+
+.restaurant-combobox-trigger {
+  width: 100%;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.restaurant-combobox-trigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.restaurant-combobox-content {
+  width: min(640px, calc(100vw - 32px));
+  padding: 0;
+}
+
+.restaurant-combobox-option {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.restaurant-combobox-option strong,
+.restaurant-combobox-option span,
+.restaurant-combobox-option code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.restaurant-combobox-option span,
+.restaurant-combobox-option code {
+  color: var(--muted-foreground);
+  font-size: 12px;
 }
 
 .restaurant-dialog {
@@ -1937,6 +1987,61 @@
   min-width: 1080px;
 }
 
+.admin-payments-table {
+  min-width: 1400px;
+  table-layout: fixed;
+}
+
+.admin-payments-table td {
+  vertical-align: middle;
+}
+
+.payment-col-order {
+  width: 136px;
+}
+
+.payment-col-restaurant {
+  width: 210px;
+}
+
+.payment-col-status {
+  width: 150px;
+}
+
+.payment-col-payment {
+  width: 190px;
+}
+
+.payment-col-amount {
+  width: 160px;
+}
+
+.payment-col-latest {
+  width: 360px;
+}
+
+.payment-col-created {
+  width: 170px;
+}
+
+.payment-col-action {
+  width: 150px;
+}
+
+.admin-payments-table th:last-child,
+.admin-payments-table td:last-child {
+  text-align: right;
+}
+
+.payment-action-cell {
+  white-space: nowrap;
+}
+
+.payment-checkout-button {
+  width: 124px;
+  justify-content: center;
+}
+
 .expandable-table-row {
   cursor: pointer;
 }
@@ -1949,25 +2054,31 @@
   background: color-mix(in srgb, var(--subtle) 72%, transparent);
 }
 
+.order-detail-row td {
+  padding: 0;
+  background: color-mix(in srgb, var(--subtle) 48%, transparent);
+}
+
 .row-expand-button {
   width: 26px;
   height: 26px;
   margin: -4px 0;
 }
 
-.order-detail-row td {
-  padding: 0;
-  background: color-mix(in srgb, var(--subtle) 48%, transparent);
-}
-
 .order-detail-panel {
   display: grid;
-  grid-template-columns: minmax(320px, 0.95fr) minmax(360px, 1.05fr);
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
   gap: 12px;
+  box-sizing: border-box;
+  max-width: 100%;
+  position: sticky;
+  left: 0;
   padding: 12px;
 }
 
 .order-detail-section {
+  box-sizing: border-box;
+  width: 100%;
   min-width: 0;
   padding: 12px;
   border: 1px solid var(--border);
@@ -2041,6 +2152,7 @@
   grid-template-columns: 104px minmax(0, 1fr);
   gap: 8px 12px;
   align-items: start;
+  min-width: 0;
 }
 
 .order-payment-grid span {
@@ -2061,6 +2173,32 @@
   border-radius: 6px;
   color: var(--danger);
   background: var(--danger-bg);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 1180px) {
+  .order-detail-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .order-item-line {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .order-item-line > strong {
+    white-space: normal;
+  }
+
+  .order-payment-grid {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .order-payment-grid span {
+    margin-top: 6px;
+  }
 }
 
 .admin-orders-tools {
@@ -2267,11 +2405,10 @@
 
   .order-detail-panel {
     grid-template-columns: 1fr;
-    min-width: 720px;
   }
 
   .order-payment-grid {
-    grid-template-columns: 104px minmax(0, 1fr);
+    grid-template-columns: 1fr;
   }
 
   .restaurant-directory-tools,

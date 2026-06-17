@@ -1,24 +1,34 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   AlertCircle,
+  ArrowRight,
   ChefHat,
+  ChevronDown,
+  ChevronUp,
   Loader2,
+  Minus,
   MapPin,
   MinusCircle,
   Plus,
   Search,
   ShoppingBag,
   Store,
+  Trash2,
   Utensils,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   addCartItem,
+  checkoutCart,
+  deleteCartItem,
   getCart,
   joinCart,
+  updateCartItem,
   type Cart,
+  type CartItem,
 } from '@/api/carts'
+import { type CheckoutNavigationState } from '@/pages/CheckoutPage'
 import {
   getPublicRestaurantMenu,
   getPublicRestaurantOrderingContext,
@@ -33,7 +43,22 @@ import { createCartRealtimeClient, type CartRealtimeClient } from '@/realtime/ca
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
+  Drawer,
+  DrawerContent,
+  DrawerDescription,
+  DrawerHeader,
+  DrawerTitle,
+} from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 
 type StoredCartSession = {
@@ -47,13 +72,21 @@ type CustomerMenuState =
   | { status: 'error'; title: string; message: string }
 
 const cartSessionPrefix = 'dineflow.customer-cart'
+const itemNoteMaxLength = 180
 
 export function CustomerMenuPage() {
   const { restaurantId, qrToken } = useParams()
+  const navigate = useNavigate()
   const [state, setState] = useState<CustomerMenuState>({ status: 'loading' })
   const [search, setSearch] = useState('')
   const [activeCategoryId, setActiveCategoryId] = useState<string | 'all'>('all')
   const [addingItemId, setAddingItemId] = useState<string | null>(null)
+  const [cartOpen, setCartOpen] = useState(false)
+  const [cartActionItemId, setCartActionItemId] = useState<string | null>(null)
+  const [checkingOut, setCheckingOut] = useState(false)
+  const [selectedItem, setSelectedItem] = useState<PublicMenuItem | null>(null)
+  const [selectedItemQuantity, setSelectedItemQuantity] = useState(1)
+  const [selectedItemNote, setSelectedItemNote] = useState('')
   const realtimeClientRef = useRef<CartRealtimeClient | null>(null)
 
   useEffect(() => {
@@ -243,26 +276,125 @@ export function CustomerMenuPage() {
       ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
-  const addItem = async (item: PublicMenuItem) => {
+  const openItemDetail = (item: PublicMenuItem) => {
+    setSelectedItem(item)
+    setSelectedItemQuantity(1)
+    setSelectedItemNote('')
+  }
+
+  const closeItemDetail = () => {
+    if (!addingItemId) {
+      setSelectedItem(null)
+      setSelectedItemQuantity(1)
+      setSelectedItemNote('')
+    }
+  }
+
+  const addItem = async (item: PublicMenuItem, quantity = 1, note = '') => {
     if (item.isSoldOut || !item.isAvailable || addingItemId) {
-      return
+      return false
     }
 
     setAddingItemId(item.id)
+    const normalizedNote = note.trim()
 
     try {
       const updatedCart = await addCartItem(cart.id, participantToken, {
         menuItemId: item.id,
-        quantity: 1,
+        quantity,
+        ...(normalizedNote ? { note: normalizedNote } : {}),
       })
       setState((current) =>
         current.status === 'ready' ? { ...current, cart: updatedCart } : current,
       )
       toast.success(`${item.name} added to cart`)
+      return true
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not add item')
+      return false
     } finally {
       setAddingItemId(null)
+    }
+  }
+
+  const addSelectedItem = async () => {
+    if (!selectedItem) {
+      return
+    }
+
+    const added = await addItem(selectedItem, selectedItemQuantity, selectedItemNote)
+
+    if (added) {
+      closeItemDetail()
+    }
+  }
+
+  const updateCartLineQuantity = async (item: CartItem, nextQuantity: number) => {
+    if (cart.status !== 'Active' || cartActionItemId) {
+      return
+    }
+
+    if (nextQuantity < 1) {
+      return
+    }
+
+    setCartActionItemId(item.id)
+
+    try {
+      const updatedCart = await updateCartItem(cart.id, item.id, participantToken, {
+        quantity: nextQuantity,
+        ...(item.note ? { note: item.note } : {}),
+      })
+
+      setState((current) =>
+        current.status === 'ready' ? { ...current, cart: updatedCart } : current,
+      )
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not update cart')
+    } finally {
+      setCartActionItemId(null)
+    }
+  }
+
+  const removeCartLine = async (item: CartItem) => {
+    if (cart.status !== 'Active' || cartActionItemId) {
+      return
+    }
+
+    setCartActionItemId(item.id)
+
+    try {
+      const updatedCart = await deleteCartItem(cart.id, item.id, participantToken)
+
+      setState((current) =>
+        current.status === 'ready' ? { ...current, cart: updatedCart } : current,
+      )
+      toast.success(`${item.name} removed from cart`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not remove item')
+    } finally {
+      setCartActionItemId(null)
+    }
+  }
+
+  const handleCheckout = async () => {
+    if (checkingOut) return
+    setCheckingOut(true)
+    try {
+      const result = await checkoutCart(cart.id, participantToken)
+      navigate('/checkout', {
+        state: {
+          order: result.order,
+          cartId: cart.id,
+          participantToken,
+          currency: context.restaurant.currency,
+          restaurantName: context.restaurant.name,
+          tableNumber: context.table?.tableNumber ?? null,
+        } satisfies CheckoutNavigationState,
+      })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not start checkout')
+      setCheckingOut(false)
     }
   }
 
@@ -297,7 +429,7 @@ export function CustomerMenuPage() {
           </div>
         </header>
 
-        <div className="grid grid-cols-[64px_minmax(0,1fr)] gap-3 sm:grid-cols-[180px_minmax(0,1fr)] lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-5">
+        <div className="grid grid-cols-[112px_minmax(0,1fr)] gap-2 sm:grid-cols-[180px_minmax(0,1fr)] sm:gap-3 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-5">
           <CategorySidebar
             categories={categorySummaries}
             activeCategoryId={activeCategoryId}
@@ -334,8 +466,7 @@ export function CustomerMenuPage() {
                     key={category.id}
                     category={category}
                     currencyFormatter={currencyFormatter}
-                    addingItemId={addingItemId}
-                    onAddItem={addItem}
+                    onOpenItem={openItemDetail}
                   />
                 ))}
               </div>
@@ -347,7 +478,25 @@ export function CustomerMenuPage() {
       <CartSummaryBar
         cart={cart}
         currencyFormatter={currencyFormatter}
-        onClick={() => toast.info('Cart page is coming next.')}
+        open={cartOpen}
+        updatingItemId={cartActionItemId}
+        isCheckingOut={checkingOut}
+        onOpenChange={setCartOpen}
+        onQuantityChange={updateCartLineQuantity}
+        onRemoveItem={removeCartLine}
+        onCheckout={() => void handleCheckout()}
+      />
+
+      <ItemDetailOverlay
+        item={selectedItem}
+        quantity={selectedItemQuantity}
+        note={selectedItemNote}
+        currencyFormatter={currencyFormatter}
+        isAdding={selectedItem ? addingItemId === selectedItem.id : false}
+        onClose={closeItemDetail}
+        onQuantityChange={setSelectedItemQuantity}
+        onNoteChange={setSelectedItemNote}
+        onAddToCart={addSelectedItem}
       />
     </main>
   )
@@ -439,15 +588,14 @@ function CategorySidebar({
             title="All"
             aria-label="All categories"
             className={cn(
-              'flex min-h-11 w-full items-center justify-center gap-2 rounded-md px-1.5 text-sm font-medium transition-colors sm:justify-between sm:px-3',
+              'flex min-h-11 w-full items-center justify-start gap-2 rounded-md px-3 text-sm font-medium transition-colors sm:justify-between',
               activeCategoryId === 'all'
                 ? 'bg-primary text-primary-foreground'
                 : 'text-muted-foreground hover:bg-muted hover:text-foreground',
             )}
             onClick={() => onSelect('all')}
           >
-            <span className="hidden truncate sm:inline">All</span>
-            <span className="text-sm font-semibold sm:hidden">All</span>
+            <span className="truncate">All</span>
             <Badge
               variant={activeCategoryId === 'all' ? 'secondary' : 'outline'}
               className="hidden shrink-0 sm:inline-flex"
@@ -464,18 +612,15 @@ function CategorySidebar({
                 title={category.name}
                 aria-label={category.name}
                 className={cn(
-                  'flex min-h-11 w-full items-center justify-center gap-2 rounded-md px-1.5 text-sm font-medium transition-colors sm:justify-between sm:px-3',
+                  'flex min-h-12 w-full items-center justify-start gap-2 rounded-md px-3 text-sm font-medium transition-colors sm:min-h-11 sm:justify-between',
                   activeCategoryId === category.id
                     ? 'bg-primary text-primary-foreground'
                     : 'text-muted-foreground hover:bg-muted hover:text-foreground',
                 )}
                 onClick={() => onSelect(category.id)}
               >
-                <span className="hidden line-clamp-2 text-center leading-tight sm:block sm:truncate sm:text-left">
+                <span className="line-clamp-2 min-w-0 text-left text-[13px] leading-tight sm:truncate sm:text-sm">
                   {category.name}
-                </span>
-                <span className="text-sm font-semibold uppercase sm:hidden">
-                  {getCategoryShortLabel(category.name)}
                 </span>
                 <Badge
                   variant={activeCategoryId === category.id ? 'secondary' : 'outline'}
@@ -495,13 +640,11 @@ function CategorySidebar({
 function MenuCategorySection({
   category,
   currencyFormatter,
-  addingItemId,
-  onAddItem,
+  onOpenItem,
 }: {
   category: PublicMenuCategory
   currencyFormatter: Intl.NumberFormat
-  addingItemId: string | null
-  onAddItem: (item: PublicMenuItem) => void
+  onOpenItem: (item: PublicMenuItem) => void
 }) {
   return (
     <section id={getCategorySectionId(category.id)} className="scroll-mt-20 space-y-3">
@@ -520,12 +663,21 @@ function MenuCategorySection({
           return (
             <Card
               key={item.id}
+              role="button"
+              tabIndex={0}
               className={cn(
-                'rounded-lg py-0',
+                'rounded-lg py-0 transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                 disabled && 'bg-muted/35 text-muted-foreground',
               )}
+              onClick={() => onOpenItem(item)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  onOpenItem(item)
+                }
+              }}
             >
-              <CardContent className="grid gap-3 p-3 lg:grid-cols-[112px_minmax(0,1fr)]">
+              <CardContent className="grid gap-2 p-2 sm:gap-3 sm:p-3 lg:grid-cols-[112px_minmax(0,1fr)]">
                 <div className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted lg:aspect-square">
                   {imageUrl ? (
                     <img
@@ -570,13 +722,14 @@ function MenuCategorySection({
                       type="button"
                       size="sm"
                       variant={disabled ? 'secondary' : 'default'}
-                      disabled={disabled || addingItemId === item.id}
-                      className="h-9 min-w-24"
-                      onClick={() => onAddItem(item)}
+                      disabled={disabled}
+                      className="h-9 min-w-20 px-3 sm:min-w-24"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onOpenItem(item)
+                      }}
                     >
-                      {addingItemId === item.id ? (
-                        <Loader2 className="size-4 animate-spin" />
-                      ) : disabled ? (
+                      {disabled ? (
                         <MinusCircle className="size-4" />
                       ) : (
                         <Plus className="size-4" />
@@ -594,33 +747,450 @@ function MenuCategorySection({
   )
 }
 
+function ItemDetailOverlay({
+  item,
+  quantity,
+  note,
+  currencyFormatter,
+  isAdding,
+  onClose,
+  onQuantityChange,
+  onNoteChange,
+  onAddToCart,
+}: {
+  item: PublicMenuItem | null
+  quantity: number
+  note: string
+  currencyFormatter: Intl.NumberFormat
+  isAdding: boolean
+  onClose: () => void
+  onQuantityChange: (quantity: number) => void
+  onNoteChange: (note: string) => void
+  onAddToCart: () => Promise<void> | void
+}) {
+  const isMobile = useIsMobile()
+
+  if (!item) {
+    return null
+  }
+
+  const handleOpenChange = (open: boolean) => {
+    if (!open) {
+      onClose()
+    }
+  }
+
+  const description = item.isSoldOut || !item.isAvailable
+    ? 'This item is currently unavailable.'
+    : 'Choose quantity and add optional item notes.'
+
+  if (isMobile) {
+    return (
+      <Drawer open onOpenChange={handleOpenChange}>
+        <DrawerContent className="max-h-[88svh]">
+          <DrawerHeader className="text-left">
+            <DrawerTitle className="text-xl leading-tight">{item.name}</DrawerTitle>
+            <DrawerDescription>{description}</DrawerDescription>
+          </DrawerHeader>
+          <ItemDetailContent
+            item={item}
+            quantity={quantity}
+            note={note}
+            currencyFormatter={currencyFormatter}
+            isAdding={isAdding}
+            onQuantityChange={onQuantityChange}
+            onNoteChange={onNoteChange}
+            onAddToCart={onAddToCart}
+            className="min-h-0 overflow-y-auto px-4 pb-4"
+          />
+        </DrawerContent>
+      </Drawer>
+    )
+  }
+
+  return (
+    <Dialog open onOpenChange={handleOpenChange}>
+      <DialogContent className="max-h-[90svh] overflow-hidden p-0 sm:max-w-2xl">
+        <DialogHeader className="px-5 pt-5 pr-12">
+          <DialogTitle className="text-xl leading-tight">{item.name}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <ItemDetailContent
+          item={item}
+          quantity={quantity}
+          note={note}
+          currencyFormatter={currencyFormatter}
+          isAdding={isAdding}
+          onQuantityChange={onQuantityChange}
+          onNoteChange={onNoteChange}
+          onAddToCart={onAddToCart}
+          className="max-h-[calc(90svh-5.5rem)] overflow-y-auto px-5 pb-5"
+        />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ItemDetailContent({
+  item,
+  quantity,
+  note,
+  currencyFormatter,
+  isAdding,
+  onQuantityChange,
+  onNoteChange,
+  onAddToCart,
+  className,
+}: {
+  item: PublicMenuItem
+  quantity: number
+  note: string
+  currencyFormatter: Intl.NumberFormat
+  isAdding: boolean
+  onQuantityChange: (quantity: number) => void
+  onNoteChange: (note: string) => void
+  onAddToCart: () => Promise<void> | void
+  className?: string
+}) {
+  const disabled = item.isSoldOut || !item.isAvailable
+  const imageUrl = resolvePublicAssetUrl(item.imageUrl)
+  const lineTotal = item.price * quantity
+
+  return (
+    <div className={cn('space-y-5', className)}>
+      <div className="grid gap-4 sm:grid-cols-[220px_minmax(0,1fr)]">
+        <div className="relative aspect-[4/3] overflow-hidden rounded-lg border bg-muted sm:aspect-square">
+          {imageUrl ? (
+            <img
+              src={imageUrl}
+              alt=""
+              className={cn('size-full object-contain p-3', disabled && 'grayscale')}
+            />
+          ) : (
+            <div className="flex size-full items-center justify-center">
+              <Store className="size-10 text-muted-foreground" />
+            </div>
+          )}
+          {item.isSoldOut ? (
+            <Badge className="absolute left-3 top-3" variant="destructive">
+              Sold out
+            </Badge>
+          ) : null}
+          {!item.isAvailable && !item.isSoldOut ? (
+            <Badge className="absolute left-3 top-3" variant="secondary">
+              Unavailable
+            </Badge>
+          ) : null}
+        </div>
+
+        <div className="min-w-0 space-y-4">
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-2xl font-semibold">{currencyFormatter.format(item.price)}</p>
+              <Badge variant={disabled ? 'secondary' : 'outline'}>
+                {disabled ? 'Not orderable' : 'Available'}
+              </Badge>
+            </div>
+            {item.description ? (
+              <p className="text-sm leading-6 text-muted-foreground">{item.description}</p>
+            ) : (
+              <p className="text-sm text-muted-foreground">No description provided.</p>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-sm font-medium">Quantity</p>
+            <div className="flex w-fit items-center gap-2 rounded-lg border bg-muted/20 p-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Decrease quantity"
+                className="size-9"
+                disabled={quantity <= 1 || isAdding}
+                onClick={() => onQuantityChange(Math.max(1, quantity - 1))}
+              >
+                <Minus className="size-4" />
+              </Button>
+              <span className="w-10 text-center text-base font-semibold">{quantity}</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Increase quantity"
+                className="size-9"
+                disabled={isAdding}
+                onClick={() => onQuantityChange(quantity + 1)}
+              >
+                <Plus className="size-4" />
+              </Button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <label className="text-sm font-medium" htmlFor="customer-item-note">
+                Item note
+              </label>
+              <span className="text-xs text-muted-foreground">
+                {note.length}/{itemNoteMaxLength}
+              </span>
+            </div>
+            <Textarea
+              id="customer-item-note"
+              value={note}
+              maxLength={itemNoteMaxLength}
+              rows={3}
+              placeholder="Less spicy, no onion, sauce on the side..."
+              disabled={isAdding || disabled}
+              onChange={(event) => onNoteChange(event.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="sticky bottom-0 -mx-4 border-t bg-popover/95 px-4 pb-1 pt-4 backdrop-blur sm:static sm:mx-0 sm:bg-transparent sm:px-0 sm:pb-0">
+        <Button
+          type="button"
+          className="h-12 w-full rounded-lg text-base"
+          disabled={disabled || isAdding}
+          onClick={() => void onAddToCart()}
+        >
+          {isAdding ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : disabled ? (
+            <MinusCircle className="size-4" />
+          ) : (
+            <ShoppingBag className="size-4" />
+          )}
+          {disabled ? 'Unavailable' : `Add ${currencyFormatter.format(lineTotal)}`}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function CartSummaryBar({
   cart,
   currencyFormatter,
-  onClick,
+  open,
+  updatingItemId,
+  isCheckingOut,
+  onOpenChange,
+  onQuantityChange,
+  onRemoveItem,
+  onCheckout,
 }: {
   cart: Cart
   currencyFormatter: Intl.NumberFormat
-  onClick: () => void
+  open: boolean
+  updatingItemId: string | null
+  isCheckingOut: boolean
+  onOpenChange: (open: boolean) => void
+  onQuantityChange: (item: CartItem, nextQuantity: number) => Promise<void> | void
+  onRemoveItem: (item: CartItem) => Promise<void> | void
+  onCheckout: () => void
 }) {
+  const hasItems = cart.items.length > 0
+  const isReadOnly = cart.status !== 'Active'
+
   return (
     <div className="fixed inset-x-0 bottom-0 z-20 border-t bg-background/95 p-3 backdrop-blur">
-      <div className="mx-auto flex max-w-6xl items-center gap-3">
+      <div className="mx-auto flex max-w-6xl flex-col gap-3">
+        {open ? (
+          <Card className="overflow-hidden rounded-lg shadow-lg">
+            <CardContent className="p-0">
+              <div className="flex items-start justify-between gap-3 border-b p-4">
+                <div className="min-w-0 space-y-1">
+                  <h2 className="flex items-center gap-2 text-lg font-semibold">
+                    <ShoppingBag className="size-5" />
+                    Cart
+                  </h2>
+                  <p className="text-sm text-muted-foreground">
+                    {hasItems
+                      ? `${cart.itemCount} item${cart.itemCount === 1 ? '' : 's'} in this order`
+                      : 'Your cart is empty.'}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Collapse cart"
+                  className="size-9 shrink-0"
+                  onClick={() => onOpenChange(false)}
+                >
+                  <ChevronDown className="size-4" />
+                </Button>
+              </div>
+
+              <div className="max-h-[52svh] overflow-y-auto p-4">
+                {hasItems ? (
+                  <div className="space-y-3">
+                    {cart.items.map((item) => (
+                      <CartSummaryLine
+                        key={item.id}
+                        item={item}
+                        currencyFormatter={currencyFormatter}
+                        isReadOnly={isReadOnly}
+                        isUpdating={updatingItemId === item.id}
+                        onQuantityChange={onQuantityChange}
+                        onRemoveItem={onRemoveItem}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex min-h-32 flex-col items-center justify-center gap-2 rounded-lg border border-dashed bg-muted/30 p-6 text-center">
+                    <ShoppingBag className="size-8 text-muted-foreground" />
+                    <div>
+                      <p className="font-semibold">No items yet</p>
+                      <p className="text-sm text-muted-foreground">
+                        Add dishes from the menu to start this order.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3 border-t p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm text-muted-foreground">Total</span>
+                  <span className="text-xl font-semibold">
+                    {currencyFormatter.format(cart.total)}
+                  </span>
+                </div>
+
+                {isReadOnly ? (
+                  <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+                    This cart is no longer editable.
+                  </p>
+                ) : null}
+
+                <Button
+                  type="button"
+                  className="h-11 w-full rounded-lg"
+                  disabled={!hasItems || isReadOnly || isCheckingOut}
+                  onClick={onCheckout}
+                >
+                  {isCheckingOut ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <ArrowRight className="size-4" />
+                  )}
+                  {isCheckingOut ? 'Starting checkout…' : 'Go to checkout'}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
         <Button
           type="button"
-          className="h-12 flex-1 justify-between rounded-lg px-4"
-          onClick={onClick}
+          className="min-h-14 flex-1 justify-between rounded-xl px-5 py-3 text-base"
+          onClick={() => onOpenChange(!open)}
         >
-          <span className="flex items-center gap-2">
-            <ShoppingBag className="size-5" />
-            Cart
-          </span>
           <span className="flex items-center gap-3">
-            <Badge variant="secondary" className="bg-primary-foreground text-primary">
+            <span className="flex size-8 items-center justify-center rounded-md border border-primary-foreground/25 bg-primary-foreground/10">
+              <ShoppingBag className="size-5" />
+            </span>
+            Cart
+            {open ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />}
+          </span>
+          <span className="flex items-center gap-4">
+            <Badge variant="secondary" className="h-7 min-w-7 justify-center rounded-full bg-primary-foreground px-2 text-primary">
               {cart.itemCount}
             </Badge>
-            {currencyFormatter.format(cart.total)}
+            <span className="font-semibold">{currencyFormatter.format(cart.total)}</span>
           </span>
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function CartSummaryLine({
+  item,
+  currencyFormatter,
+  isReadOnly,
+  isUpdating,
+  onQuantityChange,
+  onRemoveItem,
+}: {
+  item: CartItem
+  currencyFormatter: Intl.NumberFormat
+  isReadOnly: boolean
+  isUpdating: boolean
+  onQuantityChange: (item: CartItem, nextQuantity: number) => Promise<void> | void
+  onRemoveItem: (item: CartItem) => Promise<void> | void
+}) {
+  const itemUnavailable = !item.isAvailable || item.isSoldOut
+
+  return (
+    <div className="rounded-lg border bg-background p-3">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-3">
+        <div className="min-w-0 space-y-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <p className="min-w-0 font-semibold leading-tight">
+              <span className="line-clamp-2 break-words">{item.name}</span>
+            </p>
+            {itemUnavailable ? (
+              <Badge variant="destructive" className="shrink-0">
+                Unavailable
+              </Badge>
+            ) : null}
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {item.quantity} x {currencyFormatter.format(item.unitPrice)}
+          </p>
+          {item.note ? (
+            <p className="line-clamp-2 rounded-md bg-muted/50 px-2 py-1 text-sm text-muted-foreground">
+              {item.note}
+            </p>
+          ) : null}
+        </div>
+
+        <p className="shrink-0 text-right font-semibold">
+          {currencyFormatter.format(item.lineTotal)}
+        </p>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-1 rounded-md border bg-muted/20 p-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={`Decrease ${item.name} quantity`}
+            className="size-8"
+            disabled={isReadOnly || isUpdating || item.quantity <= 1}
+            onClick={() => void onQuantityChange(item, item.quantity - 1)}
+          >
+            <Minus className="size-4" />
+          </Button>
+          <span className="w-8 text-center text-sm font-semibold">{item.quantity}</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={`Increase ${item.name} quantity`}
+            className="size-8"
+            disabled={isReadOnly || isUpdating}
+            onClick={() => void onQuantityChange(item, item.quantity + 1)}
+          >
+            {isUpdating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+          </Button>
+        </div>
+
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-9 text-destructive hover:text-destructive"
+          disabled={isReadOnly || isUpdating}
+          onClick={() => void onRemoveItem(item)}
+        >
+          {isUpdating ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+          Remove
         </Button>
       </div>
     </div>
@@ -704,22 +1274,32 @@ function createCurrencyFormatter(currency: string) {
   })
 }
 
-function getCategorySectionId(categoryId: string) {
-  return `menu-category-${categoryId}`
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(() => {
+    if (typeof window === 'undefined') {
+      return false
+    }
+
+    return window.matchMedia('(max-width: 767px)').matches
+  })
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return undefined
+    }
+
+    const query = window.matchMedia('(max-width: 767px)')
+    const update = () => setIsMobile(query.matches)
+
+    update()
+    query.addEventListener('change', update)
+
+    return () => query.removeEventListener('change', update)
+  }, [])
+
+  return isMobile
 }
 
-function getCategoryShortLabel(name: string) {
-  const words = name
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-
-  if (words.length >= 2) {
-    return words
-      .slice(0, 2)
-      .map((word) => word[0])
-      .join('')
-  }
-
-  return name.slice(0, 2)
+function getCategorySectionId(categoryId: string) {
+  return `menu-category-${categoryId}`
 }
