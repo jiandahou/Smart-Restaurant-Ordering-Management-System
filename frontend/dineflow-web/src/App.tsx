@@ -13,6 +13,7 @@ import { AdminUsersPage } from './pages/AdminUsersPage'
 import { ChangeEmailPage } from './pages/ChangeEmailPage'
 import { CheckEmailPage } from './pages/CheckEmailPage'
 import { ConfirmEmailPage } from './pages/ConfirmEmailPage'
+import { CheckoutPage } from './pages/CheckoutPage'
 import { CustomerMenuPage } from './pages/CustomerMenuPage'
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
 import { LoginPage } from './pages/LoginPage'
@@ -40,6 +41,7 @@ function App() {
         <Route path="/oauth/callback" element={<OAuthCallbackPage />} />
         <Route path="/payment/success" element={<PaymentResultPage result="success" />} />
         <Route path="/payment/cancelled" element={<PaymentResultPage result="cancelled" />} />
+        <Route path="/checkout" element={<CheckoutPage />} />
         <Route path="/r/:restaurantId/menu" element={<CustomerMenuPage />} />
         <Route path="/table/:qrToken" element={<CustomerMenuPage />} />
         <Route element={<ProtectedRoute />}>

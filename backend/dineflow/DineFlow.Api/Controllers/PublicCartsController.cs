@@ -3,6 +3,8 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using DineFlow.Api.Contracts.Cart;
 using DineFlow.Api.Contracts.Order;
+using DineFlow.Api.Contracts.Payments;
+using DineFlow.Api.Options;
 using DineFlow.Api.Services;
 using DineFlow.Infrastructure.Carts;
 using DineFlow.Infrastructure.Orders;
@@ -12,6 +14,9 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using Stripe;
+using Stripe.Checkout;
 
 namespace DineFlow.Api.Controllers;
 
@@ -22,7 +27,10 @@ namespace DineFlow.Api.Controllers;
 public class PublicCartsController(
     AppDbContext dbContext,
     CartAccessService cartAccessService,
-    CartRealtimeNotifier cartRealtimeNotifier) : ControllerBase
+    CartRealtimeNotifier cartRealtimeNotifier,
+    IStripeClient stripeClient,
+    IOptions<StripeOptions> stripeOptions,
+    ILogger<PublicCartsController> logger) : ControllerBase
 {
     private const string ParticipantTokenHeader = "X-Cart-Participant-Token";
     private const int MaximumItemQuantity = 100;
@@ -696,6 +704,171 @@ public class PublicCartsController(
     private static string? NormalizeNote(string? note)
     {
         return string.IsNullOrWhiteSpace(note) ? null : note.Trim();
+    }
+
+    [HttpPost("{cartId:guid}/payment-session")]
+    public async Task<IActionResult> CreatePaymentSession(
+        Guid cartId,
+        [FromHeader(Name = ParticipantTokenHeader)] string? participantToken,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(stripeOptions.Value.SecretKey))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                message = "Online payment is not configured. Please pay at the counter."
+            });
+        }
+
+        var access = await AuthorizeCartAsync(cartId, participantToken, cancellationToken);
+
+        if (access.ErrorResult is not null)
+        {
+            return access.ErrorResult;
+        }
+
+        var cart = access.Cart!;
+
+        if (cart.Status != CartStatus.Submitted || !cart.OrderId.HasValue)
+        {
+            return Conflict(new { message = "Cart must be checked out before payment." });
+        }
+
+        var order = await dbContext.Orders
+            .Include(o => o.OrderItems)
+            .Include(o => o.Restaurant)
+            .FirstOrDefaultAsync(o => o.Id == cart.OrderId.Value, cancellationToken);
+
+        if (order is null)
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
+        if (order.PaymentStatus == PaymentStatus.Paid)
+        {
+            return Conflict(new { message = "This order has already been paid." });
+        }
+
+        if (order.Status is OrderStatus.Cancelled or OrderStatus.Rejected)
+        {
+            return BadRequest(new { message = "This order cannot be paid." });
+        }
+
+        var currency = NormalizeStripeCurrency(order.Restaurant?.Currency ?? stripeOptions.Value.Currency);
+        var payment = new Payment
+        {
+            OrderId = order.Id,
+            Provider = PaymentProviders.Stripe,
+            AmountCents = ConvertToCents(order.TotalAmount),
+            Currency = currency,
+            Status = PaymentStatus.Pending
+        };
+
+        dbContext.Payments.Add(payment);
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        var sessionOptions = new SessionCreateOptions
+        {
+            Mode = "payment",
+            SuccessUrl = AppendSessionId(stripeOptions.Value.SuccessUrl),
+            CancelUrl = stripeOptions.Value.CancelUrl,
+            LineItems = order.OrderItems
+                .OrderBy(item => item.CreatedAt)
+                .ThenBy(item => item.Id)
+                .Select(item => new SessionLineItemOptions
+                {
+                    Quantity = item.Quantity,
+                    PriceData = new SessionLineItemPriceDataOptions
+                    {
+                        Currency = currency,
+                        UnitAmount = ConvertToCents(item.UnitPrice),
+                        ProductData = new SessionLineItemPriceDataProductDataOptions
+                        {
+                            Name = string.IsNullOrWhiteSpace(item.ItemNameSnapshot)
+                                ? "Menu item"
+                                : item.ItemNameSnapshot.Trim()
+                        }
+                    }
+                })
+                .ToList(),
+            Metadata = new Dictionary<string, string>
+            {
+                ["mode"] = "order",
+                ["orderId"] = order.Id.ToString(),
+                ["paymentId"] = payment.Id.ToString()
+            },
+            PaymentIntentData = new SessionPaymentIntentDataOptions
+            {
+                Metadata = new Dictionary<string, string>
+                {
+                    ["mode"] = "order",
+                    ["orderId"] = order.Id.ToString(),
+                    ["paymentId"] = payment.Id.ToString()
+                }
+            }
+        };
+
+        try
+        {
+            var service = new SessionService(stripeClient);
+            var session = await service.CreateAsync(sessionOptions, cancellationToken: cancellationToken);
+
+            payment.ProviderCheckoutSessionId = session.Id;
+            payment.ProviderPaymentIntentId = session.PaymentIntentId;
+            payment.UpdatedAt = DateTime.UtcNow;
+            order.PaymentStatus = PaymentStatus.Pending;
+            order.UpdatedAt = DateTime.UtcNow;
+            await dbContext.SaveChangesAsync(cancellationToken);
+
+            return Ok(new CreateCheckoutSessionResponse
+            {
+                Message = "Checkout session created.",
+                SessionId = session.Id,
+                CheckoutUrl = session.Url,
+                OrderId = order.Id,
+                PaymentId = payment.Id
+            });
+        }
+        catch (StripeException ex)
+        {
+            logger.LogError(ex, "Stripe failed to create checkout session for order {OrderId}.", order.Id);
+
+            payment.Status = PaymentStatus.Failed;
+            payment.FailureReason = ex.StripeError?.Message ?? ex.Message;
+            payment.FailedAt = DateTime.UtcNow;
+            payment.UpdatedAt = DateTime.UtcNow;
+            order.PaymentStatus = PaymentStatus.Failed;
+            order.UpdatedAt = DateTime.UtcNow;
+            await dbContext.SaveChangesAsync(cancellationToken);
+
+            return BadRequest(new
+            {
+                message = "Payment could not be started. Please try again.",
+                detail = ex.StripeError?.Message ?? ex.Message
+            });
+        }
+    }
+
+    private static string NormalizeStripeCurrency(string? currency) =>
+        string.IsNullOrWhiteSpace(currency) ? "aud" : currency.Trim().ToLowerInvariant();
+
+    private static long ConvertToCents(decimal amount) =>
+        Convert.ToInt64(Math.Round(amount * 100m, MidpointRounding.AwayFromZero));
+
+    private static string AppendSessionId(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return "http://localhost:5173/payment/success?session_id={CHECKOUT_SESSION_ID}";
+        }
+
+        if (url.Contains("{CHECKOUT_SESSION_ID}", StringComparison.Ordinal))
+        {
+            return url;
+        }
+
+        var separator = url.Contains('?') ? '&' : '?';
+        return $"{url}{separator}session_id={{CHECKOUT_SESSION_ID}}";
     }
 
     private sealed record CartAccessResult(
