@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { ArrowDownAZ, ArrowUpAZ, Armchair, Pencil, Plus, QrCode, RefreshCw, Search, UsersRound, X } from 'lucide-react'
+import { ArrowDownAZ, ArrowUpAZ, Armchair, Copy, ExternalLink, Pencil, Plus, QrCode, RefreshCw, Search, UsersRound, X } from 'lucide-react'
 import { motion } from 'motion/react'
+import { QRCodeSVG } from 'qrcode.react'
 import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
 import { z } from 'zod'
@@ -47,12 +48,76 @@ const emptyTable: TableFormValues = {
   capacity: 2,
   isActive: true,
 }
+const publicAppBaseUrl = (import.meta.env.VITE_PUBLIC_APP_BASE_URL || window.location.origin).replace(/\/$/, '')
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat('en-AU', {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(new Date(value))
+}
+
+function buildTablePublicUrl(qrToken: string) {
+  return `${publicAppBaseUrl}/table/${encodeURIComponent(qrToken)}`
+}
+
+async function copyText(value: string, successMessage: string) {
+  await navigator.clipboard.writeText(value)
+  toast.success(successMessage)
+}
+
+function TablePublicAccessDialog({ table }: { table: RestaurantTable }) {
+  if (!table.qrToken) {
+    return null
+  }
+
+  const publicUrl = buildTablePublicUrl(table.qrToken)
+
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <Button type="button" variant="outline" size="icon" aria-label={`Open QR access for ${table.tableNumber}`} title="Public table access">
+          <QrCode size={16} />
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="restaurant-table-dialog">
+        <DialogHeader>
+          <DialogTitle>Table {table.tableNumber} public access</DialogTitle>
+          <DialogDescription>Use this QR code or link for customer dine-in ordering at this table.</DialogDescription>
+        </DialogHeader>
+        <div className="restaurant-public-card">
+          <div className="restaurant-public-card-copy">
+            <div className="restaurant-public-card-body">
+              <div>
+                <span>Table URL</span>
+                <strong>Customer ordering entry for {table.tableNumber}</strong>
+              </div>
+              <code>{publicUrl}</code>
+              <div className="restaurant-table-qr">
+                <QrCode size={18} />
+                <div><span>QR token</span><code>{table.qrToken}</code></div>
+              </div>
+            </div>
+            <div className="restaurant-public-card-actions">
+              <Button type="button" variant="outline" size="sm" onClick={() => void copyText(publicUrl, 'Table URL copied')}>
+                <Copy size={15} />
+                Copy link
+              </Button>
+              <Button type="button" variant="secondary" size="sm" asChild>
+                <a href={publicUrl} target="_blank" rel="noreferrer">
+                  <ExternalLink size={15} />
+                  Open
+                </a>
+              </Button>
+            </div>
+          </div>
+          <div className="restaurant-public-card-qr">
+            <QRCodeSVG value={publicUrl} size={132} />
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 type TableFormDialogProps = {
@@ -391,7 +456,12 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading }: Resta
                       ) : <span className="table-subtext">Not configured</span>}
                     </td>
                     <td>{table.updatedAt ? formatDate(table.updatedAt) : 'Not updated'}</td>
-                    <td><TableFormDialog restaurantId={table.restaurantId} table={table} onSaved={() => loadTables()} /></td>
+                    <td>
+                      <div className="row-actions">
+                        {table.qrToken ? <TablePublicAccessDialog table={table} /> : null}
+                        <TableFormDialog restaurantId={table.restaurantId} table={table} onSaved={() => loadTables()} />
+                      </div>
+                    </td>
                   </tr>
                 ))}
                 {filteredTables.length === 0 && (

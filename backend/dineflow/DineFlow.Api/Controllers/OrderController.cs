@@ -77,6 +77,7 @@ public class OrderController : ControllerBase
                 {
                     Id = Guid.NewGuid(),
                     MenuItemId = itemRequest.MenuItemId,
+                    ItemNameSnapshot = itemRequest.ItemNameSnapshot ?? string.Empty,
                     Quantity = itemRequest.Quantity,
                     UnitPrice = itemRequest.UnitPrice,
                     Note = itemRequest.Note,
@@ -131,6 +132,7 @@ public class OrderController : ControllerBase
                 {
                     Id = Guid.NewGuid(),
                     MenuItemId = itemRequest.MenuItemId,
+                    ItemNameSnapshot = itemRequest.ItemNameSnapshot ?? string.Empty,
                     Quantity = itemRequest.Quantity,
                     UnitPrice = itemRequest.UnitPrice,
                     Note = itemRequest.Note,
@@ -184,6 +186,7 @@ public class OrderController : ControllerBase
                 Id = oi.Id,
                 OrderId = oi.OrderId,
                 MenuItemId = oi.MenuItemId,
+                ItemNameSnapshot = oi.ItemNameSnapshot,
                 Quantity = oi.Quantity,
                 UnitPrice = oi.UnitPrice,
                 Note = oi.Note,

@@ -10,6 +10,8 @@ public class OrderItem
 
     public Guid? MenuItemId { get; set; }
 
+    public string ItemNameSnapshot { get; set; } = string.Empty;
+
     public int Quantity { get; set; } = 1;
 
     public decimal UnitPrice { get; set; }

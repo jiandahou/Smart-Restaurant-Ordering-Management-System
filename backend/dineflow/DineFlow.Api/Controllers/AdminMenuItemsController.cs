@@ -477,6 +477,85 @@ public class AdminMenuItemsController : ControllerBase
         });
     }
 
+    [HttpPost("reorder")]
+    public async Task<IActionResult> ReorderItems(
+        [FromBody] ReorderMenuItemsRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.CategoryId == Guid.Empty)
+        {
+            return BadRequest(new { message = "Category is required." });
+        }
+
+        if (request.ItemIds.Count == 0)
+        {
+            return BadRequest(new { message = "At least one menu item is required." });
+        }
+
+        var category = await _dbContext.MenuCategories
+            .AsNoTracking()
+            .FirstOrDefaultAsync(menuCategory => menuCategory.Id == request.CategoryId, cancellationToken);
+
+        if (category is null)
+        {
+            return NotFound(new { message = "Category not found." });
+        }
+
+        if (!await CanAccessRestaurantAsync(category.RestaurantId))
+        {
+            return Forbid();
+        }
+
+        if (request.ItemIds.Distinct().Count() != request.ItemIds.Count)
+        {
+            return BadRequest(new { message = "Menu item order contains duplicates." });
+        }
+
+        var categoryItems = await _dbContext.MenuItems
+            .Where(item => item.CategoryId == request.CategoryId)
+            .OrderBy(item => item.DisplayOrder)
+            .ThenBy(item => item.Name)
+            .ToListAsync(cancellationToken);
+
+        if (categoryItems.Count == 0)
+        {
+            return BadRequest(new { message = "This category has no menu items to reorder." });
+        }
+
+        if (categoryItems.Count != request.ItemIds.Count)
+        {
+            return BadRequest(new { message = "Submit the full category item order when reordering." });
+        }
+
+        var categoryItemIds = categoryItems
+            .Select(item => item.Id)
+            .ToHashSet();
+
+        if (request.ItemIds.Any(itemId => !categoryItemIds.Contains(itemId)))
+        {
+            return BadRequest(new { message = "One or more menu items do not belong to the selected category." });
+        }
+
+        var sortOrderByItemId = request.ItemIds
+            .Select((itemId, index) => new { itemId, displayOrder = (index + 1) * 10 })
+            .ToDictionary(entry => entry.itemId, entry => entry.displayOrder);
+
+        var updatedAt = DateTime.UtcNow;
+
+        foreach (var item in categoryItems)
+        {
+            item.DisplayOrder = sortOrderByItemId[item.Id];
+            item.UpdatedAt = updatedAt;
+        }
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(new
+        {
+            message = "Menu items reordered successfully."
+        });
+    }
+
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> DeleteItem(Guid id, CancellationToken cancellationToken)
     {

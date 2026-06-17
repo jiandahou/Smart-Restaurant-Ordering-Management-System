@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Veg Fried Rice">
+  <rect width="640" height="480" fill="#f2fbef"/>
+  <ellipse cx="320" cy="315" rx="220" ry="85" fill="#b7d8e6" stroke="#477a91" stroke-width="8"/>
+  <ellipse cx="320" cy="282" rx="170" ry="88" fill="#f7d977"/>
+  <circle cx="235" cy="260" r="13" fill="#5cab5c"/>
+  <circle cx="355" cy="243" r="12" fill="#e56b4c"/>
+  <circle cx="410" cy="292" r="13" fill="#5cab5c"/>
+  <rect x="285" y="238" width="32" height="18" rx="8" fill="#f08a2b"/>
+  <rect x="332" y="314" width="40" height="18" rx="8" fill="#f08a2b"/>
+  <path d="M458 194l78-58M470 217l92-14" stroke="#6b4a2a" stroke-width="10" stroke-linecap="round"/>
+  <text x="54" y="82" font-family="Arial, sans-serif" font-size="48" font-weight="700" fill="#263521">Veg Fried Rice</text>
+</svg>

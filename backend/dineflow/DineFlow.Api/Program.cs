@@ -10,6 +10,7 @@ using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Persistence;
 using DineFlow.Api.Options;
 using DineFlow.Api.Services;
+using DineFlow.Api.Hubs;
 using Fido2NetLib;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -22,9 +23,22 @@ using Microsoft.OpenApi.Models;
 using Stripe;
 
 var builder = WebApplication.CreateBuilder(args);
+const string FrontendCorsPolicy = "FrontendCorsPolicy";
 
 builder.Services.AddControllers();
+builder.Services.AddSignalR();
 builder.Services.AddMemoryCache();
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy(FrontendCorsPolicy, policy =>
+    {
+        policy
+            .WithOrigins(GetConfiguredCorsOrigins(builder.Configuration))
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials();
+    });
+});
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders =
@@ -45,6 +59,8 @@ builder.Services.Configure<DataProtectionTokenProviderOptions>(options =>
     options.TokenLifespan = UnconfirmedCustomerCleanupService.ConfirmationWindow;
 });
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
+builder.Services.AddScoped<CartAccessService>();
+builder.Services.AddScoped<CartRealtimeNotifier>();
 builder.Services.AddSingleton<IOAuthLoginCodeStore, MemoryOAuthLoginCodeStore>();
 builder.Services.AddSingleton<IMfaLoginChallengeStore, MemoryMfaLoginChallengeStore>();
 builder.Services.AddSingleton<IMfaEmailSetupCodeStore, MemoryMfaEmailSetupCodeStore>();
@@ -300,6 +316,7 @@ app.UseStaticFiles(new StaticFileOptions
     RequestPath = "/uploads"
 });
 
+app.UseCors(FrontendCorsPolicy);
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -332,6 +349,7 @@ app.MapGet("/health/ready", async (AppDbContext dbContext) =>
 
 Console.WriteLine("Health check endpoint registered at /health");
 app.MapControllers();
+app.MapHub<CartHub>("/api/hubs/carts");
 Console.WriteLine("Applying database migrations...");
 using (var scope = app.Services.CreateScope())
 {
@@ -360,4 +378,33 @@ static string[] GetConfiguredPasskeyOrigins(IConfiguration configuration, string
     return configuredOrigins.Length > 0
         ? configuredOrigins
         : ["http://localhost:5173"];
+}
+
+static string[] GetConfiguredCorsOrigins(IConfiguration configuration)
+{
+    var configuredOrigins = configuration["CORS_ALLOWED_ORIGINS"];
+    var origins = new List<string>();
+
+    if (!string.IsNullOrWhiteSpace(configuredOrigins))
+    {
+        origins.AddRange(configuredOrigins
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+    }
+
+    var frontendBaseUrl = FirstConfigured(
+        configuration["FRONTEND_BASE_URL"],
+        configuration["Email:FrontendBaseUrl"]);
+
+    if (!string.IsNullOrWhiteSpace(frontendBaseUrl))
+    {
+        origins.Add(frontendBaseUrl.TrimEnd('/'));
+    }
+
+    origins.Add("http://localhost:5173");
+    origins.Add("https://dineflow.theunknownfish.com");
+
+    return origins
+        .Where(origin => Uri.TryCreate(origin, UriKind.Absolute, out _))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
 }

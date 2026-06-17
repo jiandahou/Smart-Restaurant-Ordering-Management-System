@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Masala Chai">
+  <rect width="640" height="480" fill="#f7efe6"/>
+  <path d="M190 230h230v82c0 52-42 94-94 94h-42c-52 0-94-42-94-94z" fill="#c98043" stroke="#6a3b21" stroke-width="8"/>
+  <path d="M420 254h36c36 0 36 62 0 62h-36" fill="none" stroke="#6a3b21" stroke-width="14"/>
+  <ellipse cx="305" cy="230" rx="115" ry="34" fill="#e5b178" stroke="#6a3b21" stroke-width="8"/>
+  <path d="M255 165c-18 28 18 34 0 62M315 155c-20 30 20 38 0 70M370 170c-18 28 18 34 0 62" fill="none" stroke="#9d7a5b" stroke-width="10" stroke-linecap="round"/>
+  <text x="78" y="82" font-family="Arial, sans-serif" font-size="52" font-weight="700" fill="#3b271c">Masala Chai</text>
+</svg>

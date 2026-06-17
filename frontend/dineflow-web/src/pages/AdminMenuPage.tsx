@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
 import {
+  ArrowDown,
+  ArrowUp,
   ChevronDown,
   CircleDollarSign,
+  GripVertical,
   ImageIcon,
   ImageUp,
   Layers3,
@@ -26,6 +29,8 @@ import {
   getAdminMenuCategories,
   getAdminMenuItems,
   getRestaurants,
+  reorderMenuCategories,
+  reorderMenuItems,
   updateMenuCategory,
   updateMenuItem,
   updateMenuItemAvailability,
@@ -35,6 +40,7 @@ import {
   type MenuItem,
   type Restaurant,
 } from '../api/auth'
+import { resolvePublicAssetUrl } from '../api/publicMenu'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -76,7 +82,10 @@ const itemSchema = z.object({
   name: z.string().trim().min(1, 'Item name is required.').max(150),
   description: z.string().trim().max(1_000).optional(),
   price: z.number().min(0.01, 'Price must be at least 0.01.').max(1_000_000),
-  imageUrl: z.string().trim().max(2_048).refine((value) => !value || URL.canParse(value), 'Enter a valid image URL.'),
+  imageUrl: z.string().trim().max(2_048).refine(
+    (value) => !value || value.startsWith('/') || URL.canParse(value),
+    'Enter a valid image URL.',
+  ),
   displayOrder: z.number().int().min(0).max(10_000),
   isAvailable: z.boolean(),
   isSoldOut: z.boolean(),
@@ -104,6 +113,54 @@ const emptyItem: ItemFormValues = {
   displayOrder: 0,
   isAvailable: true,
   isSoldOut: false,
+}
+
+function sortMenuItems(items: MenuItem[]) {
+  return items.toSorted(
+    (first, second) => first.displayOrder - second.displayOrder || first.name.localeCompare(second.name),
+  )
+}
+
+function sortMenuCategories(categories: MenuCategory[]) {
+  return categories.toSorted(
+    (first, second) => first.displayOrder - second.displayOrder || first.name.localeCompare(second.name),
+  )
+}
+
+function moveMenuItem(items: MenuItem[], draggedItemId: string, targetItemId: string) {
+  const orderedItems = [...items]
+  const draggedIndex = orderedItems.findIndex((item) => item.id === draggedItemId)
+  const targetIndex = orderedItems.findIndex((item) => item.id === targetItemId)
+
+  if (draggedIndex < 0 || targetIndex < 0 || draggedIndex === targetIndex) {
+    return items
+  }
+
+  const [draggedItem] = orderedItems.splice(draggedIndex, 1)
+  orderedItems.splice(targetIndex, 0, draggedItem)
+
+  return orderedItems.map((item, index) => ({
+    ...item,
+    displayOrder: (index + 1) * 10,
+  }))
+}
+
+function moveMenuCategory(categories: MenuCategory[], draggedCategoryId: string, targetCategoryId: string) {
+  const orderedCategories = [...categories]
+  const draggedIndex = orderedCategories.findIndex((category) => category.id === draggedCategoryId)
+  const targetIndex = orderedCategories.findIndex((category) => category.id === targetCategoryId)
+
+  if (draggedIndex < 0 || targetIndex < 0 || draggedIndex === targetIndex) {
+    return categories
+  }
+
+  const [draggedCategory] = orderedCategories.splice(draggedIndex, 1)
+  orderedCategories.splice(targetIndex, 0, draggedCategory)
+
+  return orderedCategories.map((category, index) => ({
+    ...category,
+    displayOrder: (index + 1) * 10,
+  }))
 }
 
 function CategoryFormDialog({
@@ -251,7 +308,7 @@ function ItemFormDialog({
     if (localPreviewUrl) URL.revokeObjectURL(localPreviewUrl)
   }, [localPreviewUrl])
 
-  const displayedImageUrl = localPreviewUrl ?? (removeImage ? '' : item?.imageUrl ?? '')
+  const displayedImageUrl = localPreviewUrl ?? (removeImage ? '' : resolvePublicAssetUrl(item?.imageUrl ?? null) ?? '')
 
   const handleImageChange = (file?: File) => {
     setImageError(null)
@@ -404,17 +461,24 @@ function CategoryMenuSection({
   category,
   currency,
   onCategoriesChanged,
+  categoryReorderDisabled,
+  categoryDragTitle,
 }: {
   restaurantId: string
   category: MenuCategory
   currency: string
   onCategoriesChanged: () => Promise<void> | void
+  categoryReorderDisabled: boolean
+  categoryDragTitle: string
 }) {
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState<MenuItem[]>([])
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [search, setSearch] = useState('')
+  const [draggedItemId, setDraggedItemId] = useState<string | null>(null)
+  const [dropTargetItemId, setDropTargetItemId] = useState<string | null>(null)
+  const [reordering, setReordering] = useState(false)
 
   const loadItems = async (showToast = false) => {
     setLoading(true)
@@ -434,12 +498,71 @@ function CategoryMenuSection({
     if (nextOpen && !loaded) void loadItems()
   }
 
+  const orderedItems = useMemo(() => sortMenuItems(items), [items])
+
   const filteredItems = useMemo(() => {
     const term = search.trim().toLowerCase()
-    return items
+    return orderedItems
       .filter((item) => !term || [item.name, item.description ?? ''].some((value) => value.toLowerCase().includes(term)))
-      .toSorted((first, second) => first.displayOrder - second.displayOrder || first.name.localeCompare(second.name))
-  }, [items, search])
+  }, [orderedItems, search])
+
+  const isReorderDisabled = loading || reordering || search.trim() !== '' || orderedItems.length < 2
+
+  const resetDragState = () => {
+    setDraggedItemId(null)
+    setDropTargetItemId(null)
+  }
+
+  const handleDrop = async (targetItemId: string, overrideDraggedItemId?: string) => {
+    const sourceItemId = overrideDraggedItemId ?? draggedItemId
+
+    if (!sourceItemId || sourceItemId === targetItemId || isReorderDisabled) {
+      resetDragState()
+      return
+    }
+
+    const previousItems = items
+    const reorderedItems = moveMenuItem(orderedItems, sourceItemId, targetItemId)
+
+    if (reorderedItems === orderedItems) {
+      resetDragState()
+      return
+    }
+
+    setItems(reorderedItems)
+    setReordering(true)
+    resetDragState()
+
+    try {
+      const response = await reorderMenuItems({
+        categoryId: category.id,
+        itemIds: reorderedItems.map((item) => item.id),
+      })
+      toast.success('Menu order updated', { description: response.message })
+    } catch (error) {
+      setItems(previousItems)
+      toast.error('Could not reorder menu items', {
+        description: error instanceof Error ? error.message : 'The request failed.',
+      })
+    } finally {
+      setReordering(false)
+    }
+  }
+
+  const handleStepMove = async (itemId: string, direction: 'up' | 'down') => {
+    if (isReorderDisabled) {
+      return
+    }
+
+    const currentIndex = orderedItems.findIndex((item) => item.id === itemId)
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
+
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= orderedItems.length) {
+      return
+    }
+
+    await handleDrop(orderedItems[targetIndex].id, itemId)
+  }
 
   const toggleAvailability = async (item: MenuItem, isAvailable: boolean) => {
     try {
@@ -486,6 +609,15 @@ function CategoryMenuSection({
   return (
     <Collapsible open={open} onOpenChange={handleOpenChange} className="menu-category-section">
       <div className="menu-category-row">
+        <button
+          type="button"
+          className="menu-reorder-handle menu-category-reorder-handle"
+          disabled={categoryReorderDisabled}
+          aria-label={`Reorder ${category.name}`}
+          title={categoryDragTitle}
+        >
+          <GripVertical size={16} />
+        </button>
         <CollapsibleTrigger asChild>
           <Button type="button" variant="ghost" className="menu-category-trigger">
             <motion.span animate={{ rotate: open ? 180 : 0 }} transition={{ duration: 0.16 }}><ChevronDown size={18} /></motion.span>
@@ -516,19 +648,89 @@ function CategoryMenuSection({
         ) : (
           <div className="table-wrap">
             <table className="data-table menu-items-table">
-              <thead><tr><th>Item</th><th>Price</th><th>Available</th><th>Sold out</th><th>Order</th><th>Actions</th></tr></thead>
+              <thead><tr><th>Reorder</th><th>Item</th><th>Price</th><th>Available</th><th>Sold out</th><th>Order</th><th>Actions</th></tr></thead>
               <tbody>
                 {filteredItems.map((item) => (
-                  <tr key={item.id}>
-                    <td><div className="menu-item-name">{item.imageUrl ? <img src={item.imageUrl} alt="" /> : <span><ImageIcon size={17} /></span>}<div><strong>{item.name}</strong><small>{item.description || 'No description'}</small></div></div></td>
+                  <tr
+                    key={item.id}
+                    className={[
+                      'menu-item-row',
+                      !isReorderDisabled ? 'is-draggable' : '',
+                      draggedItemId === item.id ? 'is-dragging' : '',
+                      dropTargetItemId === item.id ? 'is-drop-target' : '',
+                    ].filter(Boolean).join(' ')}
+                    draggable={!isReorderDisabled}
+                    onDragStart={() => setDraggedItemId(item.id)}
+                    onDragEnter={() => {
+                      if (!isReorderDisabled && draggedItemId && draggedItemId !== item.id) {
+                        setDropTargetItemId(item.id)
+                      }
+                    }}
+                    onDragOver={(event) => {
+                      if (!isReorderDisabled) {
+                        event.preventDefault()
+                      }
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      void handleDrop(item.id)
+                    }}
+                    onDragEnd={resetDragState}
+                  >
+                    <td>
+                      <button
+                        type="button"
+                        className="menu-reorder-handle"
+                        disabled={isReorderDisabled}
+                        aria-label={`Reorder ${item.name}`}
+                        title={
+                          search.trim()
+                            ? 'Clear search to reorder menu items.'
+                            : orderedItems.length < 2
+                              ? 'Add more items to reorder this category.'
+                              : 'Drag to reorder items.'
+                        }
+                      >
+                        <GripVertical size={16} />
+                      </button>
+                    </td>
+                    <td><div className="menu-item-name">{resolvePublicAssetUrl(item.imageUrl) ? <img src={resolvePublicAssetUrl(item.imageUrl) ?? undefined} alt="" /> : <span><ImageIcon size={17} /></span>}<div><strong>{item.name}</strong><small>{item.description || 'No description'}</small></div></div></td>
                     <td><span className="menu-price"><CircleDollarSign size={15} />{money.format(item.price)}</span></td>
                     <td><Switch checked={item.isAvailable} onCheckedChange={(value) => void toggleAvailability(item, value)} aria-label={`${item.name} availability`} /></td>
                     <td><Switch checked={item.isSoldOut} onCheckedChange={(value) => void toggleSoldOut(item, value)} aria-label={`${item.name} sold out status`} /></td>
-                    <td>{item.displayOrder}</td>
+                    <td>
+                      <div className="menu-order-controls">
+                        <span>{item.displayOrder}</span>
+                        <div className="menu-order-buttons">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            disabled={isReorderDisabled || orderedItems[0]?.id === item.id}
+                            onClick={() => void handleStepMove(item.id, 'up')}
+                            title={search.trim() ? 'Clear search to move menu items.' : 'Move item up'}
+                            aria-label={`Move ${item.name} up`}
+                          >
+                            <ArrowUp size={15} />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            disabled={isReorderDisabled || orderedItems[orderedItems.length - 1]?.id === item.id}
+                            onClick={() => void handleStepMove(item.id, 'down')}
+                            title={search.trim() ? 'Clear search to move menu items.' : 'Move item down'}
+                            aria-label={`Move ${item.name} down`}
+                          >
+                            <ArrowDown size={15} />
+                          </Button>
+                        </div>
+                      </div>
+                    </td>
                     <td><div className="row-actions"><ItemFormDialog restaurantId={restaurantId} category={category} item={item} onSaved={() => loadItems()} /><AlertDialog><AlertDialogTrigger asChild><Button type="button" variant="destructive" size="icon" title="Delete item" aria-label={`Delete ${item.name}`}><Trash2 size={16} /></Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete {item.name}?</AlertDialogTitle><AlertDialogDescription>This permanently removes the menu item. Existing order records remain unchanged.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void removeItem(item)}>Delete item</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div></td>
                   </tr>
                 ))}
-                {filteredItems.length === 0 && <tr><td colSpan={6} className="empty-cell">{search.trim() ? 'No menu items match this search.' : 'This category has no menu items yet.'}</td></tr>}
+                {filteredItems.length === 0 && <tr><td colSpan={7} className="empty-cell">{search.trim() ? 'No menu items match this search.' : 'This category has no menu items yet.'}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -545,6 +747,9 @@ export function AdminMenuPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<CategoryStatusFilter>('all')
+  const [draggedCategoryId, setDraggedCategoryId] = useState<string | null>(null)
+  const [dropTargetCategoryId, setDropTargetCategoryId] = useState<string | null>(null)
+  const [reorderingCategories, setReorderingCategories] = useState(false)
 
   const selectedRestaurantId = restaurantId || restaurants[0]?.id || ''
   const selectedRestaurant = restaurants.find((restaurant) => restaurant.id === selectedRestaurantId)
@@ -592,15 +797,56 @@ export function AdminMenuPage() {
     return () => { active = false }
   }, [selectedRestaurantId])
 
+  const orderedCategories = useMemo(() => sortMenuCategories(categories), [categories])
+
   const filteredCategories = useMemo(() => {
     const term = search.trim().toLowerCase()
-    return categories
+    return orderedCategories
       .filter((category) => !term || [category.name, category.description ?? ''].some((value) => value.toLowerCase().includes(term)))
       .filter((category) => statusFilter === 'all' || (statusFilter === 'active' ? category.isActive : !category.isActive))
-      .toSorted((first, second) => first.displayOrder - second.displayOrder || first.name.localeCompare(second.name))
-  }, [categories, search, statusFilter])
+  }, [orderedCategories, search, statusFilter])
 
   const hasFilters = search.trim() !== '' || statusFilter !== 'all'
+  const isCategoryReorderDisabled = loading || reorderingCategories || hasFilters || orderedCategories.length < 2
+
+  const resetCategoryDragState = () => {
+    setDraggedCategoryId(null)
+    setDropTargetCategoryId(null)
+  }
+
+  const handleCategoryDrop = async (targetCategoryId: string) => {
+    if (!draggedCategoryId || draggedCategoryId === targetCategoryId || isCategoryReorderDisabled) {
+      resetCategoryDragState()
+      return
+    }
+
+    const previousCategories = categories
+    const reorderedCategories = moveMenuCategory(orderedCategories, draggedCategoryId, targetCategoryId)
+
+    if (reorderedCategories === orderedCategories) {
+      resetCategoryDragState()
+      return
+    }
+
+    setCategories(reorderedCategories)
+    setReorderingCategories(true)
+    resetCategoryDragState()
+
+    try {
+      const response = await reorderMenuCategories({
+        restaurantId: selectedRestaurantId,
+        categoryIds: reorderedCategories.map((category) => category.id),
+      })
+      toast.success('Category order updated', { description: response.message })
+    } catch (error) {
+      setCategories(previousCategories)
+      toast.error('Could not reorder categories', {
+        description: error instanceof Error ? error.message : 'The request failed.',
+      })
+    } finally {
+      setReorderingCategories(false)
+    }
+  }
 
   return (
     <main className="content-grid">
@@ -629,7 +875,49 @@ export function AdminMenuPage() {
             <div className="restaurant-loading"><motion.span animate={{ rotate: 360 }} transition={{ duration: 0.9, repeat: Infinity, ease: 'linear' }}><RefreshCw size={18} /></motion.span>Loading menu categories...</div>
           ) : (
             <div className="menu-category-list">
-              {filteredCategories.map((category) => <CategoryMenuSection key={category.id} restaurantId={selectedRestaurantId} category={category} currency={selectedRestaurant?.currency ?? 'AUD'} onCategoriesChanged={() => loadCategories()} />)}
+              {filteredCategories.map((category) => (
+                <div
+                  key={category.id}
+                  className={[
+                    'menu-category-shell',
+                    !isCategoryReorderDisabled ? 'is-draggable' : '',
+                    draggedCategoryId === category.id ? 'is-dragging' : '',
+                    dropTargetCategoryId === category.id ? 'is-drop-target' : '',
+                  ].filter(Boolean).join(' ')}
+                  draggable={!isCategoryReorderDisabled}
+                  onDragStart={() => setDraggedCategoryId(category.id)}
+                  onDragEnter={() => {
+                    if (!isCategoryReorderDisabled && draggedCategoryId && draggedCategoryId !== category.id) {
+                      setDropTargetCategoryId(category.id)
+                    }
+                  }}
+                  onDragOver={(event) => {
+                    if (!isCategoryReorderDisabled) {
+                      event.preventDefault()
+                    }
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault()
+                    void handleCategoryDrop(category.id)
+                  }}
+                  onDragEnd={resetCategoryDragState}
+                >
+                  <CategoryMenuSection
+                    restaurantId={selectedRestaurantId}
+                    category={category}
+                    currency={selectedRestaurant?.currency ?? 'AUD'}
+                    onCategoriesChanged={() => loadCategories()}
+                    categoryReorderDisabled={isCategoryReorderDisabled}
+                    categoryDragTitle={
+                      hasFilters
+                        ? 'Clear filters to reorder categories.'
+                        : orderedCategories.length < 2
+                          ? 'Add more categories to reorder them.'
+                          : 'Drag to reorder categories.'
+                    }
+                  />
+                </div>
+              ))}
               {filteredCategories.length === 0 && <div className="menu-empty-state"><Layers3 size={26} /><strong>{hasFilters ? 'No matching categories' : 'No menu categories yet'}</strong><span>{hasFilters ? 'Clear the filters to see the full menu.' : 'Create the first category to begin building this restaurant menu.'}</span></div>}
             </div>
           )}

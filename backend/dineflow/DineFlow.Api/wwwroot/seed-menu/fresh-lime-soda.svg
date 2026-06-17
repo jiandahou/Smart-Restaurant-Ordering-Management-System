@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Fresh Lime Soda">
+  <rect width="640" height="480" fill="#effbf2"/>
+  <rect x="235" y="145" width="170" height="240" rx="28" fill="#c9f0ef" stroke="#4b8f86" stroke-width="8"/>
+  <path d="M250 248h140v105H250z" fill="#b9ec82"/>
+  <circle cx="285" cy="210" r="8" fill="#ffffff"/>
+  <circle cx="340" cy="230" r="7" fill="#ffffff"/>
+  <circle cx="370" cy="190" r="6" fill="#ffffff"/>
+  <circle cx="418" cy="160" r="36" fill="#87c957" stroke="#3f7f2e" stroke-width="7"/>
+  <path d="M418 124v72M382 160h72M392 135l52 50M444 135l-52 50" stroke="#ecffd7" stroke-width="5"/>
+  <text x="50" y="82" font-family="Arial, sans-serif" font-size="48" font-weight="700" fill="#1d3b27">Fresh Lime Soda</text>
+</svg>

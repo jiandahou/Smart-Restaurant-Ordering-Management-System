@@ -8,7 +8,7 @@ public class OrderResponse
 
     public Guid? TableId { get; set; }
 
-    public Guid? CustomerId { get; set; }
+    public string? CustomerId { get; set; }
 
     public string OrderNumber { get; set; } = string.Empty;
 
@@ -36,6 +36,8 @@ public class OrderItemResponse
     public Guid OrderId { get; set; }
 
     public Guid? MenuItemId { get; set; }
+
+    public string ItemNameSnapshot { get; set; } = string.Empty;
 
     public int Quantity { get; set; }
 
