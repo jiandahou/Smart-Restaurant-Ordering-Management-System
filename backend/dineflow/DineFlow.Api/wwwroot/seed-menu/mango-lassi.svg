@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Mango Lassi">
+  <rect width="640" height="480" fill="#fff8df"/>
+  <rect x="240" y="145" width="160" height="230" rx="30" fill="#ffc34d" stroke="#b36b16" stroke-width="8"/>
+  <path d="M253 190h134M265 330h110" stroke="#ffe6a3" stroke-width="12" stroke-linecap="round"/>
+  <path d="M398 130c34 0 58-20 70-48 10 44-12 77-58 78z" fill="#4b9f54"/>
+  <path d="M420 122c-14-31-6-62 25-82 12 39 5 68-25 82z" fill="#f2a530"/>
+  <text x="78" y="82" font-family="Arial, sans-serif" font-size="52" font-weight="700" fill="#5a3507">Mango Lassi</text>
+</svg>

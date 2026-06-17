@@ -12,6 +12,8 @@ public class Cart
 
     public Guid? TableId { get; set; }
 
+    public Guid? OrderId { get; set; }
+
     public OrderType OrderType { get; set; } = OrderType.Takeaway;
 
     public CartStatus Status { get; set; } = CartStatus.Active;
@@ -27,6 +29,8 @@ public class Cart
     public RestaurantEntity? Restaurant { get; set; }
 
     public RestaurantTable? Table { get; set; }
+
+    public Order? Order { get; set; }
 
     public ICollection<CartItem> Items { get; set; } = [];
 

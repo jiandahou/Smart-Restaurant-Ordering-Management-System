@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Veg Spring Rolls">
+  <rect width="640" height="480" fill="#f7f3ea"/>
+  <circle cx="500" cy="92" r="86" fill="#d7f0d0"/>
+  <ellipse cx="320" cy="330" rx="230" ry="70" fill="#d7c7a2"/>
+  <rect x="130" y="205" width="300" height="52" rx="26" fill="#f5d48a" stroke="#9a6a2d" stroke-width="8"/>
+  <rect x="190" y="265" width="320" height="52" rx="26" fill="#f3c96b" stroke="#9a6a2d" stroke-width="8"/>
+  <rect x="240" y="145" width="260" height="52" rx="26" fill="#f8dfa4" stroke="#9a6a2d" stroke-width="8"/>
+  <path d="M162 230c42-18 86-18 130 0M252 290c48-20 98-20 150 0M295 170c36-13 72-13 108 0" fill="none" stroke="#74a35f" stroke-width="10" stroke-linecap="round"/>
+  <text x="42" y="82" font-family="Arial, sans-serif" font-size="44" font-weight="700" fill="#2f2a22">Veg Spring Rolls</text>
+</svg>

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Butter Chicken">
+  <rect width="640" height="480" fill="#fff3e6"/>
+  <circle cx="510" cy="95" r="78" fill="#fbd0a5"/>
+  <ellipse cx="320" cy="292" rx="190" ry="116" fill="#d4481f" stroke="#742818" stroke-width="10"/>
+  <ellipse cx="320" cy="292" rx="132" ry="72" fill="#e98236"/>
+  <circle cx="250" cy="280" r="34" fill="#f6c274"/>
+  <circle cx="330" cy="322" r="30" fill="#f4b264"/>
+  <circle cx="386" cy="260" r="28" fill="#f4bd72"/>
+  <rect x="415" y="320" width="100" height="54" rx="12" fill="#f5dfb0" stroke="#9a7234" stroke-width="6"/>
+  <path d="M230 215c60 22 124 24 190 0" fill="none" stroke="#ffe1a8" stroke-width="12" stroke-linecap="round"/>
+  <text x="50" y="82" font-family="Arial, sans-serif" font-size="48" font-weight="700" fill="#3a211a">Butter Chicken</text>
+</svg>

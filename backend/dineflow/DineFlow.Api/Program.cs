@@ -23,10 +23,22 @@ using Microsoft.OpenApi.Models;
 using Stripe;
 
 var builder = WebApplication.CreateBuilder(args);
+const string FrontendCorsPolicy = "FrontendCorsPolicy";
 
 builder.Services.AddControllers();
 builder.Services.AddSignalR();
 builder.Services.AddMemoryCache();
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy(FrontendCorsPolicy, policy =>
+    {
+        policy
+            .WithOrigins(GetConfiguredCorsOrigins(builder.Configuration))
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials();
+    });
+});
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders =
@@ -304,6 +316,7 @@ app.UseStaticFiles(new StaticFileOptions
     RequestPath = "/uploads"
 });
 
+app.UseCors(FrontendCorsPolicy);
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -365,4 +378,33 @@ static string[] GetConfiguredPasskeyOrigins(IConfiguration configuration, string
     return configuredOrigins.Length > 0
         ? configuredOrigins
         : ["http://localhost:5173"];
+}
+
+static string[] GetConfiguredCorsOrigins(IConfiguration configuration)
+{
+    var configuredOrigins = configuration["CORS_ALLOWED_ORIGINS"];
+    var origins = new List<string>();
+
+    if (!string.IsNullOrWhiteSpace(configuredOrigins))
+    {
+        origins.AddRange(configuredOrigins
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+    }
+
+    var frontendBaseUrl = FirstConfigured(
+        configuration["FRONTEND_BASE_URL"],
+        configuration["Email:FrontendBaseUrl"]);
+
+    if (!string.IsNullOrWhiteSpace(frontendBaseUrl))
+    {
+        origins.Add(frontendBaseUrl.TrimEnd('/'));
+    }
+
+    origins.Add("http://localhost:5173");
+    origins.Add("https://dineflow.theunknownfish.com");
+
+    return origins
+        .Where(origin => Uri.TryCreate(origin, UriKind.Absolute, out _))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
 }

@@ -1,3 +1,5 @@
+using DineFlow.Api.Contracts.Order;
+
 namespace DineFlow.Api.Contracts.Cart;
 
 public sealed class JoinCartRequest
@@ -33,6 +35,13 @@ public sealed class UpdateCartItemRequest
 public sealed class UpdateCartNoteRequest
 {
     public string? Note { get; init; }
+}
+
+public sealed class CheckoutCartResponse
+{
+    public required string Message { get; init; }
+
+    public required OrderResponse Order { get; init; }
 }
 
 public sealed class CartResponse

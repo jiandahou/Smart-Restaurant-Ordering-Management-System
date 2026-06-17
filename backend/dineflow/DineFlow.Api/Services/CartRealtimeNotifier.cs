@@ -1,4 +1,5 @@
 using DineFlow.Api.Contracts.Cart;
+using DineFlow.Api.Contracts.Order;
 using DineFlow.Api.Hubs;
 using Microsoft.AspNetCore.SignalR;
 
@@ -25,5 +26,19 @@ public sealed class CartRealtimeNotifier(IHubContext<CartHub> hubContext)
         return hubContext.Clients
             .Group(CartHub.GroupName(cartId))
             .SendAsync(CartRealtimeEvents.CartExpired, cancellationToken);
+    }
+
+    public Task CartSubmittedAsync(
+        Guid cartId,
+        CartResponse cart,
+        OrderResponse order,
+        CancellationToken cancellationToken)
+    {
+        return hubContext.Clients
+            .Group(CartHub.GroupName(cartId))
+            .SendAsync(
+                CartRealtimeEvents.CartSubmitted,
+                new CartSubmittedUpdate(cart, order),
+                cancellationToken);
     }
 }

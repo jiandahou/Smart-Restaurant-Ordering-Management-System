@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Payments;
+using DineFlow.Infrastructure.Restaurant;
 
 namespace DineFlow.Infrastructure.Orders;
 
@@ -12,7 +14,7 @@ public class Order
 
     public Guid? TableId { get; set; }
 
-    public Guid? CustomerId { get; set; }
+    public string? CustomerId { get; set; }
 
     public string OrderNumber { get; set; } = string.Empty;
 
@@ -38,6 +40,12 @@ public class Order
     public ICollection<OrderStatusHistory> StatusHistory { get; set; } = [];
 
     public ICollection<Payment> Payments { get; set; } = [];
+
+    public ApplicationUser? Customer { get; set; }
+
+    public RestaurantTable? Table { get; set; }
+
+    public Restaurant.Restaurant? Restaurant { get; set; }
 }
 
 public enum OrderType

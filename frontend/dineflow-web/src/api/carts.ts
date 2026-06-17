@@ -33,6 +33,35 @@ export type Cart = {
   items: CartItem[]
 }
 
+export type SubmittedOrderItem = {
+  id: string
+  orderId: string
+  menuItemId: string | null
+  itemNameSnapshot: string
+  quantity: number
+  unitPrice: number
+  totalPrice: number
+  note: string | null
+  createdAt: string
+  updatedAt: string | null
+}
+
+export type SubmittedOrder = {
+  id: string
+  restaurantId: string | null
+  tableId: string | null
+  customerId: string | null
+  orderNumber: string
+  orderType: number
+  status: number
+  totalAmount: number
+  customerNote: string | null
+  scheduledTime: string | null
+  createdAt: string
+  updatedAt: string | null
+  orderItems: SubmittedOrderItem[]
+}
+
 export type JoinCartRequest =
   | { restaurantId: string; tableQrToken?: never }
   | { restaurantId?: never; tableQrToken: string }
@@ -40,6 +69,11 @@ export type JoinCartRequest =
 export type JoinCartResponse = {
   participantToken: string
   cart: Cart
+}
+
+export type CheckoutCartResponse = {
+  message: string
+  order: SubmittedOrder
 }
 
 export type AddCartItemRequest = {
@@ -109,6 +143,14 @@ export async function updateCartNote(
   return cartRequest<Cart>(
     `/api/public/carts/${cartId}/note`,
     { method: 'PUT', body: JSON.stringify({ note }) },
+    participantToken,
+  )
+}
+
+export async function checkoutCart(cartId: string, participantToken: string) {
+  return cartRequest<CheckoutCartResponse>(
+    `/api/public/carts/${cartId}/checkout`,
+    { method: 'POST' },
     participantToken,
   )
 }

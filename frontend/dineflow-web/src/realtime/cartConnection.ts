@@ -4,7 +4,7 @@ import {
   HubConnectionState,
   LogLevel,
 } from '@microsoft/signalr'
-import type { Cart } from '@/api/carts'
+import type { Cart, SubmittedOrder } from '@/api/carts'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
@@ -13,10 +13,15 @@ export type CartRealtimeUpdate = {
   cart: Cart | null
 }
 
+export type CartSubmittedUpdate = {
+  cart: Cart
+  order: SubmittedOrder
+}
+
 export type CartRealtimeHandlers = {
   onCartUpdated: (update: CartRealtimeUpdate) => void
   onCartExpired?: () => void
-  onCartSubmitted?: (cart: Cart | null) => void
+  onCartSubmitted?: (update: CartSubmittedUpdate) => void
   onReconnected?: () => void | Promise<void>
 }
 
@@ -39,7 +44,9 @@ export function createCartRealtimeClient(
 
   connection.on('CartUpdated', handlers.onCartUpdated)
   connection.on('CartExpired', () => handlers.onCartExpired?.())
-  connection.on('CartSubmitted', (cart: Cart | null) => handlers.onCartSubmitted?.(cart))
+  connection.on('CartSubmitted', (update: CartSubmittedUpdate) =>
+    handlers.onCartSubmitted?.(update),
+  )
 
   connection.onreconnected(async () => {
     await connection.invoke('JoinCart', cartId, participantToken)

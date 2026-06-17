@@ -24,7 +24,6 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<RestaurantEntity> Restaurants => Set<RestaurantEntity>();
 
     public DbSet<Payment> Payments => Set<Payment>();
-    public DbSet<TestPaymentOrder> TestPaymentOrders => Set<TestPaymentOrder>();
     public DbSet<UserPasskey> UserPasskeys => Set<UserPasskey>();
     public DbSet<UserMfaSettings> UserMfaSettings => Set<UserMfaSettings>();
 
@@ -112,6 +111,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
 
             entity.HasIndex(cart => cart.TableId);
 
+            entity.HasIndex(cart => cart.OrderId)
+                .IsUnique();
+
             entity.HasIndex(cart => cart.ExpiresAt);
 
             entity.HasIndex(cart => cart.TableId)
@@ -144,6 +146,11 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasOne(cart => cart.Table)
                 .WithMany()
                 .HasForeignKey(cart => cart.TableId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(cart => cart.Order)
+                .WithOne()
+                .HasForeignKey<Cart>(cart => cart.OrderId)
                 .OnDelete(DeleteBehavior.Restrict);
 
             entity.HasMany(cart => cart.Items)
@@ -213,9 +220,34 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         {
             entity.HasKey(order => order.Id);
 
+            entity.Property(order => order.CustomerId)
+                .HasMaxLength(450);
+
+            entity.Property(order => order.OrderNumber)
+                .HasMaxLength(40)
+                .IsRequired();
+
             entity.HasIndex(order => order.RestaurantId);
 
             entity.HasIndex(order => order.CustomerId);
+
+            entity.HasIndex(order => order.OrderNumber)
+                .IsUnique();
+
+            entity.HasOne(order => order.Restaurant)
+                .WithMany()
+                .HasForeignKey(order => order.RestaurantId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(order => order.Table)
+                .WithMany()
+                .HasForeignKey(order => order.TableId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(order => order.Customer)
+                .WithMany()
+                .HasForeignKey(order => order.CustomerId)
+                .OnDelete(DeleteBehavior.SetNull);
 
             entity.HasMany(order => order.OrderItems)
                 .WithOne(item => item.Order)
@@ -231,6 +263,13 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         builder.Entity<OrderItem>(entity =>
         {
             entity.HasKey(item => item.Id);
+
+            entity.Property(item => item.ItemNameSnapshot)
+                .HasMaxLength(220)
+                .IsRequired();
+
+            entity.Property(item => item.Note)
+                .HasMaxLength(2_000);
 
             entity.HasIndex(item => item.OrderId);
         });
@@ -263,35 +302,5 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(payment => payment.ProviderPaymentIntentId);
         });
 
-        builder.Entity<TestPaymentOrder>(entity =>
-        {
-            entity.HasKey(order => order.Id);
-
-            entity.Property(order => order.UserId)
-                .HasMaxLength(450);
-
-            entity.Property(order => order.Name)
-                .HasMaxLength(180)
-                .IsRequired();
-
-            entity.Property(order => order.Currency)
-                .HasMaxLength(8)
-                .IsRequired();
-
-            entity.Property(order => order.Status)
-                .HasMaxLength(32)
-                .IsRequired();
-
-            entity.Property(order => order.StripeCheckoutSessionId)
-                .HasMaxLength(255);
-
-            entity.Property(order => order.StripePaymentIntentId)
-                .HasMaxLength(255);
-
-            entity.HasIndex(order => order.StripeCheckoutSessionId)
-                .IsUnique();
-
-            entity.HasIndex(order => order.UserId);
-        });
     }
 }

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Chocolate Lava Cake">
+  <rect width="640" height="480" fill="#f7efea"/>
+  <ellipse cx="320" cy="350" rx="210" ry="62" fill="#d7c2b6"/>
+  <path d="M210 205h220l-24 150H234z" fill="#4b2418" stroke="#2b130e" stroke-width="8"/>
+  <ellipse cx="320" cy="205" rx="110" ry="42" fill="#6a321f" stroke="#2b130e" stroke-width="8"/>
+  <path d="M282 210c20 42 56 42 76 0 6 54-8 94-38 108-30-14-44-54-38-108z" fill="#e46e2e"/>
+  <path d="M275 162c18-20 68-20 92 0" fill="none" stroke="#f7d8bd" stroke-width="10" stroke-linecap="round"/>
+  <text x="32" y="82" font-family="Arial, sans-serif" font-size="46" font-weight="700" fill="#2e1b16">Chocolate Lava Cake</text>
+</svg>

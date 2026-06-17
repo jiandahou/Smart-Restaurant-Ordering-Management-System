@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Garlic Bread">
+  <rect width="640" height="480" fill="#f8f5e9"/>
+  <ellipse cx="330" cy="332" rx="235" ry="72" fill="#d6c8a3"/>
+  <path d="M152 268c64-72 250-108 344-52 36 22 22 73-30 86-98 25-241 24-315 5-27-7-25-10 1-39z" fill="#e7b65f" stroke="#8a5a24" stroke-width="8"/>
+  <path d="M198 246c58 24 187 34 280-4" fill="none" stroke="#fff0bd" stroke-width="16" stroke-linecap="round"/>
+  <path d="M240 286l-16 26M314 292l-16 26M390 284l-16 26" stroke="#5e8b42" stroke-width="10" stroke-linecap="round"/>
+  <text x="58" y="82" font-family="Arial, sans-serif" font-size="48" font-weight="700" fill="#302719">Garlic Bread</text>
+</svg>

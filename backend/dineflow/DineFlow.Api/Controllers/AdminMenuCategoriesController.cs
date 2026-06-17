@@ -251,6 +251,76 @@ public class AdminMenuCategoriesController : ControllerBase
         });
     }
 
+    [HttpPost("reorder")]
+    public async Task<IActionResult> ReorderCategories(
+        [FromBody] ReorderMenuCategoriesRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.RestaurantId == Guid.Empty)
+        {
+            return BadRequest(new { message = "Restaurant is required." });
+        }
+
+        if (request.CategoryIds.Count == 0)
+        {
+            return BadRequest(new { message = "At least one category is required." });
+        }
+
+        if (!await CanAccessRestaurantAsync(request.RestaurantId))
+        {
+            return Forbid();
+        }
+
+        if (request.CategoryIds.Distinct().Count() != request.CategoryIds.Count)
+        {
+            return BadRequest(new { message = "Category order contains duplicates." });
+        }
+
+        var categories = await _dbContext.MenuCategories
+            .Where(category => category.RestaurantId == request.RestaurantId)
+            .OrderBy(category => category.DisplayOrder)
+            .ThenBy(category => category.Name)
+            .ToListAsync(cancellationToken);
+
+        if (categories.Count == 0)
+        {
+            return BadRequest(new { message = "This restaurant has no categories to reorder." });
+        }
+
+        if (categories.Count != request.CategoryIds.Count)
+        {
+            return BadRequest(new { message = "Submit the full category order when reordering." });
+        }
+
+        var categoryIds = categories
+            .Select(category => category.Id)
+            .ToHashSet();
+
+        if (request.CategoryIds.Any(categoryId => !categoryIds.Contains(categoryId)))
+        {
+            return BadRequest(new { message = "One or more categories do not belong to the selected restaurant." });
+        }
+
+        var displayOrderByCategoryId = request.CategoryIds
+            .Select((categoryId, index) => new { categoryId, displayOrder = (index + 1) * 10 })
+            .ToDictionary(entry => entry.categoryId, entry => entry.displayOrder);
+
+        var updatedAt = DateTime.UtcNow;
+
+        foreach (var category in categories)
+        {
+            category.DisplayOrder = displayOrderByCategoryId[category.Id];
+            category.UpdatedAt = updatedAt;
+        }
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(new
+        {
+            message = "Menu categories reordered successfully."
+        });
+    }
+
     private async Task<Guid?> GetCurrentRestaurantIdAsync()
     {
         var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);

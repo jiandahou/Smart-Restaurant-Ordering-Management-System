@@ -6,7 +6,10 @@ import {
   Building2,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Eye,
+  ExternalLink,
+  Link2,
   MapPin,
   Pencil,
   Phone,
@@ -18,6 +21,7 @@ import {
 } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { motion } from 'motion/react'
+import { QRCodeSVG } from 'qrcode.react'
 import { toast } from 'sonner'
 import { z } from 'zod'
 import {
@@ -91,6 +95,7 @@ const timezoneOptions = [
 ]
 
 const currencyOptions = ['AUD', 'NZD', 'USD', 'EUR', 'GBP', 'CAD']
+const publicAppBaseUrl = (import.meta.env.VITE_PUBLIC_APP_BASE_URL || window.location.origin).replace(/\/$/, '')
 
 const emptyRestaurant: RestaurantFormValues = {
   name: '',
@@ -117,6 +122,79 @@ function formatDate(value: string) {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(new Date(value))
+}
+
+function buildTakeawayPublicUrl(restaurantId: string) {
+  return `${publicAppBaseUrl}/r/${restaurantId}/menu`
+}
+
+async function copyText(value: string, successMessage: string) {
+  await navigator.clipboard.writeText(value)
+  toast.success(successMessage)
+}
+
+function PublicAccessCard({
+  title,
+  description,
+  url,
+}: {
+  title: string
+  description: string
+  url: string
+}) {
+  return (
+    <div className="restaurant-public-card">
+      <div className="restaurant-public-card-copy">
+        <div className="restaurant-public-card-body">
+          <div>
+            <span>{title}</span>
+            <strong>{description}</strong>
+          </div>
+          <code>{url}</code>
+        </div>
+        <div className="restaurant-public-card-actions">
+          <Button type="button" variant="outline" size="sm" onClick={() => void copyText(url, `${title} copied`)}>
+            <Copy size={15} />
+            Copy
+          </Button>
+          <Button type="button" variant="secondary" size="sm" asChild>
+            <a href={url} target="_blank" rel="noreferrer">
+              <ExternalLink size={15} />
+              Open
+            </a>
+          </Button>
+        </div>
+      </div>
+      <div className="restaurant-public-card-qr">
+        <QRCodeSVG value={url} size={132} />
+      </div>
+    </div>
+  )
+}
+
+function RestaurantPublicAccessDialog({ restaurant }: { restaurant: Restaurant }) {
+  const takeawayUrl = buildTakeawayPublicUrl(restaurant.id)
+
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <Button type="button" variant="outline" size="icon" title="Public takeaway access" aria-label="Public takeaway access">
+          <Link2 size={16} />
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="restaurant-details-dialog">
+        <DialogHeader>
+          <DialogTitle>{restaurant.name} public access</DialogTitle>
+          <DialogDescription>Share this link or QR code for takeaway and general restaurant ordering.</DialogDescription>
+        </DialogHeader>
+        <PublicAccessCard
+          title="Takeaway menu"
+          description={`${restaurant.name} public ordering entry`}
+          url={takeawayUrl}
+        />
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 type RestaurantFormDialogProps = {
@@ -299,6 +377,8 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
 }
 
 function RestaurantDetailsDialog({ restaurant }: { restaurant: Restaurant }) {
+  const takeawayUrl = buildTakeawayPublicUrl(restaurant.id)
+
   return (
     <Dialog>
       <DialogTrigger asChild>
@@ -320,6 +400,15 @@ function RestaurantDetailsDialog({ restaurant }: { restaurant: Restaurant }) {
           <div><span>Created</span><strong>{formatDate(restaurant.createdAt)}</strong></div>
           <div><span>Last updated</span><strong>{restaurant.updatedAt ? formatDate(restaurant.updatedAt) : 'Not updated'}</strong></div>
           <div className="restaurant-detail-wide"><span>Restaurant ID</span><code>{restaurant.id}</code></div>
+        </div>
+        <div className="restaurant-public-section">
+          <h3>Public takeaway access</h3>
+          <p>Share this public menu link for takeaway or general restaurant ordering.</p>
+          <PublicAccessCard
+            title="Takeaway menu"
+            description={`${restaurant.name} public ordering entry`}
+            url={takeawayUrl}
+          />
         </div>
       </DialogContent>
     </Dialog>
@@ -516,6 +605,7 @@ export function AdminRestaurantsPage() {
                         <td>
                           <div className="row-actions">
                             <RestaurantDetailsDialog restaurant={restaurant} />
+                            <RestaurantPublicAccessDialog restaurant={restaurant} />
                             <RestaurantFormDialog restaurant={restaurant} onSaved={() => loadRestaurants()} />
                             {isPlatformOwner && (
                               <AlertDialog>
