@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
-import { BarChart3, ClipboardList, LayoutDashboard, ListOrdered } from 'lucide-react'
+import { BarChart3, ClipboardList, ListOrdered } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 
 type AdminPlaceholderPageProps = {
@@ -34,17 +34,6 @@ function AdminPlaceholderPage({ title, description, icon: Icon, items }: AdminPl
         </CardContent>
       </Card>
     </main>
-  )
-}
-
-export function AdminDashboardPage() {
-  return (
-    <AdminPlaceholderPage
-      title="Admin Dashboard"
-      description="A starting point for restaurant operations and platform oversight."
-      icon={LayoutDashboard}
-      items={['Today at a glance', 'Open operational alerts', 'Recent admin activity', 'Quick links']}
-    />
   )
 }
 

@@ -34,6 +34,7 @@ import {
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { RestaurantTablesPanel } from '../components/admin/RestaurantTablesPanel'
+import { buildTakeawayPublicUrl } from '../lib/publicUrls'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -95,8 +96,6 @@ const timezoneOptions = [
 ]
 
 const currencyOptions = ['AUD', 'NZD', 'USD', 'EUR', 'GBP', 'CAD']
-const publicAppBaseUrl = (import.meta.env.VITE_PUBLIC_APP_BASE_URL || window.location.origin).replace(/\/$/, '')
-
 const emptyRestaurant: RestaurantFormValues = {
   name: '',
   address: '',
@@ -122,10 +121,6 @@ function formatDate(value: string) {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(new Date(value))
-}
-
-function buildTakeawayPublicUrl(restaurantId: string) {
-  return `${publicAppBaseUrl}/r/${restaurantId}/menu`
 }
 
 async function copyText(value: string, successMessage: string) {

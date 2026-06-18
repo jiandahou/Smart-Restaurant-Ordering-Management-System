@@ -6,7 +6,7 @@ import {
 } from '@microsoft/signalr'
 import type { Cart, SubmittedOrder } from '@/api/carts'
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+const realtimeBaseUrl = (import.meta.env.VITE_SIGNALR_BASE_URL || '').replace(/\/$/, '')
 
 export type CartRealtimeUpdate = {
   reason: string
@@ -18,8 +18,16 @@ export type CartSubmittedUpdate = {
   order: SubmittedOrder
 }
 
+export type CartItemAddedUpdate = {
+  actorParticipantId: string
+  actorName: string
+  itemName: string
+  quantity: number
+}
+
 export type CartRealtimeHandlers = {
   onCartUpdated: (update: CartRealtimeUpdate) => void
+  onCartItemAdded?: (update: CartItemAddedUpdate) => void
   onCartExpired?: () => void
   onCartSubmitted?: (update: CartSubmittedUpdate) => void
   onReconnected?: () => void | Promise<void>
@@ -37,12 +45,15 @@ export function createCartRealtimeClient(
   handlers: CartRealtimeHandlers,
 ): CartRealtimeClient {
   const connection = new HubConnectionBuilder()
-    .withUrl(`${apiBaseUrl}/api/hubs/carts`)
+    .withUrl(`${realtimeBaseUrl}/api/hubs/carts`)
     .withAutomaticReconnect([0, 2_000, 5_000, 10_000, 30_000])
     .configureLogging(import.meta.env.DEV ? LogLevel.Information : LogLevel.Warning)
     .build()
 
   connection.on('CartUpdated', handlers.onCartUpdated)
+  connection.on('CartItemAdded', (update: CartItemAddedUpdate) =>
+    handlers.onCartItemAdded?.(update),
+  )
   connection.on('CartExpired', () => handlers.onCartExpired?.())
   connection.on('CartSubmitted', (update: CartSubmittedUpdate) =>
     handlers.onCartSubmitted?.(update),

@@ -1,10 +1,8 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import './App.css'
 import { AppLayout } from './layout/AppLayout'
-import {
-  AdminDashboardPage,
-  AdminReportsPage,
-} from './pages/AdminPlaceholderPage'
+import { AdminReportsPage } from './pages/AdminPlaceholderPage'
+import { AdminDashboardPage } from './pages/AdminDashboardPage'
 import { AdminMenuPage } from './pages/AdminMenuPage'
 import { AdminOrdersPage } from './pages/AdminOrdersPage'
 import { AdminPaymentsPage } from './pages/AdminPaymentsPage'
@@ -47,14 +45,16 @@ function App() {
         <Route element={<ProtectedRoute />}>
           <Route element={<AppLayout />}>
             <Route path="/me" element={<ProfilePage />} />
-            <Route element={<ProtectedRoute roles={['PlatformOwner', 'RestaurantOwner', 'Admin']} />}>
+            <Route element={<ProtectedRoute roles={['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']} />}>
               <Route path="/admin" element={<AdminDashboardPage />} />
-              <Route path="/admin/users" element={<AdminUsersPage />} />
-              <Route path="/admin/restaurants" element={<AdminRestaurantsPage />} />
               <Route path="/admin/orders" element={<AdminOrdersPage />} />
-              <Route path="/admin/menu" element={<AdminMenuPage />} />
-              <Route path="/admin/payments" element={<AdminPaymentsPage />} />
-              <Route path="/admin/reports" element={<AdminReportsPage />} />
+              <Route element={<ProtectedRoute roles={['PlatformOwner', 'RestaurantOwner', 'Admin']} />}>
+                <Route path="/admin/users" element={<AdminUsersPage />} />
+                <Route path="/admin/restaurants" element={<AdminRestaurantsPage />} />
+                <Route path="/admin/menu" element={<AdminMenuPage />} />
+                <Route path="/admin/payments" element={<AdminPaymentsPage />} />
+                <Route path="/admin/reports" element={<AdminReportsPage />} />
+              </Route>
             </Route>
           </Route>
         </Route>

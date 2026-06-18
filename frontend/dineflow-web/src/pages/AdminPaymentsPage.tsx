@@ -27,6 +27,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select'
+import { getOrderStats, isOrderPayable } from '../lib/orderStats'
 
 type SortKey =
   | 'createdAt'
@@ -145,14 +146,6 @@ function getOrderBadgeVariant(status: string) {
   return badgeVariantByOrderStatus[status] ?? 'secondary'
 }
 
-function isOrderPayable(order: AdminOrder) {
-  if (order.paymentStatus === 'Paid') {
-    return false
-  }
-
-  return !['Cancelled', 'Rejected'].includes(order.status)
-}
-
 function getSearchValues(order: AdminOrder) {
   return [
     order.orderNumber,
@@ -267,12 +260,7 @@ export function AdminPaymentsPage() {
   }, [orders, orderStatusFilter, orderTypeFilter, payableOnly, paymentFilter, restaurantFilter, search, sort])
 
   const totals = useMemo(() => {
-    return {
-      count: filteredOrders.length,
-      payable: filteredOrders.filter(isOrderPayable).length,
-      paid: filteredOrders.filter((order) => order.paymentStatus === 'Paid').length,
-      failed: filteredOrders.filter((order) => order.paymentStatus === 'Failed').length,
-    }
+    return getOrderStats(filteredOrders)
   }, [filteredOrders])
 
   const hasActiveFilters =
@@ -302,7 +290,7 @@ export function AdminPaymentsPage() {
   }
 
   useEffect(() => {
-    void loadOrders()
+    void Promise.resolve().then(() => loadOrders())
   }, [])
 
   const updateSort = (key: SortKey) => {
@@ -376,7 +364,7 @@ export function AdminPaymentsPage() {
           <div className="placeholder-grid order-summary-grid">
             <div className="placeholder-item">
               <strong>Visible orders</strong>
-              <span>{totals.count}</span>
+              <span>{totals.total}</span>
             </div>
             <div className="placeholder-item">
               <strong>Ready to pay</strong>
@@ -388,7 +376,7 @@ export function AdminPaymentsPage() {
             </div>
             <div className="placeholder-item">
               <strong>Failed</strong>
-              <span>{totals.failed}</span>
+              <span>{totals.failedPayment}</span>
             </div>
           </div>
 

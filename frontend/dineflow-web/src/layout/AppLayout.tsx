@@ -18,6 +18,7 @@ import { useAuth } from '../auth/AuthContext'
 import { Avatar, AvatarFallback, AvatarImage } from '../components/ui/avatar'
 import { Button } from '../components/ui/button'
 
+const consoleRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']
 const adminRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin']
 const adminLinks = [
   { to: '/admin', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -46,7 +47,8 @@ export function AppLayout() {
   const navigate = useNavigate()
   const location = useLocation()
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('idle')
-  const canUseAdminArea = hasAnyRole(adminRoles)
+  const canUseAdminArea = hasAnyRole(consoleRoles)
+  const canUseAdminTools = hasAnyRole(adminRoles)
   const isAdminArea = location.pathname.startsWith('/admin')
   const isBackendPulseActive = backendStatus === 'checking' || backendStatus === 'ok'
 
@@ -166,7 +168,9 @@ export function AppLayout() {
 
       {canUseAdminArea && isAdminArea && (
         <nav className="admin-shell-nav" aria-label="Admin area">
-          {adminLinks.map(({ to, label, icon: Icon, end }) => (
+          {adminLinks
+            .filter((link) => canUseAdminTools || ['/admin', '/admin/orders'].includes(link.to))
+            .map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
               to={to}

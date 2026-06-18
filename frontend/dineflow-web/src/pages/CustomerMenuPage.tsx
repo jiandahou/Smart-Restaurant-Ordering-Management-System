@@ -28,6 +28,8 @@ import {
   type Cart,
   type CartItem,
 } from '@/api/carts'
+import type { AuthUser } from '@/api/auth'
+import { useAuth } from '@/auth/AuthContext'
 import { type CheckoutNavigationState } from '@/pages/CheckoutPage'
 import {
   getPublicRestaurantMenu,
@@ -40,6 +42,7 @@ import {
   type PublicOrderingContext,
 } from '@/api/publicMenu'
 import { createCartRealtimeClient, type CartRealtimeClient } from '@/realtime/cartConnection'
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -64,12 +67,32 @@ import { cn } from '@/lib/utils'
 type StoredCartSession = {
   cartId: string
   participantToken: string
+  participantId: string
 }
+
+type CartViewer = Pick<AuthUser, 'fullName' | 'email' | 'avatarUrl'> | null
 
 type CustomerMenuState =
   | { status: 'loading' }
-  | { status: 'ready'; context: PublicOrderingContext; menu: PublicMenu; cart: Cart; participantToken: string }
+  | {
+      status: 'ready'
+      context: PublicOrderingContext
+      menu: PublicMenu
+      cart: Cart
+      participantToken: string
+      participantId: string
+    }
   | { status: 'error'; title: string; message: string }
+
+type CartActivityBanner = {
+  id: number
+  actorName: string
+  itemName: string
+  quantity: number
+}
+
+const cartActivityBannerDurationMs = 5_200
+const cartActivityBannerLaneCount = 4
 
 const cartSessionPrefix = 'dineflow.customer-cart'
 const itemNoteMaxLength = 180
@@ -77,6 +100,7 @@ const itemNoteMaxLength = 180
 export function CustomerMenuPage() {
   const { restaurantId, qrToken } = useParams()
   const navigate = useNavigate()
+  const { user } = useAuth()
   const [state, setState] = useState<CustomerMenuState>({ status: 'loading' })
   const [search, setSearch] = useState('')
   const [activeCategoryId, setActiveCategoryId] = useState<string | 'all'>('all')
@@ -87,7 +111,60 @@ export function CustomerMenuPage() {
   const [selectedItem, setSelectedItem] = useState<PublicMenuItem | null>(null)
   const [selectedItemQuantity, setSelectedItemQuantity] = useState(1)
   const [selectedItemNote, setSelectedItemNote] = useState('')
+  const [cartActivityBanners, setCartActivityBanners] = useState<Array<CartActivityBanner | null>>(
+    Array.from({ length: cartActivityBannerLaneCount }, () => null),
+  )
   const realtimeClientRef = useRef<CartRealtimeClient | null>(null)
+  const latestCartRef = useRef<Cart | null>(null)
+  const cartActivityBannerTimeoutsRef = useRef<number[]>([])
+
+  const showCartActivityBanner = (actorName: string, itemName: string, itemQuantity: number) => {
+    const id = Date.now() + Math.floor(Math.random() * 1_000)
+    let laneIndex = 0
+
+    setCartActivityBanners((current) => {
+      const emptyLaneIndex = current.findIndex((banner) => banner === null)
+      laneIndex = emptyLaneIndex >= 0
+        ? emptyLaneIndex
+        : current.reduce(
+            (oldestIndex, banner, index) =>
+              (banner?.id ?? 0) < (current[oldestIndex]?.id ?? 0) ? index : oldestIndex,
+            0,
+          )
+
+      const next = [...current]
+      next[laneIndex] = {
+        id,
+        actorName,
+        itemName,
+        quantity: itemQuantity,
+      }
+
+      return next
+    })
+
+    const timeoutId = window.setTimeout(() => {
+      setCartActivityBanners((current) => {
+        const next = [...current]
+        if (next[laneIndex]?.id === id) {
+          next[laneIndex] = null
+        }
+        return next
+      })
+      cartActivityBannerTimeoutsRef.current = cartActivityBannerTimeoutsRef.current.filter(
+        (entry) => entry !== timeoutId,
+      )
+    }, cartActivityBannerDurationMs)
+
+    cartActivityBannerTimeoutsRef.current.push(timeoutId)
+  }
+
+  useEffect(() => {
+    return () => {
+      cartActivityBannerTimeoutsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId))
+      cartActivityBannerTimeoutsRef.current = []
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -124,6 +201,7 @@ export function CustomerMenuPage() {
           menu,
           cart: cartSession.cart,
           participantToken: cartSession.participantToken,
+          participantId: cartSession.participantId,
         })
       } catch (error) {
         if (cancelled) {
@@ -147,6 +225,10 @@ export function CustomerMenuPage() {
   }, [restaurantId, qrToken])
 
   useEffect(() => {
+    latestCartRef.current = state.status === 'ready' ? state.cart : null
+  }, [state])
+
+  useEffect(() => {
     if (state.status !== 'ready') {
       void realtimeClientRef.current?.stop()
       realtimeClientRef.current = null
@@ -156,12 +238,21 @@ export function CustomerMenuPage() {
     const client = createCartRealtimeClient(state.cart.id, state.participantToken, {
       onCartUpdated: ({ cart }) => {
         if (cart) {
+          latestCartRef.current = cart
           setState((current) =>
             current.status === 'ready' ? { ...current, cart } : current,
           )
         }
       },
+      onCartItemAdded: (update) => {
+        if (update.actorParticipantId === state.participantId) {
+          return
+        }
+
+        showCartActivityBanner(update.actorName, update.itemName, update.quantity)
+      },
       onCartSubmitted: ({ cart }) => {
+        latestCartRef.current = cart
         setState((current) =>
           current.status === 'ready' ? { ...current, cart } : current,
         )
@@ -176,6 +267,7 @@ export function CustomerMenuPage() {
       },
       onReconnected: async () => {
         const refreshed = await getCart(state.cart.id, state.participantToken)
+        latestCartRef.current = refreshed
         setState((current) =>
           current.status === 'ready' ? { ...current, cart: refreshed } : current,
         )
@@ -189,7 +281,55 @@ export function CustomerMenuPage() {
       void client.stop()
       realtimeClientRef.current = null
     }
-  }, [state.status === 'ready' ? state.cart.id : null, state.status === 'ready' ? state.participantToken : null])
+  }, [
+    state.status === 'ready' ? state.cart.id : null,
+    state.status === 'ready' ? state.participantToken : null,
+    state.status === 'ready' ? state.participantId : null,
+  ])
+
+  useEffect(() => {
+    if (state.status !== 'ready') {
+      return undefined
+    }
+
+    let stopped = false
+    const cartId = state.cart.id
+    const participantToken = state.participantToken
+
+    const intervalId = window.setInterval(async () => {
+      try {
+        const refreshed = await getCart(cartId, participantToken)
+
+        if (stopped) {
+          return
+        }
+
+        const previousCart = latestCartRef.current
+        const addedItem = previousCart ? detectCartAddition(previousCart, refreshed) : null
+        latestCartRef.current = refreshed
+
+        setState((current) =>
+          current.status === 'ready' && current.cart.id === cartId
+            ? { ...current, cart: refreshed }
+            : current,
+        )
+
+        if (addedItem) {
+          showCartActivityBanner('Someone', addedItem.name, addedItem.quantity)
+        }
+      } catch {
+        // Realtime remains the primary path; polling is only a quiet fallback.
+      }
+    }, 2_500)
+
+    return () => {
+      stopped = true
+      window.clearInterval(intervalId)
+    }
+  }, [
+    state.status === 'ready' ? state.cart.id : null,
+    state.status === 'ready' ? state.participantToken : null,
+  ])
 
   const visibleCategories = useMemo(() => {
     if (state.status !== 'ready') {
@@ -304,9 +444,11 @@ export function CustomerMenuPage() {
         quantity,
         ...(normalizedNote ? { note: normalizedNote } : {}),
       })
+      latestCartRef.current = updatedCart
       setState((current) =>
         current.status === 'ready' ? { ...current, cart: updatedCart } : current,
       )
+      showCartActivityBanner('You', item.name, quantity)
       toast.success(`${item.name} added to cart`)
       return true
     } catch (error) {
@@ -346,6 +488,7 @@ export function CustomerMenuPage() {
         ...(item.note ? { note: item.note } : {}),
       })
 
+      latestCartRef.current = updatedCart
       setState((current) =>
         current.status === 'ready' ? { ...current, cart: updatedCart } : current,
       )
@@ -366,6 +509,7 @@ export function CustomerMenuPage() {
     try {
       const updatedCart = await deleteCartItem(cart.id, item.id, participantToken)
 
+      latestCartRef.current = updatedCart
       setState((current) =>
         current.status === 'ready' ? { ...current, cart: updatedCart } : current,
       )
@@ -477,6 +621,7 @@ export function CustomerMenuPage() {
 
       <CartSummaryBar
         cart={cart}
+        viewer={user}
         currencyFormatter={currencyFormatter}
         open={cartOpen}
         updatingItemId={cartActionItemId}
@@ -498,6 +643,16 @@ export function CustomerMenuPage() {
         onNoteChange={setSelectedItemNote}
         onAddToCart={addSelectedItem}
       />
+
+      {cartActivityBanners.some(Boolean) && (
+        <div className="cart-activity-banner-lanes" aria-live="polite">
+          {cartActivityBanners.map((banner, index) => (
+            <div key={index} className="cart-activity-banner-lane">
+              {banner && <CartActivityBannerView banner={banner} />}
+            </div>
+          ))}
+        </div>
+      )}
     </main>
   )
 }
@@ -505,7 +660,7 @@ export function CustomerMenuPage() {
 async function loadOrJoinCart(
   context: PublicOrderingContext,
   storageKeySuffix: string,
-): Promise<{ cart: Cart; participantToken: string }> {
+): Promise<{ cart: Cart; participantToken: string; participantId: string }> {
   const storageKey = `${cartSessionPrefix}.${storageKeySuffix}`
   const stored = readStoredCartSession(storageKey)
 
@@ -514,7 +669,11 @@ async function loadOrJoinCart(
       const cart = await getCart(stored.cartId, stored.participantToken)
 
       if (cart.status === 'Active') {
-        return { cart, participantToken: stored.participantToken }
+        return {
+          cart,
+          participantToken: stored.participantToken,
+          participantId: stored.participantId,
+        }
       }
     } catch {
       sessionStorage.removeItem(storageKey)
@@ -532,10 +691,15 @@ async function loadOrJoinCart(
     JSON.stringify({
       cartId: joined.cart.id,
       participantToken: joined.participantToken,
+      participantId: joined.participantId,
     } satisfies StoredCartSession),
   )
 
-  return joined
+  return {
+    cart: joined.cart,
+    participantToken: joined.participantToken,
+    participantId: joined.participantId,
+  }
 }
 
 function readStoredCartSession(storageKey: string) {
@@ -548,17 +712,58 @@ function readStoredCartSession(storageKey: string) {
 
     const parsed = JSON.parse(rawValue) as Partial<StoredCartSession>
 
-    if (!parsed.cartId || !parsed.participantToken) {
+    if (!parsed.cartId || !parsed.participantToken || !parsed.participantId) {
       return null
     }
 
     return {
       cartId: parsed.cartId,
       participantToken: parsed.participantToken,
+      participantId: parsed.participantId,
     }
   } catch {
     return null
   }
+}
+
+function detectCartAddition(previousCart: Cart, nextCart: Cart) {
+  const previousQuantities = new Map<string, number>()
+
+  previousCart.items.forEach((item) => {
+    previousQuantities.set(getCartItemKey(item), item.quantity)
+  })
+
+  for (const item of nextCart.items) {
+    const previousQuantity = previousQuantities.get(getCartItemKey(item)) ?? 0
+    const addedQuantity = item.quantity - previousQuantity
+
+    if (addedQuantity > 0) {
+      return {
+        name: item.name,
+        quantity: addedQuantity,
+      }
+    }
+  }
+
+  return null
+}
+
+function getCartItemKey(item: CartItem) {
+  return `${item.menuItemId}:${item.note ?? ''}`
+}
+
+function CartActivityBannerView({ banner }: { banner: CartActivityBanner }) {
+  const quantityText = banner.quantity > 1 ? ` x ${banner.quantity}` : ''
+
+  return (
+    <div className="cart-activity-banner" role="status" aria-live="polite">
+      <ShoppingBag className="size-5" />
+      <div>
+        <strong>{banner.actorName} added {banner.itemName}{quantityText}</strong>
+        <span>The shared cart has been updated.</span>
+      </div>
+    </div>
+  )
 }
 
 function CategorySidebar({
@@ -972,6 +1177,7 @@ function ItemDetailContent({
 
 function CartSummaryBar({
   cart,
+  viewer,
   currencyFormatter,
   open,
   updatingItemId,
@@ -982,6 +1188,7 @@ function CartSummaryBar({
   onCheckout,
 }: {
   cart: Cart
+  viewer: CartViewer
   currencyFormatter: Intl.NumberFormat
   open: boolean
   updatingItemId: string | null
@@ -1001,17 +1208,22 @@ function CartSummaryBar({
           <Card className="overflow-hidden rounded-lg shadow-lg">
             <CardContent className="p-0">
               <div className="flex items-start justify-between gap-3 border-b p-4">
-                <div className="min-w-0 space-y-1">
-                  <h2 className="flex items-center gap-2 text-lg font-semibold">
-                    <ShoppingBag className="size-5" />
-                    Cart
-                  </h2>
-                  <p className="text-sm text-muted-foreground">
-                    {hasItems
-                      ? `${cart.itemCount} item${cart.itemCount === 1 ? '' : 's'} in this order`
-                      : 'Your cart is empty.'}
-                  </p>
+                <div className="flex min-w-0 flex-1 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0 space-y-1">
+                    <h2 className="flex items-center gap-2 text-lg font-semibold">
+                      <ShoppingBag className="size-5" />
+                      Cart
+                    </h2>
+                    <p className="text-sm text-muted-foreground">
+                      {hasItems
+                        ? `${cart.itemCount} item${cart.itemCount === 1 ? '' : 's'} in this order`
+                        : 'Your cart is empty.'}
+                    </p>
+                  </div>
+
+                  <CartViewerPill viewer={viewer} />
                 </div>
+
                 <Button
                   type="button"
                   variant="ghost"
@@ -1103,6 +1315,36 @@ function CartSummaryBar({
             <span className="font-semibold">{currencyFormatter.format(cart.total)}</span>
           </span>
         </Button>
+      </div>
+    </div>
+  )
+}
+
+function CartViewerPill({ viewer }: { viewer: CartViewer }) {
+  if (!viewer) {
+    return (
+      <div className="inline-flex items-center rounded-full border bg-muted/35 px-3 py-1.5 text-sm font-semibold">
+        Guest
+      </div>
+    )
+  }
+
+  const displayName = viewer?.fullName?.trim() || viewer?.email?.trim() || 'User'
+  const secondaryText = viewer.email && viewer.email !== displayName ? viewer.email : 'Signed in'
+
+  return (
+    <div className="flex min-w-0 max-w-full items-center gap-2 rounded-full border bg-muted/35 px-2.5 py-1.5 text-left sm:max-w-72">
+      <Avatar>
+        {viewer.avatarUrl ? (
+          <AvatarImage src={viewer.avatarUrl} alt={`${displayName} avatar`} />
+        ) : null}
+        <AvatarFallback>{getInitials(displayName)}</AvatarFallback>
+      </Avatar>
+      <div className="min-w-0">
+        <p className="truncate text-sm font-semibold leading-tight">
+          {displayName}
+        </p>
+        <p className="truncate text-xs text-muted-foreground">{secondaryText}</p>
       </div>
     </div>
   )
@@ -1272,6 +1514,17 @@ function createCurrencyFormatter(currency: string) {
     style: 'currency',
     currency: currency || 'AUD',
   })
+}
+
+function getInitials(value?: string | null) {
+  const source = value?.trim() || 'U'
+  const words = source.split(/\s+/).filter(Boolean)
+
+  if (words.length >= 2) {
+    return `${words[0][0]}${words[1][0]}`.toUpperCase()
+  }
+
+  return source.slice(0, 2).toUpperCase()
 }
 
 function useIsMobile() {

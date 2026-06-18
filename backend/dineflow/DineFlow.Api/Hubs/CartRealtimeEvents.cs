@@ -6,10 +6,17 @@ namespace DineFlow.Api.Hubs;
 public static class CartRealtimeEvents
 {
     public const string CartUpdated = "CartUpdated";
+    public const string CartItemAdded = "CartItemAdded";
     public const string CartExpired = "CartExpired";
     public const string CartSubmitted = "CartSubmitted";
 }
 
 public sealed record CartRealtimeUpdate(string Reason, CartResponse? Cart);
+
+public sealed record CartItemAddedUpdate(
+    Guid ActorParticipantId,
+    string ActorName,
+    string ItemName,
+    int Quantity);
 
 public sealed record CartSubmittedUpdate(CartResponse Cart, OrderResponse Order);

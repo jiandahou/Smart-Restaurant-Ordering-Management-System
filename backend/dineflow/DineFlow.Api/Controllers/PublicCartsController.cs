@@ -163,6 +163,7 @@ public class PublicCartsController(
         return Ok(new JoinCartResponse
         {
             ParticipantToken = participantToken,
+            ParticipantId = participant.Id,
             Cart = snapshot!
         });
     }
@@ -259,7 +260,28 @@ public class PublicCartsController(
         access.Participant!.LastSeenAt = DateTime.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        return await ReturnUpdatedCartAsync(cartId, "item-added", cancellationToken);
+        var snapshot = await cartAccessService.LoadSnapshotAsync(cartId, cancellationToken);
+
+        if (snapshot is null)
+        {
+            return NotFound(new { message = "Cart not found." });
+        }
+
+        await cartRealtimeNotifier.CartUpdatedAsync(
+            cartId,
+            "item-added",
+            snapshot,
+            cancellationToken);
+
+        await cartRealtimeNotifier.CartItemAddedAsync(
+            cartId,
+            access.Participant.Id,
+            GetParticipantDisplayName(access.Participant),
+            menuItem.Name,
+            request.Quantity,
+            cancellationToken);
+
+        return Ok(snapshot);
     }
 
     [HttpPut("{cartId:guid}/items/{cartItemId:guid}")]
@@ -608,6 +630,21 @@ public class PublicCartsController(
     private static string GenerateParticipantToken()
     {
         return WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+    }
+
+    private static string GetParticipantDisplayName(CartParticipant participant)
+    {
+        if (!string.IsNullOrWhiteSpace(participant.Customer?.FullName))
+        {
+            return participant.Customer.FullName;
+        }
+
+        if (!string.IsNullOrWhiteSpace(participant.Customer?.Email))
+        {
+            return participant.Customer.Email;
+        }
+
+        return "Someone";
     }
 
     private async Task<IActionResult> ReturnUpdatedCartAsync(
