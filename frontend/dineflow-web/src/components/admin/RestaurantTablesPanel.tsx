@@ -13,6 +13,7 @@ import {
   type Restaurant,
   type RestaurantTable,
 } from '../../api/auth'
+import { buildTablePublicUrl } from '../../lib/publicUrls'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card'
@@ -48,17 +49,11 @@ const emptyTable: TableFormValues = {
   capacity: 2,
   isActive: true,
 }
-const publicAppBaseUrl = (import.meta.env.VITE_PUBLIC_APP_BASE_URL || window.location.origin).replace(/\/$/, '')
-
 function formatDate(value: string) {
   return new Intl.DateTimeFormat('en-AU', {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(new Date(value))
-}
-
-function buildTablePublicUrl(qrToken: string) {
-  return `${publicAppBaseUrl}/table/${encodeURIComponent(qrToken)}`
 }
 
 async function copyText(value: string, successMessage: string) {

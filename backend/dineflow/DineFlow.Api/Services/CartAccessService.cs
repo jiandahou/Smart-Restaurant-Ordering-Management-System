@@ -51,6 +51,7 @@ public sealed class CartAccessService(AppDbContext dbContext)
         }
 
         var participants = await dbContext.CartParticipants
+            .Include(participant => participant.Customer)
             .Where(participant => participant.CartId == cartId)
             .ToListAsync(cancellationToken);
 

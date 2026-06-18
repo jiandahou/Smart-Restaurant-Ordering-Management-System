@@ -13,6 +13,8 @@ public sealed class JoinCartResponse
 {
     public required string ParticipantToken { get; init; }
 
+    public Guid ParticipantId { get; init; }
+
     public required CartResponse Cart { get; init; }
 }
 

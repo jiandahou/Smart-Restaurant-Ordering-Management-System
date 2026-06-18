@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { getAdminOrders, type AdminOrder } from '../api/auth'
+import { useAuth } from '../auth/AuthContext'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
@@ -25,6 +26,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select'
+import { getOrderStats } from '../lib/orderStats'
 
 type SortKey =
   | 'createdAt'
@@ -223,6 +225,7 @@ function SortHeader({
 }
 
 export function AdminOrdersPage() {
+  const { user } = useAuth()
   const [orders, setOrders] = useState<AdminOrder[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -237,6 +240,8 @@ export function AdminOrdersPage() {
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null)
   const tableWrapRef = useRef<HTMLDivElement | null>(null)
   const [tableViewportWidth, setTableViewportWidth] = useState<number | null>(null)
+  const isStaff = Boolean(user?.roles.includes('Staff'))
+    && !user?.roles.some((role) => ['PlatformOwner', 'RestaurantOwner', 'Admin'].includes(role))
 
   const restaurantOptions = useMemo(() => {
     return Array.from(
@@ -301,14 +306,7 @@ export function AdminOrdersPage() {
   }, [orders, orderTypeFilter, paymentFilter, restaurantFilter, search, sort, statusFilter])
 
   const totals = useMemo(() => {
-    return {
-      count: filteredOrders.length,
-      paid: filteredOrders.filter((order) => order.paymentStatus === 'Paid').length,
-      pendingPayment: filteredOrders.filter((order) => order.paymentStatus === 'Pending').length,
-      activeKitchen: filteredOrders.filter((order) =>
-        ['Pending', 'Accepted', 'Preparing', 'Ready'].includes(order.status),
-      ).length,
-    }
+    return getOrderStats(filteredOrders)
   }, [filteredOrders])
 
   const hasActiveFilters =
@@ -336,7 +334,7 @@ export function AdminOrdersPage() {
   }
 
   useEffect(() => {
-    void loadOrders()
+    void Promise.resolve().then(() => loadOrders())
   }, [])
 
   useEffect(() => {
@@ -404,7 +402,7 @@ export function AdminOrdersPage() {
           <div className="placeholder-grid order-summary-grid">
             <div className="placeholder-item">
               <strong>Total orders</strong>
-              <span>{totals.count}</span>
+              <span>{totals.total}</span>
             </div>
             <div className="placeholder-item">
               <strong>Kitchen active</strong>
@@ -545,6 +543,7 @@ export function AdminOrdersPage() {
                       onClick={() => updateSort('createdAt')}
                     />
                   </th>
+                  {isStaff && <th>Action</th>}
                 </tr>
               </thead>
               <tbody>
@@ -616,10 +615,17 @@ export function AdminOrdersPage() {
                           </span>
                         </td>
                         <td>{formatDate(order.createdAt)}</td>
+                        {isStaff && (
+                          <td>
+                            <Button type="button" variant="outline" size="sm" disabled>
+                              Process soon
+                            </Button>
+                          </td>
+                        )}
                       </tr>
                       {isExpanded && (
                         <tr className="order-detail-row">
-                          <td colSpan={8}>
+                          <td colSpan={isStaff ? 9 : 8}>
                             <div
                               className="order-detail-panel"
                               style={tableViewportWidth ? { width: `${tableViewportWidth}px` } : undefined}
@@ -690,7 +696,7 @@ export function AdminOrdersPage() {
                 })}
                 {filteredOrders.length === 0 && (
                   <tr>
-                    <td colSpan={8} className="empty-cell">
+                    <td colSpan={isStaff ? 9 : 8} className="empty-cell">
                       {loading
                         ? 'Loading real orders...'
                         : hasActiveFilters

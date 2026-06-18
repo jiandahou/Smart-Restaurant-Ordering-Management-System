@@ -13,7 +13,7 @@ namespace DineFlow.Api.Controllers;
 
 [ApiController]
 [Route("api/admin/orders")]
-[Authorize(Policy = AuthorizationPolicies.AdminApi)]
+[Authorize(Policy = AuthorizationPolicies.StaffApi)]
 public class AdminOrdersController : ControllerBase
 {
     private readonly AppDbContext _dbContext;

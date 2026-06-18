@@ -68,6 +68,7 @@ export type JoinCartRequest =
 
 export type JoinCartResponse = {
   participantToken: string
+  participantId: string
   cart: Cart
 }
 

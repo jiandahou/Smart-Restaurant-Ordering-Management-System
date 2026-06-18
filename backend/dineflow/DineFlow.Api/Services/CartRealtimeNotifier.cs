@@ -28,6 +28,22 @@ public sealed class CartRealtimeNotifier(IHubContext<CartHub> hubContext)
             .SendAsync(CartRealtimeEvents.CartExpired, cancellationToken);
     }
 
+    public Task CartItemAddedAsync(
+        Guid cartId,
+        Guid actorParticipantId,
+        string actorName,
+        string itemName,
+        int quantity,
+        CancellationToken cancellationToken)
+    {
+        return hubContext.Clients
+            .Group(CartHub.GroupName(cartId))
+            .SendAsync(
+                CartRealtimeEvents.CartItemAdded,
+                new CartItemAddedUpdate(actorParticipantId, actorName, itemName, quantity),
+                cancellationToken);
+    }
+
     public Task CartSubmittedAsync(
         Guid cartId,
         CartResponse cart,
