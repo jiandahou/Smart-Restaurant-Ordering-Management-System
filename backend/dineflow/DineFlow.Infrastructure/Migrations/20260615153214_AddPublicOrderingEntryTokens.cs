@@ -15,21 +15,21 @@ namespace DineFlow.Infrastructure.Migrations
                 WITH ranked_tokens AS (
                     SELECT
                         "Id",
-                        "QrToken",
+                        "QrCodeToken",
                         ROW_NUMBER() OVER (
-                            PARTITION BY "QrToken"
+                            PARTITION BY "QrCodeToken"
                             ORDER BY "CreatedAt", "Id") AS token_rank
                     FROM "RestaurantTables"
                 )
                 UPDATE "RestaurantTables" AS restaurant_table
-                SET "QrToken" =
+                SET "QrCodeToken" =
                     replace(gen_random_uuid()::text, '-', '') ||
                     replace(gen_random_uuid()::text, '-', '')
                 FROM ranked_tokens
                 WHERE restaurant_table."Id" = ranked_tokens."Id"
                   AND (
-                      btrim(coalesce(ranked_tokens."QrToken", '')) = ''
-                      OR length(ranked_tokens."QrToken") > 64
+                      btrim(coalesce(ranked_tokens."QrCodeToken", '')) = ''
+                      OR length(ranked_tokens."QrCodeToken") > 64
                       OR ranked_tokens.token_rank > 1
                   );
                 """);
@@ -44,7 +44,7 @@ namespace DineFlow.Infrastructure.Migrations
                 oldType: "text");
 
             migrationBuilder.AlterColumn<string>(
-                name: "QrToken",
+                name: "QrCodeToken",
                 table: "RestaurantTables",
                 type: "character varying(64)",
                 maxLength: 64,
@@ -52,25 +52,15 @@ namespace DineFlow.Infrastructure.Migrations
                 oldClrType: typeof(string),
                 oldType: "text");
 
-            migrationBuilder.CreateIndex(
-                name: "IX_RestaurantTables_QrToken",
-                table: "RestaurantTables",
-                column: "QrToken",
-                unique: true);
-
             migrationBuilder.AddCheckConstraint(
                 name: "CK_RestaurantTables_QrToken_NotEmpty",
                 table: "RestaurantTables",
-                sql: "length(\"QrToken\") > 0");
+                sql: "length(\"QrCodeToken\") > 0");
         }
 
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropIndex(
-                name: "IX_RestaurantTables_QrToken",
-                table: "RestaurantTables");
-
             migrationBuilder.DropCheckConstraint(
                 name: "CK_RestaurantTables_QrToken_NotEmpty",
                 table: "RestaurantTables");
@@ -85,7 +75,7 @@ namespace DineFlow.Infrastructure.Migrations
                 oldMaxLength: 40);
 
             migrationBuilder.AlterColumn<string>(
-                name: "QrToken",
+                name: "QrCodeToken",
                 table: "RestaurantTables",
                 type: "text",
                 nullable: false,

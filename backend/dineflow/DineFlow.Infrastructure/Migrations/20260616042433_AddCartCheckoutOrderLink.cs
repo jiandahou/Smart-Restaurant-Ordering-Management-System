@@ -26,32 +26,6 @@ namespace DineFlow.Infrastructure.Migrations
                 USING "CustomerId"::text;
                 """);
 
-            migrationBuilder.AlterColumn<string>(
-                name: "Note",
-                table: "OrderItems",
-                type: "character varying(2000)",
-                maxLength: 2000,
-                nullable: true,
-                oldClrType: typeof(string),
-                oldType: "text",
-                oldNullable: true);
-
-            migrationBuilder.AddColumn<string>(
-                name: "ItemNameSnapshot",
-                table: "OrderItems",
-                type: "character varying(220)",
-                maxLength: 220,
-                nullable: false,
-                defaultValue: "");
-
-            migrationBuilder.Sql("""
-                UPDATE "OrderItems" AS order_item
-                SET "ItemNameSnapshot" = COALESCE(menu_item."Name", 'Unavailable item')
-                FROM "MenuItems" AS menu_item
-                WHERE order_item."MenuItemId" = menu_item."Id"
-                    AND order_item."ItemNameSnapshot" = '';
-                """);
-
             migrationBuilder.AddColumn<Guid>(
                 name: "OrderId",
                 table: "Carts",
@@ -95,10 +69,6 @@ namespace DineFlow.Infrastructure.Migrations
                 table: "Carts");
 
             migrationBuilder.DropColumn(
-                name: "ItemNameSnapshot",
-                table: "OrderItems");
-
-            migrationBuilder.DropColumn(
                 name: "OrderId",
                 table: "Carts");
 
@@ -117,15 +87,6 @@ namespace DineFlow.Infrastructure.Migrations
                 USING NULLIF("CustomerId", '')::uuid;
                 """);
 
-            migrationBuilder.AlterColumn<string>(
-                name: "Note",
-                table: "OrderItems",
-                type: "text",
-                nullable: true,
-                oldClrType: typeof(string),
-                oldType: "character varying(2000)",
-                oldMaxLength: 2000,
-                oldNullable: true);
         }
     }
 }
