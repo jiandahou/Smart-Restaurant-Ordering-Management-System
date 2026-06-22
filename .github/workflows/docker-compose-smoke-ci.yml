@@ -33,6 +33,20 @@ jobs:
       - name: Build backend image
         run: docker compose build backend
 
+      - name: Pull service images
+        run: |
+          for attempt in 1 2 3; do
+            if docker compose pull postgres minio minio-init; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+
+            sleep $((attempt * 10))
+          done
+
       - name: Start backend stack
         run: docker compose up -d postgres backend
 
