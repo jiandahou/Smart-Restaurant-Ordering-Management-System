@@ -115,10 +115,7 @@ function formatMoney(amount: number, currencyCode?: string | null) {
 }
 
 function formatDate(value: string | null) {
-  if (!value) {
-    return 'Not yet'
-  }
-
+  if (!value) return '—'
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: 'medium',
     timeStyle: 'short',
@@ -318,7 +315,6 @@ export function AdminOrdersPage() {
 
   const loadOrders = async (showToast = false) => {
     setLoading(true)
-
     try {
       setOrders(await getAdminOrders())
       if (showToast) {

@@ -127,11 +127,11 @@ public class AdminOrdersController : ControllerBase
                 {
                     Id = item.Id,
                     MenuItemId = item.MenuItemId,
-                    ItemNameSnapshot = item.ItemNameSnapshot,
+                    ItemNameSnapshot = item.MenuItemNameSnapshot,
                     Quantity = item.Quantity,
                     UnitPrice = item.UnitPrice,
                     TotalPrice = item.Quantity * item.UnitPrice,
-                    Note = item.Note
+                    Note = item.ItemInstructions
                 })
                 .ToList()
         };

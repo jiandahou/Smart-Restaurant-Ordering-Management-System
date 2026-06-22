@@ -518,10 +518,11 @@ public class PublicCartsController(
             {
                 Id = Guid.NewGuid(),
                 MenuItemId = menuItem.Id,
-                ItemNameSnapshot = menuItem.Name,
+                MenuItemNameSnapshot = menuItem.Name,
+                BasePriceSnapshot = menuItem.Price,
                 Quantity = cartItem.Quantity,
                 UnitPrice = menuItem.Price,
-                Note = cartItem.Note,
+                ItemInstructions = cartItem.Note,
                 CreatedAt = now
             });
         }
@@ -712,12 +713,24 @@ public class PublicCartsController(
                     Id = item.Id,
                     OrderId = item.OrderId,
                     MenuItemId = item.MenuItemId,
-                    ItemNameSnapshot = item.ItemNameSnapshot,
+                    MenuItemNameSnapshot = item.MenuItemNameSnapshot,
+                    ItemNameSnapshot = item.MenuItemNameSnapshot,
+                    BasePriceSnapshot = item.BasePriceSnapshot,
                     Quantity = item.Quantity,
                     UnitPrice = item.UnitPrice,
-                    Note = item.Note,
+                    ItemInstructions = item.ItemInstructions,
+                    Note = item.ItemInstructions,
+                    AllergyInfo = item.AllergyInfo,
                     CreatedAt = item.CreatedAt,
-                    UpdatedAt = item.UpdatedAt
+                    UpdatedAt = item.UpdatedAt,
+                    SelectedOptions = item.SelectedOptions.Select(option => new OrderItemOptionResponse
+                    {
+                        Id = option.Id,
+                        MenuItemOptionId = option.MenuItemOptionId,
+                        GroupNameSnapshot = option.GroupNameSnapshot,
+                        OptionNameSnapshot = option.OptionNameSnapshot,
+                        PriceAdjustmentSnapshot = option.PriceAdjustmentSnapshot
+                    }).ToList()
                 })
                 .ToList()
         };
@@ -821,9 +834,9 @@ public class PublicCartsController(
                         UnitAmount = ConvertToCents(item.UnitPrice),
                         ProductData = new SessionLineItemPriceDataProductDataOptions
                         {
-                            Name = string.IsNullOrWhiteSpace(item.ItemNameSnapshot)
+                            Name = string.IsNullOrWhiteSpace(item.MenuItemNameSnapshot)
                                 ? "Menu item"
-                                : item.ItemNameSnapshot.Trim()
+                                : item.MenuItemNameSnapshot.Trim()
                         }
                     }
                 })

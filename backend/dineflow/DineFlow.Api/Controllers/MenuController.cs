@@ -58,6 +58,8 @@ public class MenuController : ControllerBase
 
         var query = _dbContext.MenuItems
             .Include(i => i.Category)
+            .Include(i => i.OptionGroups.Where(g => g.IsActive))
+                .ThenInclude(g => g.Options.Where(o => o.IsAvailable))
             .Where(i => i.RestaurantId == restaurantId && i.IsAvailable);
 
         if (categoryId.HasValue && categoryId.Value != Guid.Empty)
@@ -66,25 +68,9 @@ public class MenuController : ControllerBase
         var items = await query
             .OrderBy(i => i.DisplayOrder)
             .ThenBy(i => i.Name)
-            .Select(i => new MenuItemResponse
-            {
-                Id = i.Id,
-                RestaurantId = i.RestaurantId,
-                CategoryId = i.CategoryId,
-                CategoryName = i.Category != null ? i.Category.Name : string.Empty,
-                Name = i.Name,
-                Description = i.Description,
-                Price = i.Price,
-                ImageUrl = i.ImageUrl,
-                IsAvailable = i.IsAvailable,
-                IsSoldOut = i.IsSoldOut,
-                DisplayOrder = i.DisplayOrder,
-                CreatedAt = i.CreatedAt,
-                UpdatedAt = i.UpdatedAt
-            })
             .ToListAsync();
 
-        return Ok(items);
+        return Ok(items.Select(MapItem));
     }
 
     /// <summary>
@@ -104,30 +90,65 @@ public class MenuController : ControllerBase
 
         var items = await _dbContext.MenuItems
             .Include(i => i.Category)
+            .Include(i => i.OptionGroups.Where(g => g.IsActive))
+                .ThenInclude(g => g.Options.Where(o => o.IsAvailable))
             .Where(i =>
                 i.RestaurantId == restaurantId &&
                 i.IsAvailable &&
                 (i.Name.ToLower().Contains(term) || (i.Description != null && i.Description.ToLower().Contains(term))))
             .OrderBy(i => i.DisplayOrder)
             .ThenBy(i => i.Name)
-            .Select(i => new MenuItemResponse
-            {
-                Id = i.Id,
-                RestaurantId = i.RestaurantId,
-                CategoryId = i.CategoryId,
-                CategoryName = i.Category != null ? i.Category.Name : string.Empty,
-                Name = i.Name,
-                Description = i.Description,
-                Price = i.Price,
-                ImageUrl = i.ImageUrl,
-                IsAvailable = i.IsAvailable,
-                IsSoldOut = i.IsSoldOut,
-                DisplayOrder = i.DisplayOrder,
-                CreatedAt = i.CreatedAt,
-                UpdatedAt = i.UpdatedAt
-            })
             .ToListAsync();
 
-        return Ok(items);
+        return Ok(items.Select(MapItem));
     }
+
+    private static MenuItemResponse MapItem(Infrastructure.Menu.MenuItem i) => new()
+    {
+        Id = i.Id,
+        RestaurantId = i.RestaurantId,
+        CategoryId = i.CategoryId,
+        CategoryName = i.Category?.Name ?? string.Empty,
+        Name = i.Name,
+        Description = i.Description,
+        Price = i.Price,
+        ImageUrl = i.ImageUrl,
+        IsAvailable = i.IsAvailable,
+        IsSoldOut = i.IsSoldOut,
+        IsVegetarian = i.IsVegetarian,
+        IsVegan = i.IsVegan,
+        IsGlutenFree = i.IsGlutenFree,
+        IsHalal = i.IsHalal,
+        Allergens = i.Allergens,
+        DisplayOrder = i.DisplayOrder,
+        CreatedAt = i.CreatedAt,
+        UpdatedAt = i.UpdatedAt,
+        OptionGroups = i.OptionGroups
+            .OrderBy(g => g.DisplayOrder)
+            .Select(g => new MenuOptionGroupResponse
+            {
+                Id = g.Id,
+                MenuItemId = g.MenuItemId,
+                Name = g.Name,
+                IsRequired = g.IsRequired,
+                MinSelections = g.MinSelections,
+                MaxSelections = g.MaxSelections,
+                DisplayOrder = g.DisplayOrder,
+                IsActive = g.IsActive,
+                CreatedAt = g.CreatedAt,
+                UpdatedAt = g.UpdatedAt,
+                Options = g.Options.OrderBy(o => o.DisplayOrder).Select(o => new MenuOptionResponse
+                {
+                    Id = o.Id,
+                    GroupId = o.GroupId,
+                    Name = o.Name,
+                    PriceAdjustment = o.PriceAdjustment,
+                    AdjustmentType = (int)o.AdjustmentType,
+                    DisplayOrder = o.DisplayOrder,
+                    IsAvailable = o.IsAvailable,
+                    CreatedAt = o.CreatedAt,
+                    UpdatedAt = o.UpdatedAt
+                }).ToList()
+            }).ToList()
+    };
 }

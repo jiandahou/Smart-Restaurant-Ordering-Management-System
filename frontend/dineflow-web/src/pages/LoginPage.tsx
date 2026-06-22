@@ -1,10 +1,11 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Fingerprint, Link2, LogIn, Mail, ShieldCheck } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
-import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { z } from 'zod'
+import facebookLogo from '../assets/facebook-f.svg'
 import googleLogo from '../assets/google-g.svg'
 import { requestMagicLink } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
@@ -19,6 +20,7 @@ import { useAppDispatch } from '../hooks'
 const adminRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin']
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 const googleLoginUrl = `${apiBaseUrl}/api/auth/google/login`
+const facebookLoginUrl = `${apiBaseUrl}/api/auth/facebook/login`
 
 const passwordLoginSchema = z.object({
   email: z.email('Enter a valid email address.'),
@@ -48,6 +50,7 @@ export function LoginPage() {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const location = useLocation()
+  const [searchParams] = useSearchParams()
   const [signingInWithPasskey, setSigningInWithPasskey] = useState(false)
   const [mfaChallenge, setMfaChallenge] = useState<LoginMfaChallenge | null>(null)
   const [selectedMfaMethod, setSelectedMfaMethod] = useState('totp')
@@ -70,6 +73,24 @@ export function LoginPage() {
       code: '',
     },
   })
+
+  useEffect(() => {
+    const oauthError = searchParams.get('oauthError')
+    if (!oauthError) return
+    const messages: Record<string, string> = {
+      google_failed: 'Google sign-in failed. Please try again.',
+      google_missing_profile: 'Google did not return your profile. Please try again.',
+      google_create_failed: 'Could not create your account via Google. Please try again.',
+      google_link_failed: 'Could not link your Google account. Please try again.',
+      facebook_failed: 'Facebook sign-in failed. Please try again.',
+      facebook_missing_profile: 'Facebook did not return your profile. Please try again.',
+      facebook_create_failed: 'Could not create your account via Facebook. Please try again.',
+      facebook_link_failed: 'Could not link your Facebook account. Please try again.',
+    }
+    toast.error('Sign-in failed', {
+      description: messages[oauthError] ?? 'OAuth sign-in failed. Please try again.',
+    })
+  }, [searchParams])
 
   if (token) {
     return <Navigate to="/me" replace />
@@ -168,6 +189,10 @@ export function LoginPage() {
 
   const handleGoogleLogin = () => {
     window.location.assign(googleLoginUrl)
+  }
+
+  const handleFacebookLogin = () => {
+    window.location.assign(facebookLoginUrl)
   }
 
   const handlePasskeyLogin = async () => {
@@ -321,6 +346,10 @@ export function LoginPage() {
                   <Button type="button" variant="outline" className="google-login-button" onClick={handleGoogleLogin}>
                     <img aria-hidden="true" className="google-mark" src={googleLogo} alt="" />
                     Continue with Google
+                  </Button>
+                  <Button type="button" variant="outline" onClick={handleFacebookLogin}>
+                    <img aria-hidden="true" src={facebookLogo} alt="" width={18} height={18} />
+                    Continue with Facebook
                   </Button>
                   <Button
                     type="button"

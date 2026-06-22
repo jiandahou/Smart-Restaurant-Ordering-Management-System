@@ -190,7 +190,7 @@ public static class IdentitySeeder
                 TotalAmount = 1100, CreatedAt = DateTime.UtcNow.AddMinutes(-20)
             };
             preparingOrder.OrderItems.Add(new OrderItem { Id = Guid.NewGuid(), OrderId = preparingOrder.Id, MenuItemId = menuItems.First(m => m.Name == "Grilled Salmon").Id,  Quantity = 1, UnitPrice = 950, CreatedAt = preparingOrder.CreatedAt });
-            preparingOrder.OrderItems.Add(new OrderItem { Id = Guid.NewGuid(), OrderId = preparingOrder.Id, MenuItemId = menuItems.First(m => m.Name == "Fresh Lime Soda").Id, Quantity = 1, UnitPrice = 150, Note = "Extra ice", CreatedAt = preparingOrder.CreatedAt });
+            preparingOrder.OrderItems.Add(new OrderItem { Id = Guid.NewGuid(), OrderId = preparingOrder.Id, MenuItemId = menuItems.First(m => m.Name == "Fresh Lime Soda").Id, Quantity = 1, UnitPrice = 150, ItemInstructions = "Extra ice", CreatedAt = preparingOrder.CreatedAt });
 
             var pendingOrder = new Order
             {
@@ -238,7 +238,7 @@ public static class IdentitySeeder
                 TotalAmount = 860, CustomerNote = "Shared for table-cart testing", CreatedAt = DateTime.UtcNow.AddMinutes(-8)
             };
             restaurantTwoPendingOrder.OrderItems.Add(new OrderItem { Id = Guid.NewGuid(), OrderId = restaurantTwoPendingOrder.Id, MenuItemId = menuItems.First(m => m.Name == "Paneer Tikka Skewers").Id, Quantity = 1, UnitPrice = 340, CreatedAt = restaurantTwoPendingOrder.CreatedAt });
-            restaurantTwoPendingOrder.OrderItems.Add(new OrderItem { Id = Guid.NewGuid(), OrderId = restaurantTwoPendingOrder.Id, MenuItemId = menuItems.First(m => m.Name == "Smoky Paneer Sizzler").Id, Quantity = 1, UnitPrice = 520, Note = "Mild spice", CreatedAt = restaurantTwoPendingOrder.CreatedAt });
+            restaurantTwoPendingOrder.OrderItems.Add(new OrderItem { Id = Guid.NewGuid(), OrderId = restaurantTwoPendingOrder.Id, MenuItemId = menuItems.First(m => m.Name == "Smoky Paneer Sizzler").Id, Quantity = 1, UnitPrice = 520, ItemInstructions = "Mild spice", CreatedAt = restaurantTwoPendingOrder.CreatedAt });
 
             var restaurantTwoReadyTakeaway = new Order
             {
@@ -498,7 +498,7 @@ public static class IdentitySeeder
     private static async Task BackfillSeedOrderItemNameSnapshotsAsync(AppDbContext dbContext)
     {
         var orderItems = await dbContext.OrderItems
-            .Where(item => item.ItemNameSnapshot == string.Empty && item.MenuItemId.HasValue)
+            .Where(item => item.MenuItemNameSnapshot == string.Empty && item.MenuItemId.HasValue)
             .ToListAsync();
 
         if (orderItems.Count == 0)
@@ -529,7 +529,7 @@ public static class IdentitySeeder
                 continue;
             }
 
-            orderItem.ItemNameSnapshot = menuItemName;
+            orderItem.MenuItemNameSnapshot = menuItemName;
             orderItem.UpdatedAt = DateTime.UtcNow;
         }
 

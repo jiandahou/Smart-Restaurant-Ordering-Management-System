@@ -9,6 +9,11 @@ import { useAppDispatch } from '../hooks'
 
 const adminRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin']
 
+const PROVIDER_LABELS: Record<string, string> = {
+  google: 'Google',
+  facebook: 'Facebook',
+}
+
 type OAuthState = 'checking' | 'success' | 'error'
 
 export function OAuthCallbackPage() {
@@ -16,8 +21,11 @@ export function OAuthCallbackPage() {
   const navigate = useNavigate()
   const dispatch = useAppDispatch()
   const [state, setState] = useState<OAuthState>('checking')
-  const [message, setMessage] = useState('Finishing Google sign-in...')
   const exchangeStartedRef = useRef(false)
+
+  const rawProvider = searchParams.get('provider') ?? 'google'
+  const providerLabel = PROVIDER_LABELS[rawProvider] ?? rawProvider
+  const [message, setMessage] = useState(`Finishing ${providerLabel} sign-in...`)
 
   useEffect(() => {
     if (exchangeStartedRef.current) {
@@ -29,7 +37,7 @@ export function OAuthCallbackPage() {
 
     if (!code) {
       setState('error')
-      setMessage('Google sign-in is missing required information.')
+      setMessage(`${providerLabel} sign-in is missing required information.`)
       return
     }
 
@@ -42,29 +50,29 @@ export function OAuthCallbackPage() {
 
         setState('success')
         setMessage(response.message)
-        toast.success('Signed in with Google', {
+        toast.success(`Signed in with ${providerLabel}`, {
           description: response.user.email ?? 'Welcome back.',
         })
         navigate(destination, { replace: true })
       } catch (oauthError) {
-        const errorMessage = oauthError instanceof Error ? oauthError.message : 'Google sign-in failed'
+        const errorMessage = oauthError instanceof Error ? oauthError.message : `${providerLabel} sign-in failed`
         setState('error')
         setMessage(errorMessage)
-        toast.error('Google sign-in failed', {
+        toast.error(`${providerLabel} sign-in failed`, {
           description: errorMessage,
         })
       }
     }
 
     void run()
-  }, [dispatch, navigate, searchParams])
+  }, [dispatch, navigate, providerLabel, searchParams])
 
   return (
     <main className="login-screen">
       <Card className="login-card">
         <CardHeader>
           <p className="eyebrow">DineFlow</p>
-          <CardTitle>Google sign-in</CardTitle>
+          <CardTitle>{providerLabel} sign-in</CardTitle>
           <CardDescription>{message}</CardDescription>
         </CardHeader>
         <CardContent className="form-grid">
