@@ -7,6 +7,7 @@ export type PublicOrderingRestaurant = {
   phone: string
   timezone: string
   currency: string
+  paymentPolicy: 'PrepayRequired' | 'PayAtCounterAllowed'
 }
 
 export type PublicOrderingTable = {
@@ -19,6 +20,7 @@ export type PublicOrderingContext = {
   restaurant: PublicOrderingRestaurant
   table: PublicOrderingTable | null
   orderType: 'DineIn' | 'Takeaway' | string
+  availableOrderTypes: Array<'DineIn' | 'Takeaway' | string>
   menuEntryUrl: string
 }
 

@@ -1,6 +1,10 @@
+using System.Security.Claims;
+using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Order;
 using DineFlow.Infrastructure.Orders;
+using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -24,10 +28,34 @@ public class OrderController : ControllerBase
     {
         var orders = await _dbContext.Orders
             .Include(o => o.OrderItems)
+            .Include(o => o.Table)
             .ToListAsync();
 
         var responses = orders.Select(MapToResponse).ToList();
         return Ok(responses);
+    }
+
+    [Authorize]
+    [HttpGet("mine")]
+    public async Task<IActionResult> GetMyOrders(CancellationToken cancellationToken)
+    {
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        if (string.IsNullOrWhiteSpace(currentUserId))
+        {
+            return Unauthorized(new { message = "Invalid token." });
+        }
+
+        var orders = await _dbContext.Orders
+            .AsNoTracking()
+            .Include(order => order.OrderItems)
+            .Include(order => order.Table)
+            .Where(order => order.CustomerId == currentUserId)
+            .OrderByDescending(order => order.CreatedAt)
+            .ThenByDescending(order => order.Id)
+            .ToListAsync(cancellationToken);
+
+        return Ok(orders.Select(MapToResponse).ToList());
     }
 
     [HttpGet("{id:guid}")]
@@ -35,6 +63,7 @@ public class OrderController : ControllerBase
     {
         var order = await _dbContext.Orders
             .Include(o => o.OrderItems)
+            .Include(o => o.Table)
             .FirstOrDefaultAsync(o => o.Id == id);
 
         if (order is null)
@@ -46,11 +75,17 @@ public class OrderController : ControllerBase
     }
 
     [HttpPost]
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
     public async Task<IActionResult> CreateOrder([FromBody] CreateOrderRequest request)
     {
         if (request is null)
         {
             return BadRequest(new { message = "Order data is required." });
+        }
+
+        if (!Enum.TryParse<PaymentMethod>(request.PaymentMethod, true, out var paymentMethod) || !Enum.IsDefined(paymentMethod))
+        {
+            return BadRequest(new { message = "Invalid payment method." });
         }
 
         var order = new Order
@@ -61,7 +96,9 @@ public class OrderController : ControllerBase
             CustomerId = request.CustomerId,
             OrderNumber = request.OrderNumber,
             OrderType = (OrderType)request.OrderType,
-            Status = (OrderStatus)request.Status,
+            Status = OrderStatus.Pending,
+            PaymentStatus = PaymentStatus.Unpaid,
+            PaymentMethod = paymentMethod,
             TotalAmount = request.TotalAmount,
             CustomerNote = request.CustomerNote,
             ScheduledTime = request.ScheduledTime,
@@ -89,16 +126,27 @@ public class OrderController : ControllerBase
         await _dbContext.Orders.AddAsync(order);
         await _dbContext.SaveChangesAsync();
 
+        if (order.TableId.HasValue)
+        {
+            await _dbContext.Entry(order).Reference(item => item.Table).LoadAsync();
+        }
+
         var response = MapToResponse(order);
         return CreatedAtAction(nameof(GetOrder), new { id = order.Id }, response);
     }
 
     [HttpPut("{id:guid}")]
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
     public async Task<IActionResult> UpdateOrder(Guid id, [FromBody] CreateOrderRequest request)
     {
         if (request is null)
         {
             return BadRequest(new { message = "Order data is required." });
+        }
+
+        if (!Enum.TryParse<PaymentMethod>(request.PaymentMethod, true, out var paymentMethod) || !Enum.IsDefined(paymentMethod))
+        {
+            return BadRequest(new { message = "Invalid payment method." });
         }
 
         var existingOrder = await _dbContext.Orders
@@ -110,12 +158,18 @@ public class OrderController : ControllerBase
             return NotFound(new { message = "Order not found." });
         }
 
+        if ((OrderStatus)request.Status != existingOrder.Status)
+        {
+            return Conflict(new { message = "Use the admin order transition API to change order status." });
+        }
+
         existingOrder.RestaurantId = request.RestaurantId;
         existingOrder.TableId = request.TableId;
         existingOrder.CustomerId = request.CustomerId;
         existingOrder.OrderNumber = request.OrderNumber;
         existingOrder.OrderType = (OrderType)request.OrderType;
         existingOrder.Status = (OrderStatus)request.Status;
+        existingOrder.PaymentMethod = paymentMethod;
         existingOrder.TotalAmount = request.TotalAmount;
         existingOrder.CustomerNote = request.CustomerNote;
         existingOrder.ScheduledTime = request.ScheduledTime;
@@ -128,9 +182,10 @@ public class OrderController : ControllerBase
 
             foreach (var itemRequest in request.OrderItems)
             {
-                existingOrder.OrderItems.Add(new OrderItem
+                _dbContext.OrderItems.Add(new OrderItem
                 {
                     Id = Guid.NewGuid(),
+                    OrderId = existingOrder.Id,
                     MenuItemId = itemRequest.MenuItemId,
                     ItemNameSnapshot = itemRequest.ItemNameSnapshot ?? string.Empty,
                     Quantity = itemRequest.Quantity,
@@ -147,6 +202,7 @@ public class OrderController : ControllerBase
     }
 
     [HttpDelete("{id:guid}")]
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
     public async Task<IActionResult> DeleteOrder(Guid id)
     {
         var order = await _dbContext.Orders
@@ -172,10 +228,13 @@ public class OrderController : ControllerBase
             Id = order.Id,
             RestaurantId = order.RestaurantId,
             TableId = order.TableId,
+            TableNumber = order.Table?.TableNumber,
             CustomerId = order.CustomerId,
             OrderNumber = order.OrderNumber,
             OrderType = (int)order.OrderType,
             Status = (int)order.Status,
+            PaymentStatus = order.PaymentStatus.ToString(),
+            PaymentMethod = order.PaymentMethod.ToString(),
             TotalAmount = order.TotalAmount,
             CustomerNote = order.CustomerNote,
             ScheduledTime = order.ScheduledTime,

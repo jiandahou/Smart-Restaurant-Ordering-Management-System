@@ -8,6 +8,8 @@ public class OrderResponse
 
     public Guid? TableId { get; set; }
 
+    public string? TableNumber { get; set; }
+
     public string? CustomerId { get; set; }
 
     public string OrderNumber { get; set; } = string.Empty;
@@ -15,6 +17,10 @@ public class OrderResponse
     public int OrderType { get; set; }
 
     public int Status { get; set; }
+
+    public string PaymentStatus { get; set; } = string.Empty;
+
+    public string PaymentMethod { get; set; } = string.Empty;
 
     public decimal TotalAmount { get; set; }
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
 import {
   ArrowDownAZ,
@@ -27,6 +27,7 @@ import { z } from 'zod'
 import {
   createRestaurant,
   deleteRestaurant,
+  getRestaurantPage,
   getRestaurants,
   updateRestaurant,
   type Restaurant,
@@ -75,6 +76,7 @@ const restaurantSchema = z.object({
     .regex(/^[+()\-\s\d]+$/, 'Use digits and standard phone symbols only.'),
   timezone: z.string().min(1, 'Select a timezone.'),
   currency: z.string().length(3, 'Select a currency.'),
+  paymentPolicy: z.enum(['PrepayRequired', 'PayAtCounterAllowed']),
   isActive: z.boolean(),
 })
 
@@ -102,6 +104,7 @@ const emptyRestaurant: RestaurantFormValues = {
   phone: '',
   timezone: 'Australia/Adelaide',
   currency: 'AUD',
+  paymentPolicy: 'PayAtCounterAllowed',
   isActive: true,
 }
 
@@ -112,6 +115,7 @@ function toPayload(values: RestaurantFormValues): RestaurantRequest {
     phone: values.phone.trim(),
     timezone: values.timezone,
     currency: values.currency,
+    paymentPolicy: values.paymentPolicy,
     isActive: values.isActive,
   }
 }
@@ -218,6 +222,7 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
             phone: restaurant.phone,
             timezone: restaurant.timezone,
             currency: restaurant.currency,
+            paymentPolicy: restaurant.paymentPolicy,
             isActive: restaurant.isActive,
           }
         : emptyRestaurant,
@@ -331,6 +336,28 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
               />
               <FormField
                 control={form.control}
+                name="paymentPolicy"
+                render={({ field }) => (
+                  <FormItem className="restaurant-form-wide">
+                    <FormLabel>Customer payment</FormLabel>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <FormControl>
+                        <SelectTrigger><SelectValue placeholder="Select payment policy" /></SelectTrigger>
+                      </FormControl>
+                      <SelectContent position="popper">
+                        <SelectItem value="PrepayRequired">Online payment required</SelectItem>
+                        <SelectItem value="PayAtCounterAllowed">Online or pay at counter</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      This controls whether an unpaid counter order may enter the staff workflow.
+                    </p>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
                 name="address"
                 render={({ field }) => (
                   <FormItem className="restaurant-form-wide">
@@ -389,6 +416,7 @@ function RestaurantDetailsDialog({ restaurant }: { restaurant: Restaurant }) {
         <div className="restaurant-details-grid">
           <div><span>Status</span><Badge variant={restaurant.isActive ? 'secondary' : 'destructive'}>{restaurant.isActive ? 'Active' : 'Inactive'}</Badge></div>
           <div><span>Currency</span><strong>{restaurant.currency}</strong></div>
+          <div><span>Payment</span><strong>{restaurant.paymentPolicy === 'PrepayRequired' ? 'Online payment required' : 'Online or counter'}</strong></div>
           <div className="restaurant-detail-wide"><span>Address</span><strong>{restaurant.address}</strong></div>
           <div><span>Phone</span><strong>{restaurant.phone}</strong></div>
           <div><span>Timezone</span><strong>{restaurant.timezone}</strong></div>
@@ -413,6 +441,7 @@ function RestaurantDetailsDialog({ restaurant }: { restaurant: Restaurant }) {
 export function AdminRestaurantsPage() {
   const { user } = useAuth()
   const [restaurants, setRestaurants] = useState<Restaurant[]>([])
+  const [allRestaurants, setAllRestaurants] = useState<Restaurant[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -420,15 +449,33 @@ export function AdminRestaurantsPage() {
   const [currencyFilter, setCurrencyFilter] = useState('all')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
+  const [totalItems, setTotalItems] = useState(0)
+  const [totalPages, setTotalPages] = useState(0)
   const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({ key: 'name', direction: 'asc' })
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
 
-  const loadRestaurants = async (showToast = false) => {
+  const loadRestaurants = useCallback(async (showToast = false) => {
     setLoading(true)
     setError(null)
 
     try {
-      setRestaurants(await getRestaurants())
+      const response = await getRestaurantPage({
+        page,
+        pageSize,
+        search: search.trim() || undefined,
+        sortBy: sort.key === 'created' ? 'createdAt' : sort.key,
+        sortDirection: sort.direction,
+        isActive: statusFilter === 'all' ? undefined : statusFilter === 'active',
+        currency: currencyFilter === 'all' ? undefined : currencyFilter,
+      })
+      setRestaurants(response.items)
+      setTotalItems(response.totalItems)
+      setTotalPages(response.totalPages)
+
+      if (response.totalPages > 0 && page > response.totalPages) {
+        setPage(response.totalPages)
+      }
+
       if (showToast) toast.success('Restaurant directory refreshed')
     } catch (loadError) {
       const message = loadError instanceof Error ? loadError.message : 'Failed to load restaurants.'
@@ -437,56 +484,27 @@ export function AdminRestaurantsPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [currencyFilter, page, pageSize, search, sort, statusFilter])
 
-  useEffect(() => {
-    let active = true
-
-    getRestaurants()
-      .then((items) => {
-        if (active) setRestaurants(items)
-      })
-      .catch((loadError) => {
-        if (!active) return
-        const message = loadError instanceof Error ? loadError.message : 'Failed to load restaurants.'
-        setError(message)
-        toast.error('Could not load restaurants', { description: message })
-      })
-      .finally(() => {
-        if (active) setLoading(false)
-      })
-
-    return () => {
-      active = false
-    }
+  const loadRestaurantOptions = useCallback(async () => {
+    setAllRestaurants(await getRestaurants())
   }, [])
 
+  useEffect(() => {
+    void Promise.resolve().then(() => loadRestaurants())
+  }, [loadRestaurants])
+
+  useEffect(() => {
+    void Promise.resolve().then(() => loadRestaurantOptions())
+  }, [loadRestaurantOptions])
+
   const currencyOptionsInUse = useMemo(
-    () => Array.from(new Set(restaurants.map((restaurant) => restaurant.currency))).sort(),
-    [restaurants],
+    () => Array.from(new Set(allRestaurants.map((restaurant) => restaurant.currency))).sort(),
+    [allRestaurants],
   )
-
-  const filteredRestaurants = useMemo(() => {
-    const term = search.trim().toLowerCase()
-    const direction = sort.direction === 'asc' ? 1 : -1
-
-    return restaurants
-      .filter((restaurant) => !term || [restaurant.name, restaurant.address, restaurant.phone, restaurant.timezone, restaurant.currency]
-        .some((value) => value.toLowerCase().includes(term)))
-      .filter((restaurant) => statusFilter === 'all' || (statusFilter === 'active' ? restaurant.isActive : !restaurant.isActive))
-      .filter((restaurant) => currencyFilter === 'all' || restaurant.currency === currencyFilter)
-      .toSorted((first, second) => {
-        if (sort.key === 'status') return (Number(first.isActive) - Number(second.isActive)) * direction
-        if (sort.key === 'created') return first.createdAt.localeCompare(second.createdAt) * direction
-        return first[sort.key].localeCompare(second[sort.key]) * direction
-      })
-  }, [currencyFilter, restaurants, search, sort, statusFilter])
-
-  const totalPages = Math.max(1, Math.ceil(filteredRestaurants.length / pageSize))
-  const currentPage = Math.min(page, totalPages)
-  const pageStart = filteredRestaurants.length === 0 ? 0 : (currentPage - 1) * pageSize + 1
-  const pageEnd = Math.min(currentPage * pageSize, filteredRestaurants.length)
-  const paginatedRestaurants = filteredRestaurants.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+  const currentPage = totalPages === 0 ? 0 : page
+  const pageStart = totalItems === 0 ? 0 : (page - 1) * pageSize + 1
+  const pageEnd = Math.min(page * pageSize, totalItems)
   const hasActiveFilters = search.trim() !== '' || statusFilter !== 'all' || currencyFilter !== 'all'
   const SortIcon = sort.direction === 'asc' ? ArrowDownAZ : ArrowUpAZ
 
@@ -505,11 +523,15 @@ export function AdminRestaurantsPage() {
     setCurrencyFilter('all')
   }
 
+  const refreshRestaurantData = async () => {
+    await Promise.all([loadRestaurants(), loadRestaurantOptions()])
+  }
+
   const handleDelete = async (restaurant: Restaurant) => {
     try {
       const response = await deleteRestaurant(restaurant.id)
       toast.success('Restaurant deleted', { description: response.message })
-      await loadRestaurants()
+      await refreshRestaurantData()
     } catch (deleteError) {
       toast.error('Could not delete restaurant', {
         description: deleteError instanceof Error ? deleteError.message : 'The request failed.',
@@ -531,7 +553,7 @@ export function AdminRestaurantsPage() {
             </div>
           </div>
           <div className="section-actions">
-            {isPlatformOwner && <RestaurantFormDialog onSaved={() => loadRestaurants()} />}
+            {isPlatformOwner && <RestaurantFormDialog onSaved={() => refreshRestaurantData()} />}
             <Button type="button" variant="secondary" onClick={() => void loadRestaurants(true)} disabled={loading}>
               <RefreshCw size={18} />
               Refresh
@@ -587,7 +609,7 @@ export function AdminRestaurantsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {paginatedRestaurants.map((restaurant) => (
+                    {restaurants.map((restaurant) => (
                       <tr key={restaurant.id}>
                         <td>
                           <span className="table-name"><Building2 size={16} />{restaurant.name}</span>
@@ -601,7 +623,7 @@ export function AdminRestaurantsPage() {
                           <div className="row-actions">
                             <RestaurantDetailsDialog restaurant={restaurant} />
                             <RestaurantPublicAccessDialog restaurant={restaurant} />
-                            <RestaurantFormDialog restaurant={restaurant} onSaved={() => loadRestaurants()} />
+                            <RestaurantFormDialog restaurant={restaurant} onSaved={() => refreshRestaurantData()} />
                             {isPlatformOwner && (
                               <AlertDialog>
                                 <AlertDialogTrigger asChild>
@@ -623,7 +645,7 @@ export function AdminRestaurantsPage() {
                         </td>
                       </tr>
                     ))}
-                    {paginatedRestaurants.length === 0 && (
+                    {restaurants.length === 0 && (
                       <tr><td colSpan={6} className="empty-cell">{hasActiveFilters ? 'No restaurants match the current filters.' : 'No restaurants are available for your account.'}</td></tr>
                     )}
                   </tbody>
@@ -631,7 +653,7 @@ export function AdminRestaurantsPage() {
               </div>
 
               <div className="pagination-bar">
-                <span>Showing {pageStart}-{pageEnd} of {filteredRestaurants.length}</span>
+                <span>Showing {pageStart}-{pageEnd} of {totalItems}</span>
                 <div className="pagination-actions">
                   <Select value={String(pageSize)} onValueChange={(value) => { setPageSize(Number(value)); setPage(1) }}>
                     <SelectTrigger className="page-size-select"><SelectValue /></SelectTrigger>
@@ -642,15 +664,15 @@ export function AdminRestaurantsPage() {
                     </SelectContent>
                   </Select>
                   <span>Page {currentPage} of {totalPages}</span>
-                  <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={currentPage === 1} aria-label="Previous page"><ChevronLeft size={16} /></Button>
-                  <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={currentPage === totalPages} aria-label="Next page"><ChevronRight size={16} /></Button>
+                  <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={loading || currentPage <= 1} aria-label="Previous page"><ChevronLeft size={16} /></Button>
+                  <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={loading || currentPage >= totalPages} aria-label="Next page"><ChevronRight size={16} /></Button>
                 </div>
               </div>
             </div>
           )}
         </CardContent>
       </Card>
-      <RestaurantTablesPanel restaurants={restaurants} restaurantsLoading={loading} />
+      <RestaurantTablesPanel restaurants={allRestaurants} restaurantsLoading={loading} />
     </main>
   )
 }

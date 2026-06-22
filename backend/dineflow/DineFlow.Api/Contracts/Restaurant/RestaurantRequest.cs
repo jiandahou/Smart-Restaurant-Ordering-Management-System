@@ -12,5 +12,7 @@ public class RestaurantRequest
 
     public string Currency { get; set; } = string.Empty;
 
+    public string PaymentPolicy { get; set; } = "PayAtCounterAllowed";
+
     public bool IsActive { get; set; } = true;
 }

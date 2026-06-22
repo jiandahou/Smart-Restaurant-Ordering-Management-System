@@ -3,10 +3,13 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   AlertCircle,
   ArrowRight,
-  ChefHat,
+  ClipboardList,
   ChevronDown,
   ChevronUp,
+  LayoutDashboard,
   Loader2,
+  LogIn,
+  LogOut,
   Minus,
   MapPin,
   MinusCircle,
@@ -16,6 +19,8 @@ import {
   Store,
   Trash2,
   Utensils,
+  UserPlus,
+  UserRound,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -61,6 +66,19 @@ import {
   DrawerTitle,
 } from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 
@@ -70,10 +88,15 @@ type StoredCartSession = {
   participantId: string
 }
 
-type CartViewer = Pick<AuthUser, 'fullName' | 'email' | 'avatarUrl'> | null
+type CartViewer = Pick<AuthUser, 'fullName' | 'email' | 'avatarUrl' | 'roles'> | null
 
 type CustomerMenuState =
   | { status: 'loading' }
+  | {
+      status: 'choosing'
+      context: PublicOrderingContext
+      menu: PublicMenu
+    }
   | {
       status: 'ready'
       context: PublicOrderingContext
@@ -100,7 +123,7 @@ const itemNoteMaxLength = 180
 export function CustomerMenuPage() {
   const { restaurantId, qrToken } = useParams()
   const navigate = useNavigate()
-  const { user } = useAuth()
+  const { user, logout } = useAuth()
   const [state, setState] = useState<CustomerMenuState>({ status: 'loading' })
   const [search, setSearch] = useState('')
   const [activeCategoryId, setActiveCategoryId] = useState<string | 'all'>('all')
@@ -108,6 +131,7 @@ export function CustomerMenuPage() {
   const [cartOpen, setCartOpen] = useState(false)
   const [cartActionItemId, setCartActionItemId] = useState<string | null>(null)
   const [checkingOut, setCheckingOut] = useState(false)
+  const [selectingOrderType, setSelectingOrderType] = useState(false)
   const [selectedItem, setSelectedItem] = useState<PublicMenuItem | null>(null)
   const [selectedItemQuantity, setSelectedItemQuantity] = useState(1)
   const [selectedItemNote, setSelectedItemNote] = useState('')
@@ -117,6 +141,7 @@ export function CustomerMenuPage() {
   const realtimeClientRef = useRef<CartRealtimeClient | null>(null)
   const latestCartRef = useRef<Cart | null>(null)
   const cartActivityBannerTimeoutsRef = useRef<number[]>([])
+  const pendingFallbackBannerRef = useRef<{ timeoutId: number } | null>(null)
 
   const showCartActivityBanner = (actorName: string, itemName: string, itemQuantity: number) => {
     const id = Date.now() + Math.floor(Math.random() * 1_000)
@@ -163,6 +188,10 @@ export function CustomerMenuPage() {
     return () => {
       cartActivityBannerTimeoutsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId))
       cartActivityBannerTimeoutsRef.current = []
+      if (pendingFallbackBannerRef.current) {
+        window.clearTimeout(pendingFallbackBannerRef.current.timeoutId)
+        pendingFallbackBannerRef.current = null
+      }
     }
   }, [])
 
@@ -186,14 +215,18 @@ export function CustomerMenuPage() {
           ? await getPublicRestaurantOrderingContext(restaurantId)
           : await getPublicTableOrderingContext(qrToken!)
 
-        const [menu, cartSession] = await Promise.all([
-          getPublicRestaurantMenu(context.restaurant.id),
-          loadOrJoinCart(context, restaurantId ? `restaurant:${restaurantId}` : `table:${qrToken}`),
-        ])
+        const menu = await getPublicRestaurantMenu(context.restaurant.id)
 
         if (cancelled) {
           return
         }
+
+        if (restaurantId) {
+          setState({ status: 'choosing', context, menu })
+          return
+        }
+
+        const cartSession = await loadOrJoinCart(context, `table:${qrToken}`, 'DineIn')
 
         setState({
           status: 'ready',
@@ -236,8 +269,22 @@ export function CustomerMenuPage() {
     }
 
     const client = createCartRealtimeClient(state.cart.id, state.participantToken, {
-      onCartUpdated: ({ cart }) => {
+      onCartUpdated: ({ reason, cart }) => {
         if (cart) {
+          if (reason === 'item-added') {
+            const previousCart = latestCartRef.current
+            const addedItem = previousCart ? detectCartAddition(previousCart, cart) : null
+            if (addedItem) {
+              if (pendingFallbackBannerRef.current) {
+                window.clearTimeout(pendingFallbackBannerRef.current.timeoutId)
+              }
+              const timeoutId = window.setTimeout(() => {
+                pendingFallbackBannerRef.current = null
+                showCartActivityBanner('Someone', addedItem.name, addedItem.quantity)
+              }, 300)
+              pendingFallbackBannerRef.current = { timeoutId }
+            }
+          }
           latestCartRef.current = cart
           setState((current) =>
             current.status === 'ready' ? { ...current, cart } : current,
@@ -246,9 +293,16 @@ export function CustomerMenuPage() {
       },
       onCartItemAdded: (update) => {
         if (update.actorParticipantId === state.participantId) {
+          if (pendingFallbackBannerRef.current) {
+            window.clearTimeout(pendingFallbackBannerRef.current.timeoutId)
+            pendingFallbackBannerRef.current = null
+          }
           return
         }
-
+        if (pendingFallbackBannerRef.current) {
+          window.clearTimeout(pendingFallbackBannerRef.current.timeoutId)
+          pendingFallbackBannerRef.current = null
+        }
         showCartActivityBanner(update.actorName, update.itemName, update.quantity)
       },
       onCartSubmitted: ({ cart }) => {
@@ -314,6 +368,8 @@ export function CustomerMenuPage() {
             : current,
         )
 
+        // Fallback banner when SignalR CartUpdated didn't already handle detection
+        // (latestCartRef stays stale when SignalR is disconnected, so polling detects the diff)
         if (addedItem) {
           showCartActivityBanner('Someone', addedItem.name, addedItem.quantity)
         }
@@ -386,12 +442,81 @@ export function CustomerMenuPage() {
     return () => observer.disconnect()
   }, [state.status, visibleCategories])
 
+  const chooseOrderType = async (orderType: 'DineIn' | 'Takeaway') => {
+    if (state.status !== 'choosing' || selectingOrderType) return
+
+    setSelectingOrderType(true)
+    try {
+      const cartSession = await loadOrJoinCart(
+        state.context,
+        `restaurant:${state.context.restaurant.id}:${orderType.toLowerCase()}`,
+        orderType,
+      )
+      setState({
+        status: 'ready',
+        context: { ...state.context, orderType },
+        menu: state.menu,
+        cart: cartSession.cart,
+        participantToken: cartSession.participantToken,
+        participantId: cartSession.participantId,
+      })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not start ordering')
+    } finally {
+      setSelectingOrderType(false)
+    }
+  }
+
+  const switchOrderType = async (orderType: 'DineIn' | 'Takeaway') => {
+    if (
+      state.status !== 'ready' ||
+      state.context.table ||
+      state.cart.orderType === orderType ||
+      selectingOrderType
+    ) {
+      return
+    }
+
+    setSelectingOrderType(true)
+    try {
+      const cartSession = await loadOrJoinCart(
+        state.context,
+        `restaurant:${state.context.restaurant.id}:${orderType.toLowerCase()}`,
+        orderType,
+      )
+      latestCartRef.current = cartSession.cart
+      setCartOpen(false)
+      setState({
+        ...state,
+        context: { ...state.context, orderType },
+        cart: cartSession.cart,
+        participantToken: cartSession.participantToken,
+        participantId: cartSession.participantId,
+      })
+      toast.success(`Switched to ${orderType === 'DineIn' ? 'dine in' : 'takeaway'}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not change order type')
+    } finally {
+      setSelectingOrderType(false)
+    }
+  }
+
   if (state.status === 'loading') {
     return <CustomerMenuLoading />
   }
 
   if (state.status === 'error') {
     return <CustomerMenuError title={state.title} message={state.message} />
+  }
+
+  if (state.status === 'choosing') {
+    return (
+      <PublicOrderTypeChooser
+        context={state.context}
+        loading={selectingOrderType}
+        onSelect={(orderType) => void chooseOrderType(orderType)}
+      />
+    )
   }
 
   const { context, menu, cart, participantToken } = state
@@ -534,6 +659,7 @@ export function CustomerMenuPage() {
           currency: context.restaurant.currency,
           restaurantName: context.restaurant.name,
           tableNumber: context.table?.tableNumber ?? null,
+          paymentPolicy: context.restaurant.paymentPolicy,
         } satisfies CheckoutNavigationState,
       })
     } catch (error) {
@@ -548,10 +674,40 @@ export function CustomerMenuPage() {
         <header className="flex flex-col gap-4 border-b pb-5">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0 space-y-2">
-              <Badge variant="outline" className="h-7 gap-1.5 px-3 text-sm">
-                {context.table ? <Utensils className="size-3.5" /> : <ShoppingBag className="size-3.5" />}
-                {context.table ? `Table ${context.table.tableNumber}` : 'Takeaway'}
-              </Badge>
+              {context.table ? (
+                <Badge variant="outline" className="h-7 gap-1.5 px-3 text-sm">
+                  <Utensils className="size-3.5" />
+                  Table {context.table.tableNumber}
+                </Badge>
+              ) : (
+                <Select
+                  value={cart.orderType}
+                  disabled={selectingOrderType}
+                  onValueChange={(value) => {
+                    if (value === 'DineIn' || value === 'Takeaway') {
+                      void switchOrderType(value)
+                    }
+                  }}
+                >
+                  <SelectTrigger size="sm" aria-label="Order type" className="rounded-full px-3">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="start">
+                    {context.availableOrderTypes.includes('DineIn') ? (
+                      <SelectItem value="DineIn">
+                        <Utensils className="size-3.5" />
+                        Dine in
+                      </SelectItem>
+                    ) : null}
+                    {context.availableOrderTypes.includes('Takeaway') ? (
+                      <SelectItem value="Takeaway">
+                        <ShoppingBag className="size-3.5" />
+                        Takeaway
+                      </SelectItem>
+                    ) : null}
+                  </SelectContent>
+                </Select>
+              )}
               <div>
                 <p className="text-xs font-semibold uppercase text-muted-foreground">DineFlow</p>
                 <h1 className="text-3xl font-semibold leading-tight sm:text-4xl">
@@ -559,9 +715,13 @@ export function CustomerMenuPage() {
                 </h1>
               </div>
             </div>
-            <div className="flex size-12 shrink-0 items-center justify-center rounded-full border bg-muted/60">
-              <ChefHat className="size-6" />
-            </div>
+            <CartViewerButton
+              viewer={user}
+              onLogout={() => {
+                logout()
+                navigate('/login')
+              }}
+            />
           </div>
 
           <div className="grid gap-2 text-sm text-muted-foreground sm:grid-cols-[1fr_auto] sm:items-center">
@@ -621,7 +781,6 @@ export function CustomerMenuPage() {
 
       <CartSummaryBar
         cart={cart}
-        viewer={user}
         currencyFormatter={currencyFormatter}
         open={cartOpen}
         updatingItemId={cartActionItemId}
@@ -660,6 +819,7 @@ export function CustomerMenuPage() {
 async function loadOrJoinCart(
   context: PublicOrderingContext,
   storageKeySuffix: string,
+  orderType: 'DineIn' | 'Takeaway',
 ): Promise<{ cart: Cart; participantToken: string; participantId: string }> {
   const storageKey = `${cartSessionPrefix}.${storageKeySuffix}`
   const stored = readStoredCartSession(storageKey)
@@ -683,7 +843,7 @@ async function loadOrJoinCart(
   const joined = await joinCart(
     context.table
       ? { tableQrToken: context.menuEntryUrl.replace('/table/', '') }
-      : { restaurantId: context.restaurant.id },
+      : { restaurantId: context.restaurant.id, orderType },
   )
 
   sessionStorage.setItem(
@@ -1177,7 +1337,6 @@ function ItemDetailContent({
 
 function CartSummaryBar({
   cart,
-  viewer,
   currencyFormatter,
   open,
   updatingItemId,
@@ -1188,7 +1347,6 @@ function CartSummaryBar({
   onCheckout,
 }: {
   cart: Cart
-  viewer: CartViewer
   currencyFormatter: Intl.NumberFormat
   open: boolean
   updatingItemId: string | null
@@ -1208,7 +1366,7 @@ function CartSummaryBar({
           <Card className="overflow-hidden rounded-lg shadow-lg">
             <CardContent className="p-0">
               <div className="flex items-start justify-between gap-3 border-b p-4">
-                <div className="flex min-w-0 flex-1 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0 flex-1">
                   <div className="min-w-0 space-y-1">
                     <h2 className="flex items-center gap-2 text-lg font-semibold">
                       <ShoppingBag className="size-5" />
@@ -1220,8 +1378,6 @@ function CartSummaryBar({
                         : 'Your cart is empty.'}
                     </p>
                   </div>
-
-                  <CartViewerPill viewer={viewer} />
                 </div>
 
                 <Button
@@ -1334,11 +1490,13 @@ function CartViewerPill({ viewer }: { viewer: CartViewer }) {
 
   return (
     <div className="flex min-w-0 max-w-full items-center gap-2 rounded-full border bg-muted/35 px-2.5 py-1.5 text-left sm:max-w-72">
-      <Avatar>
+      <Avatar className="size-10 overflow-hidden">
         {viewer.avatarUrl ? (
           <AvatarImage src={viewer.avatarUrl} alt={`${displayName} avatar`} />
         ) : null}
-        <AvatarFallback>{getInitials(displayName)}</AvatarFallback>
+        <AvatarFallback className="absolute inset-0 grid size-auto place-items-center p-0 text-center leading-none">
+          {getInitials(displayName)}
+        </AvatarFallback>
       </Avatar>
       <div className="min-w-0">
         <p className="truncate text-sm font-semibold leading-tight">
@@ -1347,6 +1505,70 @@ function CartViewerPill({ viewer }: { viewer: CartViewer }) {
         <p className="truncate text-xs text-muted-foreground">{secondaryText}</p>
       </div>
     </div>
+  )
+}
+
+function CartViewerButton({ viewer, onLogout }: { viewer: CartViewer; onLogout: () => void }) {
+  const displayName = viewer?.fullName?.trim() || viewer?.email?.trim() || 'Guest'
+  const canUseAdminArea = Boolean(viewer?.roles.some((role) =>
+    ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff'].includes(role),
+  ))
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="size-12 shrink-0 rounded-full p-1"
+          aria-label={`Ordering as ${displayName}`}
+        >
+          <Avatar className="size-9">
+            {viewer?.avatarUrl ? (
+              <AvatarImage src={viewer.avatarUrl} alt={`${displayName} avatar`} />
+            ) : null}
+            <AvatarFallback className="absolute inset-0 grid size-auto place-items-center p-0 text-center leading-none">
+              {getInitials(displayName)}
+            </AvatarFallback>
+          </Avatar>
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-72 gap-2 p-3">
+        <CartViewerPill viewer={viewer} />
+        <Separator />
+        {viewer ? (
+          <div className="grid gap-1">
+            <Button variant="ghost" className="justify-start" asChild>
+              <Link to="/me"><UserRound />User Center</Link>
+            </Button>
+            <Button variant="ghost" className="justify-start" asChild>
+              <Link to={canUseAdminArea ? '/admin/orders' : '/my-orders'}>
+                <ClipboardList />My Orders
+              </Link>
+            </Button>
+            {canUseAdminArea && (
+              <Button variant="ghost" className="justify-start" asChild>
+                <Link to="/admin"><LayoutDashboard />Admin Dashboard</Link>
+              </Button>
+            )}
+            <Separator />
+            <Button type="button" variant="ghost" className="justify-start text-destructive" onClick={onLogout}>
+              <LogOut />Sign out
+            </Button>
+          </div>
+        ) : (
+          <div className="grid gap-1">
+            <Button variant="ghost" className="justify-start" asChild>
+              <Link to="/login"><LogIn />Sign in</Link>
+            </Button>
+            <Button variant="ghost" className="justify-start" asChild>
+              <Link to="/register"><UserPlus />Create account</Link>
+            </Button>
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -1436,6 +1658,56 @@ function CartSummaryLine({
         </Button>
       </div>
     </div>
+  )
+}
+
+function PublicOrderTypeChooser({
+  context,
+  loading,
+  onSelect,
+}: {
+  context: PublicOrderingContext
+  loading: boolean
+  onSelect: (orderType: 'DineIn' | 'Takeaway') => void
+}) {
+  return (
+    <main className="flex min-h-svh items-center justify-center bg-background px-4 py-10">
+      <div className="w-full max-w-lg space-y-6">
+        <div className="space-y-2 text-center">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Public ordering</p>
+          <h1 className="text-3xl font-semibold">{context.restaurant.name}</h1>
+          <p className="text-sm text-muted-foreground">How would you like to order today?</p>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          {context.availableOrderTypes.includes('DineIn') ? (
+            <Card><CardContent className="p-3">
+              <Button type="button" variant="ghost" className="h-auto w-full flex-col items-start gap-3 whitespace-normal p-4 text-left" disabled={loading} onClick={() => onSelect('DineIn')}>
+                <span className="flex size-10 items-center justify-center rounded-full bg-muted"><Utensils className="size-5" /></span>
+                <span>
+                  <strong className="block text-base">Dine in</strong>
+                  <span className="mt-1 block text-sm font-normal text-muted-foreground">Order for dining at the restaurant. No table QR required.</span>
+                </span>
+              </Button>
+            </CardContent></Card>
+          ) : null}
+
+          {context.availableOrderTypes.includes('Takeaway') ? (
+            <Card><CardContent className="p-3">
+              <Button type="button" variant="ghost" className="h-auto w-full flex-col items-start gap-3 whitespace-normal p-4 text-left" disabled={loading} onClick={() => onSelect('Takeaway')}>
+                <span className="flex size-10 items-center justify-center rounded-full bg-muted"><ShoppingBag className="size-5" /></span>
+                <span>
+                  <strong className="block text-base">Takeaway</strong>
+                  <span className="mt-1 block text-sm font-normal text-muted-foreground">Order ahead and collect your meal from the restaurant.</span>
+                </span>
+              </Button>
+            </CardContent></Card>
+          ) : null}
+        </div>
+
+        {loading ? <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Starting your order...</div> : null}
+      </div>
+    </main>
   )
 }
 

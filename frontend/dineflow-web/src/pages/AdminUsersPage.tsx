@@ -1,7 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ArrowDownAZ, ArrowUpAZ, ChevronLeft, ChevronRight, RefreshCw, Search, UsersRound, X } from 'lucide-react'
 import { toast } from 'sonner'
-import { getRestaurantUsers, type ManagedUserRole, type UserListItem } from '../api/auth'
+import {
+  getRestaurantUserPage,
+  getRestaurantUsers,
+  getRestaurants,
+  type ManagedUserRole,
+  type Restaurant,
+  type UserListItem,
+} from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { CreateUserCard, CreateUserDialog, creatableRoles, roleRank } from '../components/admin/CreateUserCard'
 import { EmailTestCard } from '../components/admin/EmailTestCard'
@@ -22,6 +29,8 @@ const manageableRoles = ['RestaurantOwner', 'Admin', 'Staff', 'Customer'] as con
 export function AdminUsersPage() {
   const { user } = useAuth()
   const [users, setUsers] = useState<UserListItem[]>([])
+  const [emailUsers, setEmailUsers] = useState<UserListItem[]>([])
+  const [restaurants, setRestaurants] = useState<Restaurant[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -30,6 +39,8 @@ export function AdminUsersPage() {
   const [scopeFilter, setScopeFilter] = useState<ScopeFilter>('all')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
+  const [totalItems, setTotalItems] = useState(0)
+  const [totalPages, setTotalPages] = useState(0)
   const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
     key: 'email',
     direction: 'asc',
@@ -50,87 +61,35 @@ export function AdminUsersPage() {
   const needsRestaurantId = user?.roles.includes('PlatformOwner') ?? false
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
 
-  const roleOptions = useMemo(() => {
-    return Array.from(new Set(users.flatMap((user) => user.roles))).sort((first, second) =>
-      first.localeCompare(second),
-    )
-  }, [users])
-
-  const restaurantOptions = useMemo(() => {
-    return Array.from(
-      new Set(users.map((user) => user.restaurantId).filter((restaurantId): restaurantId is string => Boolean(restaurantId))),
-    ).sort((first, second) => first.localeCompare(second))
-  }, [users])
-
-  const filteredUsers = useMemo(() => {
-    const normalizedSearch = search.trim().toLowerCase()
-
-    return users
-      .filter((user) => {
-        if (!normalizedSearch) {
-          return true
-        }
-
-        return [
-          user.fullName,
-          user.email,
-          user.restaurantId,
-          user.roles.join(' '),
-        ]
-          .filter(Boolean)
-          .some((value) => value?.toLowerCase().includes(normalizedSearch))
-      })
-      .filter((user) => (roleFilter === 'all' ? true : user.roles.includes(roleFilter)))
-      .filter((user) => (restaurantFilter === 'all' ? true : user.restaurantId === restaurantFilter))
-      .filter((user) => {
-        if (scopeFilter === 'platform') {
-          return !user.restaurantId
-        }
-
-        if (scopeFilter === 'restaurant') {
-          return Boolean(user.restaurantId)
-        }
-
-        return true
-      })
-      .toSorted((first, second) => {
-        const direction = sort.direction === 'asc' ? 1 : -1
-        const getValue = (item: UserListItem) => {
-          switch (sort.key) {
-            case 'name':
-              return item.fullName || ''
-            case 'restaurant':
-              return item.restaurantId || 'Platform scope'
-            case 'roles':
-              return item.roles.join(', ')
-            case 'email':
-            default:
-              return item.email || ''
-          }
-        }
-
-        return getValue(first).localeCompare(getValue(second)) * direction
-      })
-  }, [restaurantFilter, roleFilter, scopeFilter, search, sort, users])
-
-  const totalPages = Math.max(1, Math.ceil(filteredUsers.length / pageSize))
-  const pageStart = filteredUsers.length === 0 ? 0 : (page - 1) * pageSize + 1
-  const pageEnd = Math.min(page * pageSize, filteredUsers.length)
-  const paginatedUsers = useMemo(() => {
-    const start = (page - 1) * pageSize
-
-    return filteredUsers.slice(start, start + pageSize)
-  }, [filteredUsers, page, pageSize])
+  const roleOptions = ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff', 'Customer']
+  const pageStart = totalItems === 0 ? 0 : (page - 1) * pageSize + 1
+  const pageEnd = Math.min(page * pageSize, totalItems)
 
   const hasActiveFilters =
     search.trim() !== '' || roleFilter !== 'all' || restaurantFilter !== 'all' || scopeFilter !== 'all'
 
-  const loadUsers = async (showToast = false) => {
+  const loadUsers = useCallback(async (showToast = false) => {
     setLoading(true)
     setError(null)
 
     try {
-      setUsers(await getRestaurantUsers())
+      const response = await getRestaurantUserPage({
+        page,
+        pageSize,
+        search: search.trim() || undefined,
+        sortBy: sort.key === 'name' ? 'fullName' : sort.key === 'roles' ? 'role' : sort.key,
+        sortDirection: sort.direction,
+        role: roleFilter === 'all' ? undefined : roleFilter,
+        restaurantId: restaurantFilter === 'all' ? undefined : restaurantFilter,
+        scope: scopeFilter,
+      })
+      setUsers(response.items)
+      setTotalItems(response.totalItems)
+      setTotalPages(response.totalPages)
+
+      if (response.totalPages > 0 && page > response.totalPages) {
+        setPage(response.totalPages)
+      }
       if (showToast) {
         toast.success('User directory refreshed')
       }
@@ -143,21 +102,27 @@ export function AdminUsersPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [page, pageSize, restaurantFilter, roleFilter, scopeFilter, search, sort])
 
-  useEffect(() => {
-    void loadUsers()
+  const loadUserOptions = useCallback(async () => {
+    const [allUsers, availableRestaurants] = await Promise.all([
+      getRestaurantUsers(),
+      getRestaurants(),
+    ])
+    setEmailUsers(allUsers)
+    setRestaurants(availableRestaurants)
   }, [])
 
   useEffect(() => {
-    setPage(1)
-  }, [restaurantFilter, roleFilter, scopeFilter, search, sort])
+    void Promise.resolve().then(() => loadUsers())
+  }, [loadUsers])
 
   useEffect(() => {
-    setPage((current) => Math.min(current, totalPages))
-  }, [totalPages])
+    void Promise.resolve().then(() => loadUserOptions())
+  }, [loadUserOptions])
 
   const updateSort = (key: SortKey) => {
+    setPage(1)
     setSort((current) => ({
       key,
       direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
@@ -165,6 +130,7 @@ export function AdminUsersPage() {
   }
 
   const resetFilters = () => {
+    setPage(1)
     setSearch('')
     setRoleFilter('all')
     setRestaurantFilter('all')
@@ -172,6 +138,7 @@ export function AdminUsersPage() {
   }
 
   const updateRestaurantFilter = (value: string) => {
+    setPage(1)
     setRestaurantFilter(value)
 
     if (value !== 'all') {
@@ -180,12 +147,15 @@ export function AdminUsersPage() {
   }
 
   const SortIcon = sort.direction === 'asc' ? ArrowDownAZ : ArrowUpAZ
+  const refreshUserData = async () => {
+    await Promise.all([loadUsers(), loadUserOptions()])
+  }
   const createUserProps = {
     availableRoles,
     currentUserRank,
     needsRestaurantId,
     restaurantId: user?.restaurantId,
-    onUserCreated: () => loadUsers(),
+    onUserCreated: refreshUserData,
   }
 
   return (
@@ -224,11 +194,11 @@ export function AdminUsersPage() {
                       <Search size={16} />
                       <Input
                         value={search}
-                        onChange={(event) => setSearch(event.target.value)}
-                        placeholder="Filter by name, email, restaurant, or role"
+                        onChange={(event) => { setPage(1); setSearch(event.target.value) }}
+                        placeholder="Filter by name, email, or role"
                       />
                     </div>
-                    <Select value={roleFilter} onValueChange={setRoleFilter}>
+                    <Select value={roleFilter} onValueChange={(value) => { setPage(1); setRoleFilter(value) }}>
                       <SelectTrigger className="filter-select">
                         <SelectValue placeholder="Role" />
                       </SelectTrigger>
@@ -247,14 +217,14 @@ export function AdminUsersPage() {
                       </SelectTrigger>
                       <SelectContent position="popper">
                         <SelectItem value="all">All restaurants</SelectItem>
-                        {restaurantOptions.map((restaurantId) => (
-                          <SelectItem key={restaurantId} value={restaurantId}>
-                            {restaurantId}
+                        {restaurants.map((restaurant) => (
+                          <SelectItem key={restaurant.id} value={restaurant.id}>
+                            {restaurant.name}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
-                    <Select value={scopeFilter} onValueChange={(value) => setScopeFilter(value as ScopeFilter)}>
+                    <Select value={scopeFilter} onValueChange={(value) => { setPage(1); setScopeFilter(value as ScopeFilter) }}>
                       <SelectTrigger className="filter-select">
                         <SelectValue placeholder="Scope" />
                       </SelectTrigger>
@@ -309,7 +279,7 @@ export function AdminUsersPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {paginatedUsers.map((directoryUser) => (
+                        {users.map((directoryUser) => (
                           <tr key={directoryUser.id}>
                             <td>
                               <span className="table-name">
@@ -333,12 +303,12 @@ export function AdminUsersPage() {
                                 currentUserRank={currentUserRank}
                                 isPlatformOwner={isPlatformOwner}
                                 availableRoles={manageableRoleOptions}
-                                onUsersChanged={() => loadUsers()}
+                                onUsersChanged={refreshUserData}
                               />
                             </td>
                           </tr>
                         ))}
-                        {paginatedUsers.length === 0 && (
+                        {users.length === 0 && (
                           <tr>
                             <td colSpan={5} className="empty-cell">
                               No users match the current filters.
@@ -350,10 +320,10 @@ export function AdminUsersPage() {
                   </div>
                   <div className="pagination-bar">
                     <span>
-                      Showing {pageStart}-{pageEnd} of {filteredUsers.length}
+                      Showing {pageStart}-{pageEnd} of {totalItems}
                     </span>
                     <div className="pagination-actions">
-                      <Select value={String(pageSize)} onValueChange={(value) => setPageSize(Number(value))}>
+                      <Select value={String(pageSize)} onValueChange={(value) => { setPage(1); setPageSize(Number(value)) }}>
                         <SelectTrigger className="page-size-select">
                           <SelectValue />
                         </SelectTrigger>
@@ -364,14 +334,14 @@ export function AdminUsersPage() {
                         </SelectContent>
                       </Select>
                       <span>
-                        Page {page} of {totalPages}
+                        Page {totalPages === 0 ? 0 : page} of {totalPages}
                       </span>
                       <Button
                         type="button"
                         variant="outline"
                         size="icon"
                         onClick={() => setPage((current) => Math.max(1, current - 1))}
-                        disabled={page === 1}
+                        disabled={loading || page <= 1}
                         aria-label="Previous page"
                       >
                         <ChevronLeft size={16} />
@@ -381,7 +351,7 @@ export function AdminUsersPage() {
                         variant="outline"
                         size="icon"
                         onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
-                        disabled={page === totalPages}
+                        disabled={loading || page >= totalPages}
                         aria-label="Next page"
                       >
                         <ChevronRight size={16} />
@@ -399,7 +369,7 @@ export function AdminUsersPage() {
         </TabsContent>
 
         <TabsContent value="email">
-          <EmailTestCard users={users} canSendEmail={isPlatformOwner} />
+          <EmailTestCard users={emailUsers} canSendEmail={isPlatformOwner} />
         </TabsContent>
 
         <TabsContent value="permissions">

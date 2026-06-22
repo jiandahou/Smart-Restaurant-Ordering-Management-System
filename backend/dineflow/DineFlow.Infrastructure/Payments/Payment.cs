@@ -30,6 +30,8 @@ public class Payment
 
     public DateTime? FailedAt { get; set; }
 
+    public string? RecordedByUserId { get; set; }
+
     public Order? Order { get; set; }
 }
 
@@ -42,10 +44,18 @@ public enum PaymentStatus
     Expired = 4,
     Refunded = 5,
     PartiallyRefunded = 6,
-    NotRequired = 7
+    NotRequired = 7,
+    Unpaid = 8
+}
+
+public enum PaymentMethod
+{
+    Online = 0,
+    PayAtCounter = 1
 }
 
 public static class PaymentProviders
 {
     public const string Stripe = "Stripe";
+    public const string Counter = "Counter";
 }

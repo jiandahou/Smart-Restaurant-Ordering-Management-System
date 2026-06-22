@@ -134,8 +134,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                     "\"ExpiresAt\" > \"CreatedAt\"");
                 table.HasCheckConstraint(
                     "CK_Carts_TableOrderType",
-                    "(\"OrderType\" = 0 AND \"TableId\" IS NOT NULL) OR " +
-                    "(\"OrderType\" <> 0 AND \"TableId\" IS NULL)");
+                    "\"TableId\" IS NULL OR \"OrderType\" = 0");
             });
 
             entity.HasOne(cart => cart.Restaurant)
@@ -234,6 +233,13 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(order => order.OrderNumber)
                 .IsUnique();
 
+            entity.ToTable(table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_Orders_PaymentMethod",
+                    "\"PaymentMethod\" IN (0, 1)");
+            });
+
             entity.HasOne(order => order.Restaurant)
                 .WithMany()
                 .HasForeignKey(order => order.RestaurantId)
@@ -274,6 +280,21 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(item => item.OrderId);
         });
 
+        builder.Entity<OrderStatusHistory>(entity =>
+        {
+            entity.Property(history => history.Action)
+                .HasMaxLength(40)
+                .IsRequired();
+
+            entity.Property(history => history.Reason)
+                .HasMaxLength(1_000);
+
+            entity.Property(history => history.ChangedByUserId)
+                .HasMaxLength(450);
+
+            entity.HasIndex(history => new { history.OrderId, history.CreatedAt });
+        });
+
         builder.Entity<Payment>(entity =>
         {
             entity.HasKey(payment => payment.Id);
@@ -294,6 +315,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
 
             entity.Property(payment => payment.FailureReason)
                 .HasMaxLength(1_000);
+
+            entity.Property(payment => payment.RecordedByUserId)
+                .HasMaxLength(450);
 
             entity.HasIndex(payment => payment.OrderId);
 

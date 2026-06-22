@@ -14,6 +14,8 @@ public class CreateOrderRequest
 
     public int Status { get; set; }
 
+    public string PaymentMethod { get; set; } = "Online";
+
     public decimal TotalAmount { get; set; }
 
     public string? CustomerNote { get; set; }

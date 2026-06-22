@@ -7,6 +7,8 @@ public sealed class JoinCartRequest
     public Guid? RestaurantId { get; init; }
 
     public string? TableQrToken { get; init; }
+
+    public string? OrderType { get; init; }
 }
 
 public sealed class JoinCartResponse
@@ -44,6 +46,11 @@ public sealed class CheckoutCartResponse
     public required string Message { get; init; }
 
     public required OrderResponse Order { get; init; }
+}
+
+public sealed class SelectOrderPaymentMethodRequest
+{
+    public required string PaymentMethod { get; init; }
 }
 
 public sealed class CartResponse

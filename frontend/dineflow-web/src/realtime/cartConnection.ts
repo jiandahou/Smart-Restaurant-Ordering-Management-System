@@ -51,17 +51,23 @@ export function createCartRealtimeClient(
     .build()
 
   connection.on('CartUpdated', handlers.onCartUpdated)
-  connection.on('CartItemAdded', (update: CartItemAddedUpdate) =>
-    handlers.onCartItemAdded?.(update),
-  )
+  connection.on('CartItemAdded', (update: CartItemAddedUpdate) => {
+    console.debug('[SignalR] CartItemAdded received', update)
+    handlers.onCartItemAdded?.(update)
+  })
   connection.on('CartExpired', () => handlers.onCartExpired?.())
   connection.on('CartSubmitted', (update: CartSubmittedUpdate) =>
     handlers.onCartSubmitted?.(update),
   )
 
   connection.onreconnected(async () => {
-    await connection.invoke('JoinCart', cartId, participantToken)
-    await handlers.onReconnected?.()
+    try {
+      await connection.invoke('JoinCart', cartId, participantToken)
+      await handlers.onReconnected?.()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[SignalR] ❌ JoinCart failed on reconnect: ${msg}`, err)
+    }
   })
 
   return {
@@ -71,8 +77,18 @@ export function createCartRealtimeClient(
         return
       }
 
-      await connection.start()
-      await connection.invoke('JoinCart', cartId, participantToken)
+      try {
+        await connection.start()
+        console.log('[SignalR] Connecting: cartId =', cartId, '| tokenLen =', participantToken?.length)
+        await connection.invoke('JoinCart', cartId, participantToken)
+        console.log('[SignalR] ✅ JoinCart succeeded')
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        const lines = msg.split('\n')
+        const serverMsg = lines.length > 1 ? lines.slice(1).join(' ') : '(no server detail)'
+        console.error(`[SignalR] ❌ JoinCart failed — server says: "${serverMsg}"`, err)
+        throw err
+      }
     },
     stop: async () => {
       if (connection.state === HubConnectionState.Connected) {

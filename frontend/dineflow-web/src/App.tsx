@@ -16,11 +16,13 @@ import { CustomerMenuPage } from './pages/CustomerMenuPage'
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
 import { LoginPage } from './pages/LoginPage'
 import { MagicLinkLoginPage } from './pages/MagicLinkLoginPage'
+import { MyOrdersPage } from './pages/MyOrdersPage'
 import { OAuthCallbackPage } from './pages/OAuthCallbackPage'
 import { PaymentResultPage } from './pages/PaymentResultPage'
 import { ProfilePage } from './pages/ProfilePage'
 import { RegisterCustomerPage } from './pages/RegisterCustomerPage'
 import { ResetPasswordPage } from './pages/ResetPasswordPage'
+import { StaffOrdersPage } from './pages/StaffOrdersPage'
 import { ProtectedRoute } from './routes/ProtectedRoute'
 import { Toaster } from './components/ui/sonner'
 
@@ -45,7 +47,11 @@ function App() {
         <Route element={<ProtectedRoute />}>
           <Route element={<AppLayout />}>
             <Route path="/me" element={<ProfilePage />} />
+            <Route path="/my-orders" element={<MyOrdersPage />} />
             <Route element={<ProtectedRoute roles={['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']} />}>
+              <Route element={<ProtectedRoute roles={['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']} />}>
+                <Route path="/staff/orders" element={<StaffOrdersPage />} />
+              </Route>
               <Route path="/admin" element={<AdminDashboardPage />} />
               <Route path="/admin/orders" element={<AdminOrdersPage />} />
               <Route element={<ProtectedRoute roles={['PlatformOwner', 'RestaurantOwner', 'Admin']} />}>

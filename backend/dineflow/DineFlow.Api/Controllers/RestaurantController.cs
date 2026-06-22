@@ -1,6 +1,8 @@
 using System.Security.Claims;
 using DineFlow.Api.Authorization;
+using DineFlow.Api.Contracts.Common;
 using DineFlow.Api.Contracts.Restaurant;
+using DineFlow.Api.Extensions;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Persistence;
@@ -27,7 +29,9 @@ public class RestaurantController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetRestaurants()
+    public async Task<ActionResult<PagedResponse<RestaurantResponse>>> GetRestaurants(
+        [FromQuery] RestaurantListRequest request,
+        CancellationToken cancellationToken)
     {
         var query = _dbContext.Restaurants.AsNoTracking();
 
@@ -46,11 +50,79 @@ public class RestaurantController : ControllerBase
             query = query.Where(restaurant => restaurant.Id == restaurantId);
         }
 
-        var restaurants = await query
-            .OrderBy(restaurant => restaurant.Name)
-            .ToListAsync();
-        var responses = restaurants.Select(MapToResponse).ToList();
-        return Ok(responses);
+        if (request.IsActive.HasValue)
+        {
+            query = query.Where(restaurant => restaurant.IsActive == request.IsActive.Value);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Currency))
+        {
+            var currency = request.Currency.Trim().ToUpperInvariant();
+            query = query.Where(restaurant => restaurant.Currency == currency);
+        }
+
+        var search = request.Search?.Trim();
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var pattern = $"%{search}%";
+            query = query.Where(restaurant =>
+                EF.Functions.ILike(restaurant.Name, pattern) ||
+                EF.Functions.ILike(restaurant.Address, pattern) ||
+                EF.Functions.ILike(restaurant.Phone, pattern) ||
+                EF.Functions.ILike(restaurant.Timezone, pattern) ||
+                EF.Functions.ILike(restaurant.Currency, pattern));
+        }
+
+        var sortedQuery = ApplySorting(query, request.SortBy, request.IsDescending);
+        if (sortedQuery is null)
+        {
+            return BadRequest(new
+            {
+                message = "Unsupported sortBy value.",
+                allowedValues = new[] { "name", "address", "currency", "status", "createdAt", "updatedAt" }
+            });
+        }
+
+        var responseQuery = sortedQuery.Select(restaurant => new RestaurantResponse
+        {
+            Id = restaurant.Id,
+            Name = restaurant.Name,
+            Address = restaurant.Address,
+            Phone = restaurant.Phone,
+            Timezone = restaurant.Timezone,
+            Currency = restaurant.Currency,
+            PaymentPolicy = restaurant.PaymentPolicy.ToString(),
+            IsActive = restaurant.IsActive,
+            CreatedAt = restaurant.CreatedAt,
+            UpdatedAt = restaurant.UpdatedAt
+        });
+        var page = await responseQuery.ToPagedResponseAsync(request.Page, request.PageSize, cancellationToken);
+
+        return Ok(page);
+    }
+
+    private static IOrderedQueryable<Restaurant>? ApplySorting(
+        IQueryable<Restaurant> query,
+        string? sortBy,
+        bool descending)
+    {
+        var normalizedSort = string.IsNullOrWhiteSpace(sortBy) ? "name" : sortBy.Trim();
+        IOrderedQueryable<Restaurant>? sorted = normalizedSort.ToLowerInvariant() switch
+        {
+            "name" => descending ? query.OrderByDescending(restaurant => restaurant.Name) : query.OrderBy(restaurant => restaurant.Name),
+            "address" => descending ? query.OrderByDescending(restaurant => restaurant.Address) : query.OrderBy(restaurant => restaurant.Address),
+            "currency" => descending ? query.OrderByDescending(restaurant => restaurant.Currency) : query.OrderBy(restaurant => restaurant.Currency),
+            "status" => descending ? query.OrderByDescending(restaurant => restaurant.IsActive) : query.OrderBy(restaurant => restaurant.IsActive),
+            "createdat" => descending ? query.OrderByDescending(restaurant => restaurant.CreatedAt) : query.OrderBy(restaurant => restaurant.CreatedAt),
+            "updatedat" => descending ? query.OrderByDescending(restaurant => restaurant.UpdatedAt) : query.OrderBy(restaurant => restaurant.UpdatedAt),
+            _ => null
+        };
+
+        return sorted is null
+            ? null
+            : descending
+                ? sorted.ThenByDescending(restaurant => restaurant.Id)
+                : sorted.ThenBy(restaurant => restaurant.Id);
     }
 
     [HttpGet("{id:guid}")]
@@ -92,6 +164,7 @@ public class RestaurantController : ControllerBase
             Phone = request.Phone.Trim(),
             Timezone = request.Timezone.Trim(),
             Currency = request.Currency.Trim().ToUpperInvariant(),
+            PaymentPolicy = Enum.Parse<RestaurantPaymentPolicy>(request.PaymentPolicy, true),
             IsActive = request.IsActive,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = null
@@ -131,6 +204,7 @@ public class RestaurantController : ControllerBase
         restaurant.Phone = request.Phone.Trim();
         restaurant.Timezone = request.Timezone.Trim();
         restaurant.Currency = request.Currency.Trim().ToUpperInvariant();
+        restaurant.PaymentPolicy = Enum.Parse<RestaurantPaymentPolicy>(request.PaymentPolicy, true);
         restaurant.IsActive = request.IsActive;
         restaurant.UpdatedAt = DateTime.UtcNow;
 
@@ -219,6 +293,12 @@ public class RestaurantController : ControllerBase
             return "Currency must be a three-letter ISO code.";
         }
 
+        if (!Enum.TryParse<RestaurantPaymentPolicy>(request.PaymentPolicy, true, out var paymentPolicy) ||
+            !Enum.IsDefined(paymentPolicy))
+        {
+            return $"PaymentPolicy must be one of: {string.Join(", ", Enum.GetNames<RestaurantPaymentPolicy>())}.";
+        }
+
         return null;
     }
 
@@ -232,6 +312,7 @@ public class RestaurantController : ControllerBase
             Phone = restaurant.Phone,
             Timezone = restaurant.Timezone,
             Currency = restaurant.Currency,
+            PaymentPolicy = restaurant.PaymentPolicy.ToString(),
             IsActive = restaurant.IsActive,
             CreatedAt = restaurant.CreatedAt,
             UpdatedAt = restaurant.UpdatedAt

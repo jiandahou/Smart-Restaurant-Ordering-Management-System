@@ -8,6 +8,8 @@ public sealed class PublicOrderingContextResponse
 
     public required string OrderType { get; init; }
 
+    public required IReadOnlyList<string> AvailableOrderTypes { get; init; }
+
     public required string MenuEntryUrl { get; init; }
 }
 
@@ -24,6 +26,8 @@ public sealed class PublicOrderingRestaurantResponse
     public required string Timezone { get; init; }
 
     public required string Currency { get; init; }
+
+    public required string PaymentPolicy { get; init; }
 }
 
 public sealed class PublicOrderingTableResponse

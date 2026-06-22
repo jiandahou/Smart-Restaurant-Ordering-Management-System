@@ -119,6 +119,17 @@ export type UserListItem = AuthUser & {
   updatedAt: string | null
 }
 
+export type UserListParams = {
+  page?: number
+  pageSize?: number
+  search?: string
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
+  role?: string
+  restaurantId?: string
+  scope?: 'all' | 'platform' | 'restaurant'
+}
+
 export type CreateRestaurantUserRole = 'RestaurantOwner' | 'Admin' | 'Staff'
 export type ManagedUserRole = CreateRestaurantUserRole | 'Customer'
 
@@ -163,9 +174,22 @@ export type Restaurant = {
   phone: string
   timezone: string
   currency: string
+  paymentPolicy: RestaurantPaymentPolicy
   isActive: boolean
   createdAt: string
   updatedAt: string | null
+}
+
+export type RestaurantPaymentPolicy = 'PrepayRequired' | 'PayAtCounterAllowed'
+
+export type RestaurantListParams = {
+  page?: number
+  pageSize?: number
+  search?: string
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
+  isActive?: boolean
+  currency?: string
 }
 
 export type RestaurantRequest = {
@@ -174,6 +198,7 @@ export type RestaurantRequest = {
   phone: string
   timezone: string
   currency: string
+  paymentPolicy: RestaurantPaymentPolicy
   isActive: boolean
 }
 
@@ -346,6 +371,7 @@ export type AdminOrderStatus =
   | 'Rejected'
 
 export type AdminPaymentStatus =
+  | 'Unpaid'
   | 'Pending'
   | 'Paid'
   | 'Failed'
@@ -356,6 +382,15 @@ export type AdminPaymentStatus =
   | 'NotRequired'
 
 export type AdminOrderType = 'DineIn' | 'Takeaway' | 'Scheduled'
+
+export type OrderTransitionAction =
+  | 'Accept'
+  | 'StartPreparing'
+  | 'MarkReady'
+  | 'Complete'
+  | 'Reject'
+  | 'Cancel'
+  | 'Reopen'
 
 export type AdminOrderItem = {
   id: string
@@ -396,6 +431,9 @@ export type AdminOrder = {
   orderType: AdminOrderType
   status: AdminOrderStatus
   paymentStatus: AdminPaymentStatus
+  paymentMethod: 'Online' | 'PayAtCounter'
+  canProcess: boolean
+  availableActions: OrderTransitionAction[]
   totalAmount: number
   customerNote: string | null
   scheduledTime: string | null
@@ -404,6 +442,94 @@ export type AdminOrder = {
   paymentAttempts: number
   latestPayment: AdminOrderPayment | null
   items: AdminOrderItem[]
+}
+
+export type CustomerOrderItem = {
+  id: string
+  orderId: string
+  menuItemId: string | null
+  itemNameSnapshot: string
+  quantity: number
+  unitPrice: number
+  totalPrice: number
+  note: string | null
+  createdAt: string
+  updatedAt: string | null
+}
+
+export type CustomerOrder = {
+  id: string
+  restaurantId: string | null
+  tableId: string | null
+  tableNumber: string | null
+  customerId: string | null
+  orderNumber: string
+  orderType: number
+  status: number
+  paymentStatus: AdminPaymentStatus
+  paymentMethod: 'Online' | 'PayAtCounter'
+  totalAmount: number
+  customerNote: string | null
+  scheduledTime: string | null
+  createdAt: string
+  updatedAt: string | null
+  orderItems: CustomerOrderItem[]
+}
+
+export type PagedResponse<T> = {
+  items: T[]
+  page: number
+  pageSize: number
+  totalItems: number
+  totalPages: number
+  hasPreviousPage: boolean
+  hasNextPage: boolean
+}
+
+export type AdminOrderListParams = {
+  page?: number
+  pageSize?: number
+  search?: string
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
+  status?: string
+  paymentStatus?: string
+  orderType?: string
+  restaurantId?: string
+  payableOnly?: boolean
+}
+
+export type AdminPaymentListParams = {
+  page?: number
+  pageSize?: number
+  search?: string
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
+  status?: string
+  orderStatus?: string
+  orderType?: string
+  restaurantId?: string
+}
+
+export type AdminPayment = AdminOrderPayment & {
+  orderId: string
+  orderNumber: string
+  restaurantId: string | null
+  restaurantName: string | null
+  customerName: string | null
+  customerEmail: string | null
+  orderStatus: AdminOrderStatus
+  orderType: AdminOrderType
+}
+
+export type AdminOrderSummary = {
+  total: number
+  activeKitchen: number
+  paid: number
+  pendingPayment: number
+  failedPayment: number
+  payable: number
+  revenue: number
 }
 
 export type CreateOrderCheckoutSessionRequest = {
@@ -728,8 +854,13 @@ export function confirmEmailChange(payload: ConfirmEmailChangeRequest) {
   })
 }
 
-export function getRestaurantUsers() {
-  return request<UserListItem[]>('/api/restaurant/users')
+export function getRestaurantUserPage(params: UserListParams = {}) {
+  return request<PagedResponse<UserListItem>>(`/api/restaurant/users${toQueryString(params)}`)
+}
+
+export async function getRestaurantUsers() {
+  const response = await getRestaurantUserPage({ pageSize: 100, sortBy: 'email', sortDirection: 'asc' })
+  return response.items
 }
 
 export function createRestaurantUser({
@@ -761,8 +892,13 @@ export function deleteUser(userId: string) {
   })
 }
 
-export function getRestaurants() {
-  return request<Restaurant[]>('/api/restaurant')
+export function getRestaurantPage(params: RestaurantListParams = {}) {
+  return request<PagedResponse<Restaurant>>(`/api/restaurant${toQueryString(params)}`)
+}
+
+export async function getRestaurants() {
+  const response = await getRestaurantPage({ pageSize: 100, sortBy: 'name', sortDirection: 'asc' })
+  return response.items
 }
 
 export function createRestaurant(payload: RestaurantRequest) {
@@ -925,8 +1061,54 @@ export function sendTestEmail(payload: SendTestEmailRequest) {
   })
 }
 
-export function getAdminOrders() {
-  return request<AdminOrder[]>('/api/admin/orders')
+function toQueryString(params: Record<string, string | number | boolean | undefined>) {
+  const query = new URLSearchParams()
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== '') {
+      query.set(key, String(value))
+    }
+  })
+
+  const value = query.toString()
+  return value ? `?${value}` : ''
+}
+
+export function getAdminOrders(params: AdminOrderListParams = {}) {
+  return request<PagedResponse<AdminOrder>>(`/api/admin/orders${toQueryString(params)}`)
+}
+
+export function getStaffOrders(params: AdminOrderListParams = {}) {
+  return request<PagedResponse<AdminOrder>>(`/api/staff/orders${toQueryString(params)}`)
+}
+
+export function getAdminOrderSummary() {
+  return request<AdminOrderSummary>('/api/admin/orders/summary')
+}
+
+export function recordCounterPayment(orderId: string) {
+  return request<AdminOrder>(`/api/admin/orders/${orderId}/counter-payment`, {
+    method: 'POST',
+  })
+}
+
+export function transitionAdminOrder(
+  orderId: string,
+  action: OrderTransitionAction,
+  reason?: string,
+) {
+  return request<AdminOrder>(`/api/admin/orders/${orderId}/transitions`, {
+    method: 'POST',
+    body: JSON.stringify({ action, reason }),
+  })
+}
+
+export function getMyOrders() {
+  return request<CustomerOrder[]>('/api/order/mine')
+}
+
+export function getAdminPayments(params: AdminPaymentListParams = {}) {
+  return request<PagedResponse<AdminPayment>>(`/api/payments${toQueryString(params)}`)
 }
 
 export function createOrderCheckoutSession(payload: CreateOrderCheckoutSessionRequest) {

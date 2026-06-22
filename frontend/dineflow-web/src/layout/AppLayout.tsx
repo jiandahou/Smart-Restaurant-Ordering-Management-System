@@ -19,6 +19,7 @@ import { Avatar, AvatarFallback, AvatarImage } from '../components/ui/avatar'
 import { Button } from '../components/ui/button'
 
 const consoleRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']
+const restaurantStaffRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']
 const adminRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin']
 const adminLinks = [
   { to: '/admin', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -49,6 +50,7 @@ export function AppLayout() {
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('idle')
   const canUseAdminArea = hasAnyRole(consoleRoles)
   const canUseAdminTools = hasAnyRole(adminRoles)
+  const canUseStaffOrders = hasAnyRole(restaurantStaffRoles)
   const isAdminArea = location.pathname.startsWith('/admin')
   const isBackendPulseActive = backendStatus === 'checking' || backendStatus === 'ok'
 
@@ -93,7 +95,7 @@ export function AppLayout() {
               {user?.avatarUrl && <AvatarImage src={user.avatarUrl} alt={user.fullName ?? user.email ?? 'User avatar'} />}
               <AvatarFallback>{getInitials(user?.fullName, user?.email)}</AvatarFallback>
             </Avatar>
-            <div>
+            <div className="navbar-user-copy">
               <strong>{user?.fullName || 'Not set'}</strong>
               <span>{user?.email}</span>
             </div>
@@ -103,14 +105,25 @@ export function AppLayout() {
             Profile
           </NavLink>
           {canUseAdminArea && (
-            <NavLink
-              to="/admin"
-              end
-              className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
-            >
-              <ShieldCheck size={18} />
-              Admin
-            </NavLink>
+            <>
+              {canUseStaffOrders && (
+                <NavLink
+                  to="/staff/orders"
+                  className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+                >
+                  <ClipboardList size={18} />
+                  Staff Orders
+                </NavLink>
+              )}
+              <NavLink
+                to="/admin"
+                end
+                className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+              >
+                <ShieldCheck size={18} />
+                Admin
+              </NavLink>
+            </>
           )}
           <Button
             type="button"

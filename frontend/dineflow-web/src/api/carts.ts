@@ -1,3 +1,5 @@
+import { getStoredToken } from './auth'
+
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
 export const cartParticipantTokenHeader = 'X-Cart-Participant-Token'
@@ -50,10 +52,13 @@ export type SubmittedOrder = {
   id: string
   restaurantId: string | null
   tableId: string | null
+  tableNumber: string | null
   customerId: string | null
   orderNumber: string
   orderType: number
   status: number
+  paymentStatus: string
+  paymentMethod: 'Online' | 'PayAtCounter'
   totalAmount: number
   customerNote: string | null
   scheduledTime: string | null
@@ -63,7 +68,7 @@ export type SubmittedOrder = {
 }
 
 export type JoinCartRequest =
-  | { restaurantId: string; tableQrToken?: never }
+  | { restaurantId: string; orderType: 'DineIn' | 'Takeaway'; tableQrToken?: never }
   | { restaurantId?: never; tableQrToken: string }
 
 export type JoinCartResponse = {
@@ -172,6 +177,18 @@ export async function createPublicPaymentSession(cartId: string, participantToke
   )
 }
 
+export async function selectOrderPaymentMethod(
+  cartId: string,
+  participantToken: string,
+  paymentMethod: 'Online' | 'PayAtCounter',
+) {
+  return cartRequest<CheckoutCartResponse>(
+    `/api/public/carts/${cartId}/payment-method`,
+    { method: 'PUT', body: JSON.stringify({ paymentMethod }) },
+    participantToken,
+  )
+}
+
 async function cartRequest<T>(
   path: string,
   options: RequestInit,
@@ -186,6 +203,11 @@ async function cartRequest<T>(
 
   if (participantToken) {
     headers.set(cartParticipantTokenHeader, participantToken)
+  }
+
+  const authToken = getStoredToken()
+  if (authToken) {
+    headers.set('Authorization', `Bearer ${authToken}`)
   }
 
   const response = await fetch(`${apiBaseUrl}${path}`, { ...options, headers })

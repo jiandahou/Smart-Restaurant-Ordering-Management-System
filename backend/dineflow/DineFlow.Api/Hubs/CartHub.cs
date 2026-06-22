@@ -9,46 +9,45 @@ public sealed class CartHub(
     CartAccessService cartAccessService,
     CartRealtimeNotifier cartRealtimeNotifier) : Hub
 {
-    public async Task JoinCart(
-        Guid cartId,
-        string participantToken,
-        CancellationToken cancellationToken)
+    public async Task JoinCart(Guid cartId, string participantToken)
     {
+        var ct = Context.ConnectionAborted;
+
         var access = await cartAccessService.AuthorizeAsync(
             cartId,
             participantToken,
-            cancellationToken);
+            ct);
 
         if (access.Failure != CartAccessFailure.None)
         {
             if (access.Failure == CartAccessFailure.Expired)
             {
-                await cartRealtimeNotifier.CartExpiredAsync(cartId, cancellationToken);
+                await cartRealtimeNotifier.CartExpiredAsync(cartId, ct);
             }
 
             throw new HubException(GetAccessError(access.Failure));
         }
 
-        await cartAccessService.TouchParticipantAsync(access.Participant!, cancellationToken);
+        await cartAccessService.TouchParticipantAsync(access.Participant!, ct);
 
         await Groups.AddToGroupAsync(
             Context.ConnectionId,
             GroupName(cartId),
-            cancellationToken);
+            ct);
 
-        var snapshot = await cartAccessService.LoadSnapshotAsync(cartId, cancellationToken);
+        var snapshot = await cartAccessService.LoadSnapshotAsync(cartId, ct);
         await Clients.Caller.SendAsync(
             CartRealtimeEvents.CartUpdated,
             new CartRealtimeUpdate("connected", snapshot),
-            cancellationToken);
+            ct);
     }
 
-    public Task LeaveCart(Guid cartId, CancellationToken cancellationToken)
+    public Task LeaveCart(Guid cartId)
     {
         return Groups.RemoveFromGroupAsync(
             Context.ConnectionId,
             GroupName(cartId),
-            cancellationToken);
+            Context.ConnectionAborted);
     }
 
     public static string GroupName(Guid cartId) => $"cart:{cartId:D}";

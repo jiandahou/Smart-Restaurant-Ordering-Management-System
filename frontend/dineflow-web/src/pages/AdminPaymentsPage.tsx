@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
@@ -16,7 +16,8 @@ import {
   getAdminOrders,
   type AdminOrder,
 } from '../api/auth'
-import { Badge } from '../components/ui/badge'
+import { OrderStatusBadge, getOrderStatusLabel, orderStatusOptions } from '../components/orders/OrderStatusBadge'
+import { PaymentStatusBadge, getPaymentStatusLabel, paymentStatusOptions } from '../components/orders/PaymentStatusBadge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Input } from '../components/ui/input'
@@ -37,74 +38,11 @@ type SortKey =
   | 'status'
   | 'totalAmount'
 
-const paymentStatusLabels: Record<string, string> = {
-  Pending: 'Pending',
-  Paid: 'Paid',
-  Failed: 'Failed',
-  Cancelled: 'Cancelled',
-  Expired: 'Expired',
-  Refunded: 'Refunded',
-  PartiallyRefunded: 'Partially refunded',
-  NotRequired: 'Not required',
-}
-
-const orderStatusLabels: Record<string, string> = {
-  Pending: 'Pending',
-  Accepted: 'Accepted',
-  Preparing: 'Preparing',
-  Ready: 'Ready',
-  Completed: 'Completed',
-  Cancelled: 'Cancelled',
-  Rejected: 'Rejected',
-}
-
 const orderTypeLabels: Record<string, string> = {
   DineIn: 'Dine in',
   Takeaway: 'Takeaway',
   Scheduled: 'Scheduled',
 }
-
-const badgeVariantByPaymentStatus: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
-  Paid: 'default',
-  Pending: 'secondary',
-  Failed: 'destructive',
-  Cancelled: 'outline',
-  Expired: 'outline',
-  Refunded: 'outline',
-  PartiallyRefunded: 'outline',
-  NotRequired: 'outline',
-}
-
-const badgeVariantByOrderStatus: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
-  Completed: 'default',
-  Ready: 'default',
-  Preparing: 'secondary',
-  Accepted: 'secondary',
-  Pending: 'outline',
-  Cancelled: 'destructive',
-  Rejected: 'destructive',
-}
-
-const paymentStatusOptions = [
-  'Pending',
-  'Paid',
-  'Failed',
-  'Cancelled',
-  'Expired',
-  'Refunded',
-  'PartiallyRefunded',
-  'NotRequired',
-]
-
-const orderStatusOptions = [
-  'Pending',
-  'Accepted',
-  'Preparing',
-  'Ready',
-  'Completed',
-  'Cancelled',
-  'Rejected',
-]
 
 const orderTypeOptions = ['DineIn', 'Takeaway', 'Scheduled']
 
@@ -126,46 +64,8 @@ function formatDate(value: string | null) {
   }).format(new Date(value))
 }
 
-function getPaymentStatusLabel(status: string) {
-  return paymentStatusLabels[status] ?? status
-}
-
-function getOrderStatusLabel(status: string) {
-  return orderStatusLabels[status] ?? status
-}
-
 function getOrderTypeLabel(orderType: string) {
   return orderTypeLabels[orderType] ?? orderType
-}
-
-function getPaymentBadgeVariant(status: string) {
-  return badgeVariantByPaymentStatus[status] ?? 'secondary'
-}
-
-function getOrderBadgeVariant(status: string) {
-  return badgeVariantByOrderStatus[status] ?? 'secondary'
-}
-
-function getSearchValues(order: AdminOrder) {
-  return [
-    order.orderNumber,
-    order.restaurantName,
-    order.restaurantId,
-    order.tableNumber,
-    order.customerName,
-    order.customerEmail,
-    order.status,
-    getOrderStatusLabel(order.status),
-    order.paymentStatus,
-    getPaymentStatusLabel(order.paymentStatus),
-    order.orderType,
-    getOrderTypeLabel(order.orderType),
-    order.latestPayment?.providerCheckoutSessionId,
-    order.latestPayment?.providerPaymentIntentId,
-  ]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase()
 }
 
 function SortHeader({
@@ -197,6 +97,10 @@ export function AdminPaymentsPage() {
   const [orderTypeFilter, setOrderTypeFilter] = useState('all')
   const [restaurantFilter, setRestaurantFilter] = useState('all')
   const [payableOnly, setPayableOnly] = useState('yes')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
+  const [totalItems, setTotalItems] = useState(0)
+  const [totalPages, setTotalPages] = useState(0)
   const [sort, setSort] = useState<{ key: SortKey; direction: 'asc' | 'desc' }>({
     key: 'createdAt',
     direction: 'desc',
@@ -216,52 +120,13 @@ export function AdminPaymentsPage() {
     ).sort((first, second) => first.label.localeCompare(second.label))
   }, [orders])
 
-  const filteredOrders = useMemo(() => {
-    const normalizedSearch = search.trim().toLowerCase()
-
-    return orders
-      .filter((order) => {
-        if (!normalizedSearch) {
-          return true
-        }
-
-        return getSearchValues(order).includes(normalizedSearch)
-      })
-      .filter((order) => (paymentFilter === 'all' ? true : order.paymentStatus === paymentFilter))
-      .filter((order) => (orderStatusFilter === 'all' ? true : order.status === orderStatusFilter))
-      .filter((order) => (orderTypeFilter === 'all' ? true : order.orderType === orderTypeFilter))
-      .filter((order) => {
-        if (restaurantFilter === 'all') {
-          return true
-        }
-
-        return (order.restaurantId || order.restaurantName || 'unknown') === restaurantFilter
-      })
-      .filter((order) => (payableOnly === 'yes' ? isOrderPayable(order) : true))
-      .toSorted((first, second) => {
-        const direction = sort.direction === 'asc' ? 1 : -1
-
-        switch (sort.key) {
-          case 'orderNumber':
-            return first.orderNumber.localeCompare(second.orderNumber) * direction
-          case 'restaurantName':
-            return (first.restaurantName || '').localeCompare(second.restaurantName || '') * direction
-          case 'paymentStatus':
-            return getPaymentStatusLabel(first.paymentStatus).localeCompare(getPaymentStatusLabel(second.paymentStatus)) * direction
-          case 'status':
-            return getOrderStatusLabel(first.status).localeCompare(getOrderStatusLabel(second.status)) * direction
-          case 'totalAmount':
-            return (first.totalAmount - second.totalAmount) * direction
-          case 'createdAt':
-          default:
-            return (new Date(first.createdAt).getTime() - new Date(second.createdAt).getTime()) * direction
-        }
-      })
-  }, [orders, orderStatusFilter, orderTypeFilter, payableOnly, paymentFilter, restaurantFilter, search, sort])
+  const filteredOrders = orders
 
   const totals = useMemo(() => {
     return getOrderStats(filteredOrders)
   }, [filteredOrders])
+  const pageStart = totalItems === 0 ? 0 : (page - 1) * pageSize + 1
+  const pageEnd = Math.min(page * pageSize, totalItems)
 
   const hasActiveFilters =
     search.trim() !== ''
@@ -271,11 +136,25 @@ export function AdminPaymentsPage() {
     || restaurantFilter !== 'all'
     || payableOnly !== 'yes'
 
-  const loadOrders = async (showToast = false) => {
+  const loadOrders = useCallback(async (showToast = false) => {
     setLoading(true)
 
     try {
-      setOrders(await getAdminOrders())
+      const response = await getAdminOrders({
+        page,
+        pageSize,
+        search: search.trim() || undefined,
+        sortBy: sort.key,
+        sortDirection: sort.direction,
+        status: orderStatusFilter === 'all' ? undefined : orderStatusFilter,
+        paymentStatus: paymentFilter === 'all' ? undefined : paymentFilter,
+        orderType: orderTypeFilter === 'all' ? undefined : orderTypeFilter,
+        restaurantId: restaurantFilter === 'all' ? undefined : restaurantFilter,
+        payableOnly: payableOnly === 'yes' ? true : undefined,
+      })
+      setOrders(response.items)
+      setTotalItems(response.totalItems)
+      setTotalPages(response.totalPages)
 
       if (showToast) {
         toast.success('Payments refreshed')
@@ -287,13 +166,14 @@ export function AdminPaymentsPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [orderStatusFilter, orderTypeFilter, page, pageSize, payableOnly, paymentFilter, restaurantFilter, search, sort])
 
   useEffect(() => {
     void Promise.resolve().then(() => loadOrders())
-  }, [])
+  }, [loadOrders])
 
   const updateSort = (key: SortKey) => {
+    setPage(1)
     setSort((current) => ({
       key,
       direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
@@ -301,6 +181,7 @@ export function AdminPaymentsPage() {
   }
 
   const resetFilters = () => {
+    setPage(1)
     setSearch('')
     setPaymentFilter('all')
     setOrderStatusFilter('all')
@@ -364,18 +245,18 @@ export function AdminPaymentsPage() {
           <div className="placeholder-grid order-summary-grid">
             <div className="placeholder-item">
               <strong>Visible orders</strong>
-              <span>{totals.total}</span>
+              <span>{totalItems}</span>
             </div>
             <div className="placeholder-item">
-              <strong>Ready to pay</strong>
+              <strong>Ready to pay this page</strong>
               <span>{totals.payable}</span>
             </div>
             <div className="placeholder-item">
-              <strong>Paid</strong>
+              <strong>Paid this page</strong>
               <span>{totals.paid}</span>
             </div>
             <div className="placeholder-item">
-              <strong>Failed</strong>
+              <strong>Failed this page</strong>
               <span>{totals.failedPayment}</span>
             </div>
           </div>
@@ -385,12 +266,12 @@ export function AdminPaymentsPage() {
               <Search size={16} />
               <Input
                 value={search}
-                onChange={(event) => setSearch(event.target.value)}
+                onChange={(event) => { setPage(1); setSearch(event.target.value) }}
                 placeholder="Search order, customer, restaurant, table, or payment ids"
               />
             </div>
 
-            <Select value={paymentFilter} onValueChange={setPaymentFilter}>
+            <Select value={paymentFilter} onValueChange={(value) => { setPage(1); setPaymentFilter(value) }}>
               <SelectTrigger className="filter-select">
                 <SelectValue placeholder="All payment status" />
               </SelectTrigger>
@@ -404,7 +285,7 @@ export function AdminPaymentsPage() {
               </SelectContent>
             </Select>
 
-            <Select value={orderStatusFilter} onValueChange={setOrderStatusFilter}>
+            <Select value={orderStatusFilter} onValueChange={(value) => { setPage(1); setOrderStatusFilter(value) }}>
               <SelectTrigger className="filter-select">
                 <SelectValue placeholder="All order status" />
               </SelectTrigger>
@@ -418,7 +299,7 @@ export function AdminPaymentsPage() {
               </SelectContent>
             </Select>
 
-            <Select value={orderTypeFilter} onValueChange={setOrderTypeFilter}>
+            <Select value={orderTypeFilter} onValueChange={(value) => { setPage(1); setOrderTypeFilter(value) }}>
               <SelectTrigger className="filter-select">
                 <SelectValue placeholder="All order types" />
               </SelectTrigger>
@@ -432,7 +313,7 @@ export function AdminPaymentsPage() {
               </SelectContent>
             </Select>
 
-            <Select value={restaurantFilter} onValueChange={setRestaurantFilter}>
+            <Select value={restaurantFilter} onValueChange={(value) => { setPage(1); setRestaurantFilter(value) }}>
               <SelectTrigger className="filter-select">
                 <SelectValue placeholder="All restaurants" />
               </SelectTrigger>
@@ -446,7 +327,7 @@ export function AdminPaymentsPage() {
               </SelectContent>
             </Select>
 
-            <Select value={payableOnly} onValueChange={setPayableOnly}>
+            <Select value={payableOnly} onValueChange={(value) => { setPage(1); setPayableOnly(value) }}>
               <SelectTrigger className="filter-select">
                 <SelectValue placeholder="Payable only" />
               </SelectTrigger>
@@ -560,15 +441,15 @@ export function AdminPaymentsPage() {
                         <span className="table-subtext">{order.customerName || order.customerEmail || 'Guest / unknown'}</span>
                       </td>
                       <td>
-                        <Badge variant={getOrderBadgeVariant(order.status)}>{getOrderStatusLabel(order.status)}</Badge>
+                        <OrderStatusBadge status={order.status} />
                         <span className="table-subtext">{getOrderTypeLabel(order.orderType)}</span>
                       </td>
                       <td>
-                        <Badge variant={getPaymentBadgeVariant(order.paymentStatus)}>
-                          {getPaymentStatusLabel(order.paymentStatus)}
-                        </Badge>
+                        <PaymentStatusBadge status={order.paymentStatus} />
                         <span className="table-subtext">
-                          {order.paymentAttempts > 0
+                          {order.paymentMethod === 'PayAtCounter'
+                            ? 'Pay at counter'
+                            : order.paymentAttempts > 0
                             ? `${order.paymentAttempts} payment attempt${order.paymentAttempts === 1 ? '' : 's'}`
                             : 'No payment attempts yet'}
                         </span>
@@ -621,6 +502,22 @@ export function AdminPaymentsPage() {
                 )}
               </tbody>
             </table>
+          </div>
+          <div className="pagination-bar">
+            <span>{pageStart}-{pageEnd} of {totalItems}</span>
+            <div className="pagination-actions">
+              <Select value={String(pageSize)} onValueChange={(value) => { setPage(1); setPageSize(Number(value)) }}>
+                <SelectTrigger className="page-size-select" aria-label="Payment orders per page">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {[10, 20, 50, 100].map((size) => <SelectItem key={size} value={String(size)}>{size} per page</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <Button type="button" variant="outline" size="sm" onClick={() => setPage((current) => current - 1)} disabled={loading || page <= 1}>Previous</Button>
+              <span>Page {totalPages === 0 ? 0 : page} of {totalPages}</span>
+              <Button type="button" variant="outline" size="sm" onClick={() => setPage((current) => current + 1)} disabled={loading || page >= totalPages}>Next</Button>
+            </div>
           </div>
         </CardContent>
       </Card>
