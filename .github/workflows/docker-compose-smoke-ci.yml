@@ -35,17 +35,25 @@ jobs:
 
       - name: Pull service images
         run: |
-          for attempt in 1 2 3; do
-            if docker compose pull postgres minio minio-init; then
-              exit 0
-            fi
+          pull_with_retry() {
+            service="$1"
 
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
+            for attempt in 1 2 3; do
+              if docker compose pull "$service"; then
+                return 0
+              fi
 
-            sleep $((attempt * 10))
-          done
+              if [ "$attempt" -eq 3 ]; then
+                return 1
+              fi
+
+              sleep $((attempt * 10))
+            done
+          }
+
+          pull_with_retry postgres
+          pull_with_retry minio
+          pull_with_retry minio-init
 
       - name: Start backend stack
         run: docker compose up -d postgres backend
