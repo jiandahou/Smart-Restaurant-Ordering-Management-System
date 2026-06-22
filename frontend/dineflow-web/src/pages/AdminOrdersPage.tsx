@@ -314,6 +314,7 @@ export function AdminOrdersPage() {
     || restaurantFilter !== 'all'
 
   const loadOrders = async (showToast = false) => {
+    setLoading(true)
     try {
       setOrders(await getAdminOrders())
       if (showToast) {
@@ -323,17 +324,8 @@ export function AdminOrdersPage() {
       toast.error('Could not load orders', {
         description: error instanceof Error ? error.message : 'Order loading failed',
       })
-    }
-  }
-
-  const loadRealOrders = async (showToast = false) => {
-    try {
-      setRealOrders(await getRealOrders())
-      if (showToast) toast.success('Orders refreshed')
-    } catch (error) {
-      toast.error('Could not load orders', {
-        description: error instanceof Error ? error.message : 'Order loading failed',
-      })
+    } finally {
+      setLoading(false)
     }
   }
 
