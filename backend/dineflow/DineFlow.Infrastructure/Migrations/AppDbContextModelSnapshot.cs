@@ -1123,6 +1123,7 @@ namespace DineFlow.Infrastructure.Migrations
                         .IsRequired();
 
                     b.Navigation("MenuItem");
+                    });
             modelBuilder.Entity("DineFlow.Infrastructure.Orders.Order", b =>
                 {
                     b.HasOne("DineFlow.Infrastructure.Identity.ApplicationUser", "Customer")
