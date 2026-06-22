@@ -16,6 +16,8 @@ public class OrderItemOption
 
     public decimal PriceAdjustmentSnapshot { get; set; }
 
+    public int Quantity { get; set; } = 1;
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public OrderItem? OrderItem { get; set; }

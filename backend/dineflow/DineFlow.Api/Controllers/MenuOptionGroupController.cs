@@ -45,6 +45,7 @@ public class MenuOptionGroupController : ControllerBase
         Name = o.Name,
         PriceAdjustment = o.PriceAdjustment,
         AdjustmentType = (int)o.AdjustmentType,
+        MaxQuantity = o.MaxQuantity,
         DisplayOrder = o.DisplayOrder,
         IsAvailable = o.IsAvailable,
         CreatedAt = o.CreatedAt,
@@ -201,6 +202,9 @@ public class MenuOptionGroupController : ControllerBase
         if (adjustmentType != OptionAdjustmentType.Remove && request.PriceAdjustment < 0)
             return BadRequest(new { message = "Add/Replace adjustments must be zero or positive." });
 
+        if (request.MaxQuantity < 1)
+            return BadRequest(new { message = "MaxQuantity must be at least 1." });
+
         var option = new MenuItemOption
         {
             GroupId = groupId,
@@ -209,6 +213,7 @@ public class MenuOptionGroupController : ControllerBase
             Name = request.Name,
             PriceAdjustment = request.PriceAdjustment,
             AdjustmentType = adjustmentType,
+            MaxQuantity = request.MaxQuantity,
             DisplayOrder = request.DisplayOrder
         };
 
@@ -236,9 +241,13 @@ public class MenuOptionGroupController : ControllerBase
         if (adjustmentType != OptionAdjustmentType.Remove && request.PriceAdjustment < 0)
             return BadRequest(new { message = "Add/Replace adjustments must be zero or positive." });
 
+        if (request.MaxQuantity < 1)
+            return BadRequest(new { message = "MaxQuantity must be at least 1." });
+
         option.Name = request.Name;
         option.PriceAdjustment = request.PriceAdjustment;
         option.AdjustmentType = adjustmentType;
+        option.MaxQuantity = request.MaxQuantity;
         option.DisplayOrder = request.DisplayOrder;
         option.IsAvailable = request.IsAvailable;
         option.UpdatedAt = DateTime.UtcNow;

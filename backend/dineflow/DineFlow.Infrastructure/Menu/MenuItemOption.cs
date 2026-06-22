@@ -23,6 +23,8 @@ public class MenuItemOption
 
     public OptionAdjustmentType AdjustmentType { get; set; } = OptionAdjustmentType.Add;
 
+    public int MaxQuantity { get; set; } = 1;
+
     public int DisplayOrder { get; set; }
 
     public bool IsAvailable { get; set; } = true;

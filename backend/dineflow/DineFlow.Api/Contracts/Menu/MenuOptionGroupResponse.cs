@@ -22,6 +22,7 @@ public class MenuOptionResponse
     public string Name { get; set; } = string.Empty;
     public decimal PriceAdjustment { get; set; }
     public int AdjustmentType { get; set; }
+    public int MaxQuantity { get; set; }
     public int DisplayOrder { get; set; }
     public bool IsAvailable { get; set; }
     public DateTime CreatedAt { get; set; }
