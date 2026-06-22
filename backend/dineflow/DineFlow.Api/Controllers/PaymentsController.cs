@@ -2,9 +2,13 @@ using System.Security.Claims;
 using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Payments;
 using DineFlow.Api.Options;
+using DineFlow.Application.Authorization;
+using DineFlow.Infrastructure.Identity;
+using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -18,28 +22,33 @@ namespace DineFlow.Api.Controllers;
 [Authorize]
 public class PaymentsController : ControllerBase
 {
-    private const long MinimumTestAmountCents = 50;
-    private const string TestOrderIdMetadataKey = "testOrderId";
+    private const string OrderIdMetadataKey = "orderId";
+    private const string PaymentIdMetadataKey = "paymentId";
+
     private readonly AppDbContext _dbContext;
+    private readonly UserManager<ApplicationUser> _userManager;
     private readonly IStripeClient _stripeClient;
     private readonly StripeOptions _stripeOptions;
     private readonly ILogger<PaymentsController> _logger;
 
     public PaymentsController(
         AppDbContext dbContext,
+        UserManager<ApplicationUser> userManager,
         IStripeClient stripeClient,
         IOptions<StripeOptions> stripeOptions,
         ILogger<PaymentsController> logger)
     {
         _dbContext = dbContext;
+        _userManager = userManager;
         _stripeClient = stripeClient;
         _stripeOptions = stripeOptions.Value;
         _logger = logger;
     }
 
-    [HttpPost("checkout-session/test")]
-    public async Task<ActionResult<CreateCheckoutSessionResponse>> CreateTestCheckoutSession(
-        CreateTestCheckoutSessionRequest request,
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    [HttpPost("checkout-session/order")]
+    public async Task<ActionResult<CreateCheckoutSessionResponse>> CreateOrderCheckoutSession(
+        CreateOrderCheckoutSessionRequest request,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(_stripeOptions.SecretKey))
@@ -50,39 +59,74 @@ public class PaymentsController : ControllerBase
             });
         }
 
-        if (request.AmountCents < MinimumTestAmountCents)
+        if (request.OrderId == Guid.Empty)
         {
             return BadRequest(new
             {
-                message = $"Amount must be at least {MinimumTestAmountCents} cents."
+                message = "OrderId is required."
             });
         }
 
-        if (request.Quantity <= 0)
+        var order = await _dbContext.Orders
+            .Include(currentOrder => currentOrder.OrderItems)
+            .Include(currentOrder => currentOrder.Restaurant)
+            .FirstOrDefaultAsync(currentOrder => currentOrder.Id == request.OrderId, cancellationToken);
+
+        if (order is null)
         {
-            return BadRequest(new
-            {
-                message = "Quantity must be greater than zero."
-            });
+            return NotFound(new { message = "Order not found." });
         }
+
+        if (!await CanAccessRestaurantAsync(order.RestaurantId))
+        {
+            return Forbid();
+        }
+
+        if (order.OrderItems.Count == 0)
+        {
+            return BadRequest(new { message = "Order has no items to pay for." });
+        }
+
+        if (order.PaymentStatus == PaymentStatus.Paid)
+        {
+            return Conflict(new { message = "This order has already been paid." });
+        }
+
+        if (order.Status is OrderStatus.Cancelled or OrderStatus.Rejected)
+        {
+            return BadRequest(new { message = "Cancelled or rejected orders cannot be paid." });
+        }
+
+        var menuItemIdsForNameFallback = order.OrderItems
+            .Where(item => string.IsNullOrWhiteSpace(item.ItemNameSnapshot) && item.MenuItemId.HasValue)
+            .Select(item => item.MenuItemId!.Value)
+            .Distinct()
+            .ToArray();
+
+        var menuItemNamesById = menuItemIdsForNameFallback.Length == 0
+            ? new Dictionary<Guid, string>()
+            : await _dbContext.MenuItems
+                .Where(menuItem => menuItemIdsForNameFallback.Contains(menuItem.Id))
+                .Select(menuItem => new
+                {
+                    menuItem.Id,
+                    menuItem.Name
+                })
+                .ToDictionaryAsync(menuItem => menuItem.Id, menuItem => menuItem.Name, cancellationToken);
 
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         var email = User.FindFirstValue(ClaimTypes.Email);
-        var currency = NormalizeCurrency(request.Currency ?? _stripeOptions.Currency);
-        var itemName = string.IsNullOrWhiteSpace(request.Name)
-            ? "DineFlow test order"
-            : request.Name.Trim();
-        var testOrder = new TestPaymentOrder
+        var currency = NormalizeCurrency(order.Restaurant?.Currency ?? _stripeOptions.Currency);
+        var payment = new Payment
         {
-            UserId = userId,
-            Name = itemName,
-            AmountCents = request.AmountCents,
-            Quantity = request.Quantity,
+            OrderId = order.Id,
+            Provider = PaymentProviders.Stripe,
+            AmountCents = ConvertAmountToCents(order.TotalAmount),
             Currency = currency,
-            Status = TestPaymentStatuses.Pending
+            Status = PaymentStatus.Pending
         };
 
-        _dbContext.TestPaymentOrders.Add(testOrder);
+        _dbContext.Payments.Add(payment);
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         var sessionOptions = new SessionCreateOptions
@@ -91,35 +135,38 @@ public class PaymentsController : ControllerBase
             SuccessUrl = AddCheckoutSessionId(_stripeOptions.SuccessUrl),
             CancelUrl = _stripeOptions.CancelUrl,
             CustomerEmail = string.IsNullOrWhiteSpace(email) ? null : email,
-            LineItems =
-            [
-                new SessionLineItemOptions
+            LineItems = order.OrderItems
+                .OrderBy(item => item.CreatedAt)
+                .ThenBy(item => item.Id)
+                .Select(item => new SessionLineItemOptions
                 {
-                    Quantity = request.Quantity,
+                    Quantity = item.Quantity,
                     PriceData = new SessionLineItemPriceDataOptions
                     {
                         Currency = currency,
-                        UnitAmount = request.AmountCents,
+                        UnitAmount = ConvertAmountToCents(item.UnitPrice),
                         ProductData = new SessionLineItemPriceDataProductDataOptions
                         {
-                            Name = itemName
+                            Name = ResolveStripeProductName(item, menuItemNamesById)
                         }
                     }
-                }
-            ],
+                })
+                .ToList(),
             Metadata = new Dictionary<string, string>
             {
-                ["mode"] = "test",
+                ["mode"] = "order",
                 ["userId"] = userId ?? string.Empty,
-                [TestOrderIdMetadataKey] = testOrder.Id.ToString()
+                [OrderIdMetadataKey] = order.Id.ToString(),
+                [PaymentIdMetadataKey] = payment.Id.ToString()
             },
             PaymentIntentData = new SessionPaymentIntentDataOptions
             {
                 Metadata = new Dictionary<string, string>
                 {
-                    ["mode"] = "test",
+                    ["mode"] = "order",
                     ["userId"] = userId ?? string.Empty,
-                    [TestOrderIdMetadataKey] = testOrder.Id.ToString()
+                    [OrderIdMetadataKey] = order.Id.ToString(),
+                    [PaymentIdMetadataKey] = payment.Id.ToString()
                 }
             }
         };
@@ -129,9 +176,11 @@ public class PaymentsController : ControllerBase
             var service = new SessionService(_stripeClient);
             var session = await service.CreateAsync(sessionOptions, cancellationToken: cancellationToken);
 
-            testOrder.StripeCheckoutSessionId = session.Id;
-            testOrder.StripePaymentIntentId = session.PaymentIntentId;
-            testOrder.UpdatedAt = DateTime.UtcNow;
+            payment.ProviderCheckoutSessionId = session.Id;
+            payment.ProviderPaymentIntentId = session.PaymentIntentId;
+            payment.UpdatedAt = DateTime.UtcNow;
+            order.PaymentStatus = PaymentStatus.Pending;
+            order.UpdatedAt = DateTime.UtcNow;
             await _dbContext.SaveChangesAsync(cancellationToken);
 
             return Ok(new CreateCheckoutSessionResponse
@@ -139,15 +188,20 @@ public class PaymentsController : ControllerBase
                 Message = "Checkout session created.",
                 SessionId = session.Id,
                 CheckoutUrl = session.Url,
-                TestOrderId = testOrder.Id
+                OrderId = order.Id,
+                PaymentId = payment.Id
             });
         }
         catch (StripeException ex)
         {
-            _logger.LogError(ex, "Stripe failed to create a test checkout session for user {UserId}.", userId);
+            _logger.LogError(ex, "Stripe failed to create a checkout session for order {OrderId}.", order.Id);
 
-            testOrder.Status = TestPaymentStatuses.Failed;
-            testOrder.UpdatedAt = DateTime.UtcNow;
+            payment.Status = PaymentStatus.Failed;
+            payment.FailureReason = ex.StripeError?.Message ?? ex.Message;
+            payment.FailedAt = DateTime.UtcNow;
+            payment.UpdatedAt = DateTime.UtcNow;
+            order.PaymentStatus = PaymentStatus.Failed;
+            order.UpdatedAt = DateTime.UtcNow;
             await _dbContext.SaveChangesAsync(cancellationToken);
 
             return BadRequest(new
@@ -156,38 +210,6 @@ public class PaymentsController : ControllerBase
                 detail = ex.StripeError?.Message ?? ex.Message
             });
         }
-    }
-
-    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
-    [HttpGet("test-orders")]
-    public async Task<ActionResult<IReadOnlyList<TestPaymentOrderResponse>>> GetTestOrders(CancellationToken cancellationToken)
-    {
-        var orders = await _dbContext.TestPaymentOrders
-            .AsNoTracking()
-            .OrderByDescending(order => order.CreatedAt)
-            .Select(order => new TestPaymentOrderResponse
-            {
-                Id = order.Id,
-                UserId = order.UserId,
-                UserEmail = _dbContext.Users
-                    .Where(user => user.Id == order.UserId)
-                    .Select(user => user.Email)
-                    .FirstOrDefault(),
-                Name = order.Name,
-                AmountCents = order.AmountCents,
-                Quantity = order.Quantity,
-                TotalCents = order.AmountCents * order.Quantity,
-                Currency = order.Currency,
-                Status = order.Status,
-                StripeCheckoutSessionId = order.StripeCheckoutSessionId,
-                StripePaymentIntentId = order.StripePaymentIntentId,
-                CreatedAt = order.CreatedAt,
-                UpdatedAt = order.UpdatedAt,
-                PaidAt = order.PaidAt
-            })
-            .ToListAsync(cancellationToken);
-
-        return Ok(orders);
     }
 
     [AllowAnonymous]
@@ -226,13 +248,13 @@ public class PaymentsController : ControllerBase
         switch (stripeEvent.Type)
         {
             case "checkout.session.completed":
-                await UpdateTestOrderFromCheckoutSessionAsync(stripeEvent, TestPaymentStatuses.Paid, cancellationToken);
+                await UpdatePaymentFromCheckoutSessionAsync(stripeEvent, PaymentStatus.Paid, cancellationToken);
                 break;
             case "checkout.session.expired":
-                await UpdateTestOrderFromCheckoutSessionAsync(stripeEvent, TestPaymentStatuses.Expired, cancellationToken);
+                await UpdatePaymentFromCheckoutSessionAsync(stripeEvent, PaymentStatus.Expired, cancellationToken);
                 break;
             case "payment_intent.payment_failed":
-                await UpdateTestOrderFromPaymentIntentAsync(stripeEvent, TestPaymentStatuses.Failed, cancellationToken);
+                await UpdatePaymentFromPaymentIntentAsync(stripeEvent, PaymentStatus.Failed, cancellationToken);
                 break;
             default:
                 _logger.LogInformation("Ignored Stripe webhook event {EventType}.", stripeEvent.Type);
@@ -252,6 +274,30 @@ public class PaymentsController : ControllerBase
             : currency.Trim().ToLowerInvariant();
     }
 
+    private static long ConvertAmountToCents(decimal amount)
+    {
+        return Convert.ToInt64(Math.Round(amount * 100m, MidpointRounding.AwayFromZero));
+    }
+
+    private static string ResolveStripeProductName(
+        OrderItem item,
+        IReadOnlyDictionary<Guid, string> menuItemNamesById)
+    {
+        if (!string.IsNullOrWhiteSpace(item.ItemNameSnapshot))
+        {
+            return item.ItemNameSnapshot.Trim();
+        }
+
+        if (item.MenuItemId.HasValue &&
+            menuItemNamesById.TryGetValue(item.MenuItemId.Value, out var menuItemName) &&
+            !string.IsNullOrWhiteSpace(menuItemName))
+        {
+            return menuItemName.Trim();
+        }
+
+        return "Menu item";
+    }
+
     private static string AddCheckoutSessionId(string url)
     {
         if (string.IsNullOrWhiteSpace(url))
@@ -266,9 +312,9 @@ public class PaymentsController : ControllerBase
             : $"{url}{separator}session_id={{CHECKOUT_SESSION_ID}}";
     }
 
-    private async Task UpdateTestOrderFromCheckoutSessionAsync(
+    private async Task UpdatePaymentFromCheckoutSessionAsync(
         Event stripeEvent,
-        string status,
+        PaymentStatus status,
         CancellationToken cancellationToken)
     {
         if (stripeEvent.Data.Object is not Session session)
@@ -277,46 +323,43 @@ public class PaymentsController : ControllerBase
             return;
         }
 
-        TestPaymentOrder? testOrder = null;
+        var payment = await FindPaymentBySessionAsync(session.Metadata, session.Id, cancellationToken);
 
-        if (session.Metadata.TryGetValue(TestOrderIdMetadataKey, out var testOrderId) &&
-            Guid.TryParse(testOrderId, out var parsedTestOrderId))
+        if (payment is null)
         {
-            testOrder = await _dbContext.TestPaymentOrders.FindAsync([parsedTestOrderId], cancellationToken);
-        }
-
-        testOrder ??= await _dbContext.TestPaymentOrders
-            .FirstOrDefaultAsync(
-                order => order.StripeCheckoutSessionId == session.Id,
-                cancellationToken);
-
-        if (testOrder is null)
-        {
-            _logger.LogWarning("No test payment order found for Stripe checkout session {SessionId}.", session.Id);
+            _logger.LogWarning("No payment found for Stripe checkout session {SessionId}.", session.Id);
             return;
         }
 
-        testOrder.Status = status;
-        testOrder.StripeCheckoutSessionId = session.Id;
-        testOrder.StripePaymentIntentId = session.PaymentIntentId;
-        testOrder.UpdatedAt = DateTime.UtcNow;
+        payment.Status = status;
+        payment.ProviderCheckoutSessionId = session.Id;
+        payment.ProviderPaymentIntentId = session.PaymentIntentId;
+        payment.UpdatedAt = DateTime.UtcNow;
 
-        if (status == TestPaymentStatuses.Paid)
+        if (status == PaymentStatus.Paid)
         {
-            testOrder.PaidAt = DateTime.UtcNow;
+            payment.PaidAt = DateTime.UtcNow;
+            payment.FailedAt = null;
+            payment.FailureReason = null;
+        }
+
+        if (payment.Order is not null)
+        {
+            payment.Order.PaymentStatus = status;
+            payment.Order.UpdatedAt = DateTime.UtcNow;
         }
 
         await _dbContext.SaveChangesAsync(cancellationToken);
         _logger.LogInformation(
-            "Updated test payment order {TestOrderId} to {Status} from Stripe checkout session {SessionId}.",
-            testOrder.Id,
+            "Updated payment {PaymentId} to {Status} from Stripe checkout session {SessionId}.",
+            payment.Id,
             status,
             session.Id);
     }
 
-    private async Task UpdateTestOrderFromPaymentIntentAsync(
+    private async Task UpdatePaymentFromPaymentIntentAsync(
         Event stripeEvent,
-        string status,
+        PaymentStatus status,
         CancellationToken cancellationToken)
     {
         if (stripeEvent.Data.Object is not PaymentIntent paymentIntent)
@@ -325,34 +368,109 @@ public class PaymentsController : ControllerBase
             return;
         }
 
-        TestPaymentOrder? testOrder = null;
+        var payment = await FindPaymentByPaymentIntentAsync(paymentIntent.Metadata, paymentIntent.Id, cancellationToken);
 
-        if (paymentIntent.Metadata.TryGetValue(TestOrderIdMetadataKey, out var testOrderId) &&
-            Guid.TryParse(testOrderId, out var parsedTestOrderId))
+        if (payment is null)
         {
-            testOrder = await _dbContext.TestPaymentOrders.FindAsync([parsedTestOrderId], cancellationToken);
-        }
-
-        testOrder ??= await _dbContext.TestPaymentOrders
-            .FirstOrDefaultAsync(
-                order => order.StripePaymentIntentId == paymentIntent.Id,
-                cancellationToken);
-
-        if (testOrder is null)
-        {
-            _logger.LogWarning("No test payment order found for Stripe payment intent {PaymentIntentId}.", paymentIntent.Id);
+            _logger.LogWarning("No payment found for Stripe payment intent {PaymentIntentId}.", paymentIntent.Id);
             return;
         }
 
-        testOrder.Status = status;
-        testOrder.StripePaymentIntentId = paymentIntent.Id;
-        testOrder.UpdatedAt = DateTime.UtcNow;
+        payment.Status = status;
+        payment.ProviderPaymentIntentId = paymentIntent.Id;
+        payment.FailureReason = paymentIntent.LastPaymentError?.Message;
+        payment.FailedAt = DateTime.UtcNow;
+        payment.UpdatedAt = DateTime.UtcNow;
+
+        if (payment.Order is not null && payment.Order.PaymentStatus != PaymentStatus.Paid)
+        {
+            payment.Order.PaymentStatus = status;
+            payment.Order.UpdatedAt = DateTime.UtcNow;
+        }
 
         await _dbContext.SaveChangesAsync(cancellationToken);
         _logger.LogInformation(
-            "Updated test payment order {TestOrderId} to {Status} from Stripe payment intent {PaymentIntentId}.",
-            testOrder.Id,
+            "Updated payment {PaymentId} to {Status} from Stripe payment intent {PaymentIntentId}.",
+            payment.Id,
             status,
             paymentIntent.Id);
+    }
+
+    private async Task<Payment?> FindPaymentBySessionAsync(
+        IReadOnlyDictionary<string, string> metadata,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        if (metadata.TryGetValue(PaymentIdMetadataKey, out var paymentId) &&
+            Guid.TryParse(paymentId, out var parsedPaymentId))
+        {
+            var paymentById = await _dbContext.Payments
+                .Include(currentPayment => currentPayment.Order)
+                .FirstOrDefaultAsync(currentPayment => currentPayment.Id == parsedPaymentId, cancellationToken);
+
+            if (paymentById is not null)
+            {
+                return paymentById;
+            }
+        }
+
+        return await _dbContext.Payments
+            .Include(currentPayment => currentPayment.Order)
+            .FirstOrDefaultAsync(
+                currentPayment => currentPayment.ProviderCheckoutSessionId == sessionId,
+                cancellationToken);
+    }
+
+    private async Task<Payment?> FindPaymentByPaymentIntentAsync(
+        IReadOnlyDictionary<string, string> metadata,
+        string paymentIntentId,
+        CancellationToken cancellationToken)
+    {
+        if (metadata.TryGetValue(PaymentIdMetadataKey, out var paymentId) &&
+            Guid.TryParse(paymentId, out var parsedPaymentId))
+        {
+            var paymentById = await _dbContext.Payments
+                .Include(currentPayment => currentPayment.Order)
+                .FirstOrDefaultAsync(currentPayment => currentPayment.Id == parsedPaymentId, cancellationToken);
+
+            if (paymentById is not null)
+            {
+                return paymentById;
+            }
+        }
+
+        return await _dbContext.Payments
+            .Include(currentPayment => currentPayment.Order)
+            .FirstOrDefaultAsync(
+                currentPayment => currentPayment.ProviderPaymentIntentId == paymentIntentId,
+                cancellationToken);
+    }
+
+    private async Task<Guid?> GetCurrentRestaurantIdAsync()
+    {
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        if (string.IsNullOrWhiteSpace(currentUserId))
+        {
+            return null;
+        }
+
+        var currentUser = await _userManager.FindByIdAsync(currentUserId);
+        return currentUser?.RestaurantId;
+    }
+
+    private async Task<bool> CanAccessRestaurantAsync(Guid? restaurantId)
+    {
+        if (restaurantId is null)
+        {
+            return false;
+        }
+
+        if (User.IsInRole(ApplicationRoles.PlatformOwner))
+        {
+            return true;
+        }
+
+        return await GetCurrentRestaurantIdAsync() == restaurantId.Value;
     }
 }

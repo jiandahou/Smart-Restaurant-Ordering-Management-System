@@ -6,6 +6,10 @@ public class CreateOrderRequest
 
     public Guid? TableId { get; set; }
 
+    public string? CustomerId { get; set; }
+
+    public string OrderNumber { get; set; } = string.Empty;
+
     public int OrderType { get; set; }
 
     public string? CustomerNote { get; set; }
@@ -18,6 +22,8 @@ public class CreateOrderRequest
 public class CreateOrderItemRequest
 {
     public Guid MenuItemId { get; set; }
+
+    public string? ItemNameSnapshot { get; set; }
 
     public int Quantity { get; set; } = 1;
 

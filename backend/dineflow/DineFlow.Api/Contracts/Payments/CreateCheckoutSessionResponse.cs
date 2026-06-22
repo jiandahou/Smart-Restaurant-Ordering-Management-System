@@ -8,5 +8,7 @@ public sealed class CreateCheckoutSessionResponse
 
     public string CheckoutUrl { get; set; } = string.Empty;
 
-    public Guid TestOrderId { get; set; }
+    public Guid OrderId { get; set; }
+
+    public Guid PaymentId { get; set; }
 }

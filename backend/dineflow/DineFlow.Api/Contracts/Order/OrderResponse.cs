@@ -5,7 +5,9 @@ public class OrderResponse
     public Guid Id { get; set; }
     public Guid? RestaurantId { get; set; }
     public Guid? TableId { get; set; }
-    public Guid? CustomerId { get; set; }
+
+    public string? CustomerId { get; set; }
+
     public string OrderNumber { get; set; } = string.Empty;
     public int OrderType { get; set; }
     public int Status { get; set; }
@@ -24,6 +26,9 @@ public class OrderItemResponse
     public Guid? MenuItemId { get; set; }
     public string MenuItemNameSnapshot { get; set; } = string.Empty;
     public decimal BasePriceSnapshot { get; set; }
+
+    public string ItemNameSnapshot { get; set; } = string.Empty;
+
     public int Quantity { get; set; }
     public decimal UnitPrice { get; set; }
     public decimal TotalPrice => Quantity * UnitPrice;

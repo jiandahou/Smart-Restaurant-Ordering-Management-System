@@ -237,6 +237,15 @@ export type MenuCategoryMutationResponse = {
   category: MenuCategory
 }
 
+export type ReorderMenuCategoriesRequest = {
+  restaurantId: string
+  categoryIds: string[]
+}
+
+export type ReorderMenuCategoriesResponse = {
+  message: string
+}
+
 export type DeleteMenuCategoryResponse = {
   message: string
   categoryId: string
@@ -275,6 +284,15 @@ export type UpdateMenuItemRequest = Omit<CreateMenuItemRequest, 'restaurantId'>
 export type MenuItemMutationResponse = {
   message: string
   item: MenuItem
+}
+
+export type ReorderMenuItemsRequest = {
+  categoryId: string
+  itemIds: string[]
+}
+
+export type ReorderMenuItemsResponse = {
+  message: string
 }
 
 export type DeleteMenuItemResponse = {
@@ -318,63 +336,86 @@ export type SendTestEmailResponse = {
   message: string
 }
 
-export type CreateTestCheckoutSessionRequest = {
-  name: string
-  amountCents: number
+export type AdminOrderStatus =
+  | 'Pending'
+  | 'Accepted'
+  | 'Preparing'
+  | 'Ready'
+  | 'Completed'
+  | 'Cancelled'
+  | 'Rejected'
+
+export type AdminPaymentStatus =
+  | 'Pending'
+  | 'Paid'
+  | 'Failed'
+  | 'Cancelled'
+  | 'Expired'
+  | 'Refunded'
+  | 'PartiallyRefunded'
+  | 'NotRequired'
+
+export type AdminOrderType = 'DineIn' | 'Takeaway' | 'Scheduled'
+
+export type AdminOrderItem = {
+  id: string
+  menuItemId: string | null
+  itemNameSnapshot: string
   quantity: number
-  currency?: string
+  unitPrice: number
+  totalPrice: number
+  note: string | null
+}
+
+export type AdminOrderPayment = {
+  id: string
+  provider: string
+  status: AdminPaymentStatus
+  amountCents: number
+  currency: string
+  providerCheckoutSessionId: string | null
+  providerPaymentIntentId: string | null
+  failureReason: string | null
+  createdAt: string
+  updatedAt: string | null
+  paidAt: string | null
+  failedAt: string | null
+}
+
+export type AdminOrder = {
+  id: string
+  restaurantId: string | null
+  restaurantName: string | null
+  currency: string
+  tableId: string | null
+  tableNumber: string | null
+  customerId: string | null
+  customerName: string | null
+  customerEmail: string | null
+  orderNumber: string
+  orderType: AdminOrderType
+  status: AdminOrderStatus
+  paymentStatus: AdminPaymentStatus
+  totalAmount: number
+  customerNote: string | null
+  scheduledTime: string | null
+  createdAt: string
+  updatedAt: string | null
+  paymentAttempts: number
+  latestPayment: AdminOrderPayment | null
+  items: AdminOrderItem[]
+}
+
+export type CreateOrderCheckoutSessionRequest = {
+  orderId: string
 }
 
 export type CreateCheckoutSessionResponse = {
   message: string
   sessionId: string
   checkoutUrl: string
-  testOrderId: string
-}
-
-export type OrderItem = {
-  id: string
   orderId: string
-  menuItemId: string | null
-  quantity: number
-  unitPrice: number
-  totalPrice: number
-  note: string | null
-  createdAt: string
-  updatedAt: string | null
-}
-
-export type Order = {
-  id: string
-  restaurantId: string | null
-  tableId: string | null
-  customerId: string | null
-  orderNumber: string
-  orderType: number
-  status: number
-  totalAmount: number
-  customerNote: string | null
-  scheduledTime: string | null
-  createdAt: string
-  updatedAt: string | null
-  orderItems: OrderItem[]
-}
-
-export type TestPaymentOrder = {
-  id: string
-  userId: string | null
-  userEmail: string | null
-  name: string
-  amountCents: number
-  quantity: number
-  totalCents: number
-  currency: string
-  status: 'Pending' | 'Paid' | 'Failed' | 'Expired' | string
-  stripeCheckoutSessionId: string | null
-  stripePaymentIntentId: string | null
-  createdAt: string
-  updatedAt: string | null
-  paidAt: string | null
+  paymentId: string
 }
 
 type PublicKeyCredentialDescriptorJson = Omit<PublicKeyCredentialDescriptor, 'id'> & {
@@ -532,7 +573,7 @@ async function request<T>(path: string, options: RequestInit = {}) {
         .filter(Boolean)
         .join(' ')
       : ''
-    const message = [errorBody?.message, errorDetails || undefined]
+    const message = [errorBody?.message, errorBody?.detail, errorDetails || undefined]
       .filter(Boolean)
       .join(' ')
       || `Request failed with HTTP ${response.status}`
@@ -790,6 +831,13 @@ export function deleteMenuCategory(categoryId: string) {
   })
 }
 
+export function reorderMenuCategories(payload: ReorderMenuCategoriesRequest) {
+  return request<ReorderMenuCategoriesResponse>('/api/admin/menu/categories/reorder', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export function getAdminMenuItems(restaurantId: string, categoryId?: string) {
   const search = new URLSearchParams({ restaurantId })
   if (categoryId) search.set('categoryId', categoryId)
@@ -811,6 +859,13 @@ export function createMenuItem(payload: CreateMenuItemRequest) {
 export function updateMenuItem(itemId: string, payload: UpdateMenuItemRequest) {
   return request<MenuItemMutationResponse>(`/api/admin/menu/items/${itemId}`, {
     method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function reorderMenuItems(payload: ReorderMenuItemsRequest) {
+  return request<ReorderMenuItemsResponse>('/api/admin/menu/items/reorder', {
+    method: 'POST',
     body: JSON.stringify(payload),
   })
 }
@@ -870,18 +925,15 @@ export function sendTestEmail(payload: SendTestEmailRequest) {
   })
 }
 
-export function createTestCheckoutSession(payload: CreateTestCheckoutSessionRequest) {
-  return request<CreateCheckoutSessionResponse>('/api/payments/checkout-session/test', {
+export function getAdminOrders() {
+  return request<AdminOrder[]>('/api/admin/orders')
+}
+
+export function createOrderCheckoutSession(payload: CreateOrderCheckoutSessionRequest) {
+  return request<CreateCheckoutSessionResponse>('/api/payments/checkout-session/order', {
     method: 'POST',
     body: JSON.stringify(payload),
   })
-}
-
-export function getTestPaymentOrders() {
-  return request<TestPaymentOrder[]>('/api/payments/test-orders')
-}
-export function getRealOrders() {
-  return request<Order[]>('/api/order')
 }
 
 export function getPasskeys() {

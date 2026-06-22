@@ -198,8 +198,19 @@ public class OrderController : ControllerBase
 
         foreach (var oi in orderItems)
         {
-            oi.OrderId = order.Id;
-            order.OrderItems.Add(oi);
+            foreach (var itemRequest in request.OrderItems)
+            {
+                order.OrderItems.Add(new OrderItem
+                {
+                    Id = Guid.NewGuid(),
+                    MenuItemId = itemRequest.MenuItemId,
+                    ItemNameSnapshot = itemRequest.ItemNameSnapshot ?? string.Empty,
+                    Quantity = itemRequest.Quantity,
+                    UnitPrice = itemRequest.UnitPrice,
+                    Note = itemRequest.Note,
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
         }
 
         await _dbContext.Orders.AddAsync(order);
@@ -226,8 +237,20 @@ public class OrderController : ControllerBase
             CreatedAt = DateTime.UtcNow
         };
 
-        order.Status = (OrderStatus)request.NewStatus;
-        order.UpdatedAt = DateTime.UtcNow;
+            foreach (var itemRequest in request.OrderItems)
+            {
+                existingOrder.OrderItems.Add(new OrderItem
+                {
+                    Id = Guid.NewGuid(),
+                    MenuItemId = itemRequest.MenuItemId,
+                    ItemNameSnapshot = itemRequest.ItemNameSnapshot ?? string.Empty,
+                    Quantity = itemRequest.Quantity,
+                    UnitPrice = itemRequest.UnitPrice,
+                    Note = itemRequest.Note,
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
+        }
 
         _dbContext.OrderStatusHistories.Add(history);
         await _dbContext.SaveChangesAsync();

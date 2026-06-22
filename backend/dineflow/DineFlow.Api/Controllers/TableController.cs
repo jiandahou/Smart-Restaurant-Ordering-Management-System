@@ -25,34 +25,6 @@ public class TableController : ControllerBase
         _userManager = userManager;
     }
 
-    /// <summary>
-    /// Resolve a table from its QR token. Called when customer scans a QR code.
-    /// GET /api/table/resolve?token={qrToken}
-    /// </summary>
-    [HttpGet("resolve")]
-    public async Task<IActionResult> ResolveByQrToken([FromQuery] string token)
-    {
-        if (string.IsNullOrWhiteSpace(token))
-            return BadRequest(new { message = "QR token is required." });
-
-        var table = await _dbContext.RestaurantTables
-            .FirstOrDefaultAsync(t => t.QrToken == token && t.IsActive);
-
-        if (table is null)
-            return NotFound(new { message = "Table not found or QR code is invalid." });
-
-        return Ok(new TableResponse
-        {
-            Id = table.Id,
-            RestaurantId = table.RestaurantId,
-            TableNumber = table.TableNumber,
-            Capacity = table.Capacity,
-            IsActive = table.IsActive,
-            CreatedAt = table.CreatedAt,
-            UpdatedAt = table.UpdatedAt
-        });
-    }
-
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]
     [HttpGet("restaurant/{restaurantId:guid}")]
     public async Task<IActionResult> GetRestaurantTables(Guid restaurantId)
@@ -119,7 +91,7 @@ public class TableController : ControllerBase
             Id = Guid.NewGuid(),
             RestaurantId = restaurantId,
             TableNumber = tableNumber,
-            QrToken = string.Empty,
+            QrToken = await GenerateUniqueQrTokenAsync(),
             Capacity = request.Capacity,
             IsActive = request.IsActive,
             CreatedAt = DateTime.UtcNow
@@ -213,6 +185,19 @@ public class TableController : ControllerBase
             item.RestaurantId == restaurantId &&
             (!excludedTableId.HasValue || item.Id != excludedTableId.Value) &&
             item.TableNumber.ToLower() == normalizedTableNumber);
+    }
+
+    private async Task<string> GenerateUniqueQrTokenAsync()
+    {
+        string token;
+
+        do
+        {
+            token = RestaurantTableTokenGenerator.Generate();
+        }
+        while (await _dbContext.RestaurantTables.AnyAsync(table => table.QrToken == token));
+
+        return token;
     }
 
     private static string? ValidateRequest(UpdateRestaurantTableRequest? request)

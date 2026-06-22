@@ -1,3 +1,4 @@
+using DineFlow.Infrastructure.Carts;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Orders;
@@ -11,6 +12,9 @@ namespace DineFlow.Infrastructure.Persistence;
 
 public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbContext<ApplicationUser>(options)
 {
+    public DbSet<Cart> Carts => Set<Cart>();
+    public DbSet<CartItem> CartItems => Set<CartItem>();
+    public DbSet<CartParticipant> CartParticipants => Set<CartParticipant>();
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
     public DbSet<OrderItemOption> OrderItemOptions => Set<OrderItemOption>();
@@ -23,7 +27,6 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<RestaurantEntity> Restaurants => Set<RestaurantEntity>();
 
     public DbSet<Payment> Payments => Set<Payment>();
-    public DbSet<TestPaymentOrder> TestPaymentOrders => Set<TestPaymentOrder>();
     public DbSet<UserPasskey> UserPasskeys => Set<UserPasskey>();
     public DbSet<UserMfaSettings> UserMfaSettings => Set<UserMfaSettings>();
 
@@ -62,11 +65,26 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
-        builder.Entity<RestaurantTable>(entity =>
+              builder.Entity<RestaurantTable>(entity =>
         {
-            entity.HasKey(t => t.Id);
-            entity.HasIndex(t => t.QrToken).IsUnique();
-            entity.HasIndex(t => t.RestaurantId);
+            entity.HasKey(table => table.Id);
+
+            entity.Property(table => table.TableNumber)
+                .HasMaxLength(40)
+                .IsRequired();
+
+            entity.Property(table => table.QrToken)
+                .HasMaxLength(64)
+                .IsRequired();
+
+            entity.HasIndex(table => table.QrToken)
+                .IsUnique();
+
+            entity.HasIndex(table => table.RestaurantId);
+
+            entity.ToTable(table => table.HasCheckConstraint(
+                "CK_RestaurantTables_QrToken_NotEmpty",
+                "length(\"QrToken\") > 0"));
         });
 
         builder.Entity<MenuItem>(entity =>
@@ -83,7 +101,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         builder.Entity<MenuItemOptionGroup>(entity =>
         {
             entity.HasKey(group => group.Id);
-            entity.Property(group => group.Name).HasMaxLength(120).IsRequired();
+            entity.Property(group => group.Name)
+                .HasMaxLength(120)
+                .IsRequired();
             entity.HasIndex(group => group.MenuItemId);
             entity.HasIndex(group => group.RestaurantId);
             entity.HasMany(group => group.Options)
@@ -95,18 +115,156 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         builder.Entity<MenuItemOption>(entity =>
         {
             entity.HasKey(option => option.Id);
-            entity.Property(option => option.Name).HasMaxLength(120).IsRequired();
-            entity.Property(option => option.PriceAdjustment).HasColumnType("numeric(10,2)");
+            entity.Property(option => option.Name)
+                .HasMaxLength(120)
+                .IsRequired();
+            entity.Property(option => option.PriceAdjustment)
+                .HasColumnType("numeric(10,2)");
             entity.HasIndex(option => option.GroupId);
             entity.HasIndex(option => option.MenuItemId);
             entity.HasIndex(option => option.RestaurantId);
         });
 
+        builder.Entity<Cart>(entity =>
+        {
+            entity.HasKey(cart => cart.Id);
+
+            entity.Property(cart => cart.CustomerNote)
+                .HasMaxLength(4_000);
+
+            entity.HasIndex(cart => cart.RestaurantId);
+            entity.HasIndex(cart => cart.TableId);
+            entity.HasIndex(cart => cart.OrderId)
+                .IsUnique();
+            entity.HasIndex(cart => cart.ExpiresAt);
+
+            entity.HasIndex(cart => cart.TableId)
+                .IsUnique()
+                .HasDatabaseName("IX_Carts_TableId_Active")
+                .HasFilter("\"Status\" = 0 AND \"TableId\" IS NOT NULL");
+
+            entity.ToTable(table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_Carts_Status",
+                    "\"Status\" IN (0, 1, 2)");
+                table.HasCheckConstraint(
+                    "CK_Carts_OrderType",
+                    "\"OrderType\" IN (0, 1, 2)");
+                table.HasCheckConstraint(
+                    "CK_Carts_ExpiresAt",
+                    "\"ExpiresAt\" > \"CreatedAt\"");
+                table.HasCheckConstraint(
+                    "CK_Carts_TableOrderType",
+                    "\"TableId\" IS NULL OR \"OrderType\" = 0");
+            });
+
+            entity.HasOne(cart => cart.Restaurant)
+                .WithMany()
+                .HasForeignKey(cart => cart.RestaurantId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(cart => cart.Table)
+                .WithMany()
+                .HasForeignKey(cart => cart.TableId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(cart => cart.Order)
+                .WithOne()
+                .HasForeignKey<Cart>(cart => cart.OrderId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasMany(cart => cart.Items)
+                .WithOne(item => item.Cart)
+                .HasForeignKey(item => item.CartId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasMany(cart => cart.Participants)
+                .WithOne(participant => participant.Cart)
+                .HasForeignKey(participant => participant.CartId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<CartItem>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+
+            entity.Property(item => item.Note)
+                .HasMaxLength(2_000);
+
+            entity.HasIndex(item => item.CartId);
+            entity.HasIndex(item => item.MenuItemId);
+            entity.HasIndex(item => new { item.CartId, item.MenuItemId });
+
+            entity.ToTable(table => table.HasCheckConstraint(
+                "CK_CartItems_Quantity",
+                "\"Quantity\" > 0"));
+
+            entity.HasOne(item => item.MenuItem)
+                .WithMany()
+                .HasForeignKey(item => item.MenuItemId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<CartParticipant>(entity =>
+        {
+            entity.HasKey(participant => participant.Id);
+
+            entity.Property(participant => participant.ParticipantTokenHash)
+                .HasMaxLength(32)
+                .IsFixedLength()
+                .IsRequired();
+
+            entity.Property(participant => participant.CustomerId)
+                .HasMaxLength(450);
+
+            entity.HasIndex(participant => participant.CartId);
+            entity.HasIndex(participant => participant.CustomerId);
+            entity.HasIndex(participant => participant.ParticipantTokenHash)
+                .IsUnique();
+
+            entity.ToTable(table => table.HasCheckConstraint(
+                "CK_CartParticipants_TokenHashLength",
+                "octet_length(\"ParticipantTokenHash\") = 32"));
+
+            entity.HasOne(participant => participant.Customer)
+                .WithMany()
+                .HasForeignKey(participant => participant.CustomerId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
         builder.Entity<Order>(entity =>
         {
             entity.HasKey(order => order.Id);
+
+            entity.Property(order => order.CustomerId)
+                .HasMaxLength(450);
+
+            entity.Property(order => order.OrderNumber)
+                .HasMaxLength(40)
+                .IsRequired();
+
             entity.HasIndex(order => order.RestaurantId);
             entity.HasIndex(order => order.CustomerId);
+
+            entity.HasIndex(order => order.OrderNumber)
+                .IsUnique();
+
+            entity.HasOne(order => order.Restaurant)
+                .WithMany()
+                .HasForeignKey(order => order.RestaurantId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(order => order.Table)
+                .WithMany()
+                .HasForeignKey(order => order.TableId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(order => order.Customer)
+                .WithMany()
+                .HasForeignKey(order => order.CustomerId)
+                .OnDelete(DeleteBehavior.SetNull);
+
             entity.HasMany(order => order.OrderItems)
                 .WithOne(item => item.Order)
                 .HasForeignKey(item => item.OrderId)
@@ -152,17 +310,5 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(payment => payment.ProviderPaymentIntentId);
         });
 
-        builder.Entity<TestPaymentOrder>(entity =>
-        {
-            entity.HasKey(order => order.Id);
-            entity.Property(order => order.UserId).HasMaxLength(450);
-            entity.Property(order => order.Name).HasMaxLength(180).IsRequired();
-            entity.Property(order => order.Currency).HasMaxLength(8).IsRequired();
-            entity.Property(order => order.Status).HasMaxLength(32).IsRequired();
-            entity.Property(order => order.StripeCheckoutSessionId).HasMaxLength(255);
-            entity.Property(order => order.StripePaymentIntentId).HasMaxLength(255);
-            entity.HasIndex(order => order.StripeCheckoutSessionId).IsUnique();
-            entity.HasIndex(order => order.UserId);
-        });
     }
 }

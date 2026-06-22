@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Grilled Salmon">
+  <rect width="640" height="480" fill="#eef7fb"/>
+  <ellipse cx="320" cy="328" rx="230" ry="70" fill="#b9d4db"/>
+  <path d="M164 278c92-95 260-106 344-12-71 75-224 110-344 12z" fill="#f07b54" stroke="#8f3d2a" stroke-width="8"/>
+  <path d="M242 232l-38 82M315 217l-41 105M390 224l-38 86" stroke="#ffc7ad" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="480" cy="244" r="10" fill="#472015"/>
+  <path d="M160 278l-50-45v90z" fill="#ef6e4a" stroke="#8f3d2a" stroke-width="8"/>
+  <text x="52" y="82" font-family="Arial, sans-serif" font-size="48" font-weight="700" fill="#18323d">Grilled Salmon</text>
+</svg>
