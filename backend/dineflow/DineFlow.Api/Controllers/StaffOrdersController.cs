@@ -64,7 +64,7 @@ public sealed class StaffOrdersController(
             query = query.Where(order =>
                 EF.Functions.ILike(order.OrderNumber, pattern) ||
                 (order.Table != null && EF.Functions.ILike(order.Table.TableNumber, pattern)) ||
-                order.OrderItems.Any(item => EF.Functions.ILike(item.ItemNameSnapshot, pattern)));
+                order.OrderItems.Any(item => EF.Functions.ILike(item.MenuItemNameSnapshot, pattern)));
         }
 
         var sortBy = string.IsNullOrWhiteSpace(request.SortBy) ? "createdAt" : request.SortBy.Trim();

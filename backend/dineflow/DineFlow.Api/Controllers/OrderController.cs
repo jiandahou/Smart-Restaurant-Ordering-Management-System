@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Order;
+using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
@@ -24,15 +25,16 @@ public class OrderController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetOrders()
+    public async Task<IActionResult> GetOrders(CancellationToken cancellationToken)
     {
         var orders = await _dbContext.Orders
-            .Include(o => o.OrderItems)
-            .Include(o => o.Table)
-            .ToListAsync();
+            .AsNoTracking()
+            .Include(order => order.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
+            .Include(order => order.Table)
+            .ToListAsync(cancellationToken);
 
-        var responses = orders.Select(MapToResponse).ToList();
-        return Ok(responses);
+        return Ok(orders.Select(MapToResponse).ToList());
     }
 
     [Authorize]
@@ -49,6 +51,7 @@ public class OrderController : ControllerBase
         var orders = await _dbContext.Orders
             .AsNoTracking()
             .Include(order => order.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
             .Include(order => order.Table)
             .Where(order => order.CustomerId == currentUserId)
             .OrderByDescending(order => order.CreatedAt)
@@ -59,12 +62,14 @@ public class OrderController : ControllerBase
     }
 
     [HttpGet("{id:guid}")]
-    public async Task<IActionResult> GetOrder(Guid id)
+    public async Task<IActionResult> GetOrder(Guid id, CancellationToken cancellationToken)
     {
         var order = await _dbContext.Orders
-            .Include(o => o.OrderItems)
-            .Include(o => o.Table)
-            .FirstOrDefaultAsync(o => o.Id == id);
+            .AsNoTracking()
+            .Include(item => item.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
+            .Include(item => item.Table)
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
 
         if (order is null)
         {
@@ -76,17 +81,42 @@ public class OrderController : ControllerBase
 
     [HttpPost]
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]
-    public async Task<IActionResult> CreateOrder([FromBody] CreateOrderRequest request)
+    public async Task<IActionResult> CreateOrder(
+        [FromBody] CreateOrderRequest request,
+        CancellationToken cancellationToken)
     {
         if (request is null)
         {
             return BadRequest(new { message = "Order data is required." });
         }
 
-        if (!Enum.TryParse<PaymentMethod>(request.PaymentMethod, true, out var paymentMethod) || !Enum.IsDefined(paymentMethod))
+        if (request.RestaurantId == Guid.Empty)
+        {
+            return BadRequest(new { message = "restaurantId is required." });
+        }
+
+        if (request.Items is null || request.Items.Count == 0)
+        {
+            return BadRequest(new { message = "Order must contain at least one item." });
+        }
+
+        if (!Enum.TryParse<PaymentMethod>(request.PaymentMethod, true, out var paymentMethod) ||
+            !Enum.IsDefined(paymentMethod))
         {
             return BadRequest(new { message = "Invalid payment method." });
         }
+
+        var buildResult = await BuildOrderItemsAsync(request, cancellationToken);
+
+        if (buildResult.ValidationErrors.Count > 0)
+        {
+            return BadRequest(new { message = "Order validation failed.", errors = buildResult.ValidationErrors });
+        }
+
+        var now = DateTime.UtcNow;
+        var orderNumber = string.IsNullOrWhiteSpace(request.OrderNumber)
+            ? GenerateOrderNumber()
+            : request.OrderNumber.Trim();
 
         var order = new Order
         {
@@ -94,64 +124,64 @@ public class OrderController : ControllerBase
             RestaurantId = request.RestaurantId,
             TableId = request.TableId,
             CustomerId = request.CustomerId,
-            OrderNumber = request.OrderNumber,
+            OrderNumber = orderNumber,
             OrderType = (OrderType)request.OrderType,
             Status = OrderStatus.Pending,
             PaymentStatus = PaymentStatus.Unpaid,
             PaymentMethod = paymentMethod,
-            TotalAmount = request.TotalAmount,
+            TotalAmount = buildResult.OrderItems.Sum(item => item.Quantity * item.UnitPrice),
             CustomerNote = request.CustomerNote,
             ScheduledTime = request.ScheduledTime,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = null
+            CreatedAt = now
         };
 
-        if (request.OrderItems is not null && request.OrderItems.Count > 0)
+        foreach (var orderItem in buildResult.OrderItems)
         {
-            foreach (var itemRequest in request.OrderItems)
-            {
-                order.OrderItems.Add(new OrderItem
-                {
-                    Id = Guid.NewGuid(),
-                    MenuItemId = itemRequest.MenuItemId,
-                    ItemNameSnapshot = itemRequest.ItemNameSnapshot ?? string.Empty,
-                    Quantity = itemRequest.Quantity,
-                    UnitPrice = itemRequest.UnitPrice,
-                    Note = itemRequest.Note,
-                    CreatedAt = DateTime.UtcNow
-                });
-            }
+            orderItem.OrderId = order.Id;
+            order.OrderItems.Add(orderItem);
         }
 
-        await _dbContext.Orders.AddAsync(order);
-        await _dbContext.SaveChangesAsync();
+        await _dbContext.Orders.AddAsync(order, cancellationToken);
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
         if (order.TableId.HasValue)
         {
-            await _dbContext.Entry(order).Reference(item => item.Table).LoadAsync();
+            await _dbContext.Entry(order).Reference(item => item.Table).LoadAsync(cancellationToken);
         }
 
-        var response = MapToResponse(order);
-        return CreatedAtAction(nameof(GetOrder), new { id = order.Id }, response);
+        _logger.LogInformation("Order {OrderNumber} created for restaurant {RestaurantId}", orderNumber, request.RestaurantId);
+
+        return CreatedAtAction(nameof(GetOrder), new { id = order.Id }, MapToResponse(order));
     }
 
     [HttpPut("{id:guid}")]
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]
-    public async Task<IActionResult> UpdateOrder(Guid id, [FromBody] CreateOrderRequest request)
+    public async Task<IActionResult> UpdateOrder(
+        Guid id,
+        [FromBody] CreateOrderRequest request,
+        CancellationToken cancellationToken)
     {
         if (request is null)
         {
             return BadRequest(new { message = "Order data is required." });
         }
 
-        if (!Enum.TryParse<PaymentMethod>(request.PaymentMethod, true, out var paymentMethod) || !Enum.IsDefined(paymentMethod))
+        if (!Enum.IsDefined(typeof(OrderStatus), request.Status))
+        {
+            return BadRequest(new { message = "Invalid order status." });
+        }
+
+        if (!Enum.TryParse<PaymentMethod>(request.PaymentMethod, true, out var paymentMethod) ||
+            !Enum.IsDefined(paymentMethod))
         {
             return BadRequest(new { message = "Invalid payment method." });
         }
 
         var existingOrder = await _dbContext.Orders
-            .Include(o => o.OrderItems)
-            .FirstOrDefaultAsync(o => o.Id == id);
+            .Include(order => order.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
+            .Include(order => order.Table)
+            .FirstOrDefaultAsync(order => order.Id == id, cancellationToken);
 
         if (existingOrder is null)
         {
@@ -163,51 +193,96 @@ public class OrderController : ControllerBase
             return Conflict(new { message = "Use the admin order transition API to change order status." });
         }
 
+        if (request.RestaurantId == Guid.Empty)
+        {
+            return BadRequest(new { message = "restaurantId is required." });
+        }
+
+        if (request.Items is null || request.Items.Count == 0)
+        {
+            return BadRequest(new { message = "Order must contain at least one item." });
+        }
+
+        var buildResult = await BuildOrderItemsAsync(request, cancellationToken);
+
+        if (buildResult.ValidationErrors.Count > 0)
+        {
+            return BadRequest(new { message = "Order validation failed.", errors = buildResult.ValidationErrors });
+        }
+
+        _dbContext.OrderItems.RemoveRange(existingOrder.OrderItems);
+        existingOrder.OrderItems.Clear();
+
         existingOrder.RestaurantId = request.RestaurantId;
         existingOrder.TableId = request.TableId;
         existingOrder.CustomerId = request.CustomerId;
-        existingOrder.OrderNumber = request.OrderNumber;
+        existingOrder.OrderNumber = string.IsNullOrWhiteSpace(request.OrderNumber)
+            ? existingOrder.OrderNumber
+            : request.OrderNumber.Trim();
         existingOrder.OrderType = (OrderType)request.OrderType;
-        existingOrder.Status = (OrderStatus)request.Status;
         existingOrder.PaymentMethod = paymentMethod;
-        existingOrder.TotalAmount = request.TotalAmount;
+        existingOrder.TotalAmount = buildResult.OrderItems.Sum(item => item.Quantity * item.UnitPrice);
         existingOrder.CustomerNote = request.CustomerNote;
         existingOrder.ScheduledTime = request.ScheduledTime;
         existingOrder.UpdatedAt = DateTime.UtcNow;
 
-        if (request.OrderItems is not null)
+        foreach (var orderItem in buildResult.OrderItems)
         {
-            _dbContext.OrderItems.RemoveRange(existingOrder.OrderItems);
-            existingOrder.OrderItems.Clear();
-
-            foreach (var itemRequest in request.OrderItems)
-            {
-                _dbContext.OrderItems.Add(new OrderItem
-                {
-                    Id = Guid.NewGuid(),
-                    OrderId = existingOrder.Id,
-                    MenuItemId = itemRequest.MenuItemId,
-                    ItemNameSnapshot = itemRequest.ItemNameSnapshot ?? string.Empty,
-                    Quantity = itemRequest.Quantity,
-                    UnitPrice = itemRequest.UnitPrice,
-                    Note = itemRequest.Note,
-                    CreatedAt = DateTime.UtcNow
-                });
-            }
+            orderItem.OrderId = existingOrder.Id;
+            existingOrder.OrderItems.Add(orderItem);
         }
 
-        await _dbContext.SaveChangesAsync();
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return NoContent();
+    }
+
+    [HttpPut("{id:guid}/status")]
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    public async Task<IActionResult> UpdateStatus(
+        Guid id,
+        [FromBody] UpdateOrderStatusRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!Enum.IsDefined(typeof(OrderStatus), request.NewStatus))
+        {
+            return BadRequest(new { message = "Invalid order status." });
+        }
+
+        var order = await _dbContext.Orders.FindAsync(new object?[] { id }, cancellationToken);
+
+        if (order is null)
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
+        var nextStatus = (OrderStatus)request.NewStatus;
+        var history = new OrderStatusHistory
+        {
+            OrderId = order.Id,
+            PreviousStatus = order.Status,
+            NewStatus = nextStatus,
+            Action = "StatusChanged",
+            ChangedByUserId = User.FindFirstValue(ClaimTypes.NameIdentifier),
+            CreatedAt = DateTime.UtcNow
+        };
+
+        order.Status = nextStatus;
+        order.UpdatedAt = DateTime.UtcNow;
+
+        _dbContext.OrderStatusHistories.Add(history);
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
         return NoContent();
     }
 
     [HttpDelete("{id:guid}")]
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]
-    public async Task<IActionResult> DeleteOrder(Guid id)
+    public async Task<IActionResult> DeleteOrder(Guid id, CancellationToken cancellationToken)
     {
         var order = await _dbContext.Orders
-            .Include(o => o.OrderItems)
-            .FirstOrDefaultAsync(o => o.Id == id);
+            .Include(item => item.OrderItems)
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
 
         if (order is null)
         {
@@ -216,42 +291,197 @@ public class OrderController : ControllerBase
 
         _dbContext.OrderItems.RemoveRange(order.OrderItems);
         _dbContext.Orders.Remove(order);
-        await _dbContext.SaveChangesAsync();
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
         return NoContent();
     }
 
-    private OrderResponse MapToResponse(Order order)
+    private async Task<OrderItemBuildResult> BuildOrderItemsAsync(
+        CreateOrderRequest request,
+        CancellationToken cancellationToken)
     {
-        return new OrderResponse
+        var orderItems = new List<OrderItem>();
+        var validationErrors = new List<string>();
+        var menuItemIds = request.Items.Select(item => item.MenuItemId).Distinct().ToList();
+
+        var menuItems = await _dbContext.MenuItems
+            .Include(item => item.OptionGroups.Where(group => group.IsActive))
+                .ThenInclude(group => group.Options.Where(option => option.IsAvailable))
+            .Where(item => menuItemIds.Contains(item.Id))
+            .ToDictionaryAsync(item => item.Id, cancellationToken);
+
+        foreach (var itemRequest in request.Items)
         {
-            Id = order.Id,
-            RestaurantId = order.RestaurantId,
-            TableId = order.TableId,
-            TableNumber = order.Table?.TableNumber,
-            CustomerId = order.CustomerId,
-            OrderNumber = order.OrderNumber,
-            OrderType = (int)order.OrderType,
-            Status = (int)order.Status,
-            PaymentStatus = order.PaymentStatus.ToString(),
-            PaymentMethod = order.PaymentMethod.ToString(),
-            TotalAmount = order.TotalAmount,
-            CustomerNote = order.CustomerNote,
-            ScheduledTime = order.ScheduledTime,
-            CreatedAt = order.CreatedAt,
-            UpdatedAt = order.UpdatedAt,
-            OrderItems = order.OrderItems.Select(oi => new OrderItemResponse
+            if (itemRequest.Quantity <= 0)
             {
-                Id = oi.Id,
-                OrderId = oi.OrderId,
-                MenuItemId = oi.MenuItemId,
-                ItemNameSnapshot = oi.ItemNameSnapshot,
-                Quantity = oi.Quantity,
-                UnitPrice = oi.UnitPrice,
-                Note = oi.Note,
-                CreatedAt = oi.CreatedAt,
-                UpdatedAt = oi.UpdatedAt
-            }).ToList()
-        };
+                validationErrors.Add($"Quantity must be positive for item {itemRequest.MenuItemId}.");
+                continue;
+            }
+
+            if (!menuItems.TryGetValue(itemRequest.MenuItemId, out var menuItem))
+            {
+                validationErrors.Add($"Menu item {itemRequest.MenuItemId} not found.");
+                continue;
+            }
+
+            if (menuItem.RestaurantId != request.RestaurantId)
+            {
+                validationErrors.Add($"Menu item {itemRequest.MenuItemId} does not belong to this restaurant.");
+                continue;
+            }
+
+            if (!menuItem.IsAvailable)
+            {
+                validationErrors.Add($"'{menuItem.Name}' is not available.");
+                continue;
+            }
+
+            if (menuItem.IsSoldOut)
+            {
+                validationErrors.Add($"'{menuItem.Name}' is sold out.");
+                continue;
+            }
+
+            var allOptions = menuItem.OptionGroups
+                .SelectMany(group => group.Options)
+                .ToDictionary(option => option.Id);
+
+            var selectedOptions = new List<MenuItemOption>();
+
+            foreach (var optionId in itemRequest.SelectedOptionIds ?? [])
+            {
+                if (!allOptions.TryGetValue(optionId, out var option))
+                {
+                    validationErrors.Add($"Option {optionId} is not valid for '{menuItem.Name}'.");
+                    continue;
+                }
+
+                selectedOptions.Add(option);
+            }
+
+            foreach (var group in menuItem.OptionGroups)
+            {
+                var selectedInGroup = selectedOptions.Count(option => option.GroupId == group.Id);
+
+                if (group.IsRequired && selectedInGroup < group.MinSelections)
+                {
+                    validationErrors.Add($"'{group.Name}' requires at least {group.MinSelections} selection(s) for '{menuItem.Name}'.");
+                }
+
+                if (selectedInGroup > group.MaxSelections)
+                {
+                    validationErrors.Add($"'{group.Name}' allows at most {group.MaxSelections} selection(s) for '{menuItem.Name}'.");
+                }
+            }
+
+            if (validationErrors.Count > 0)
+            {
+                continue;
+            }
+
+            var unitPrice = menuItem.Price;
+
+            foreach (var option in selectedOptions)
+            {
+                unitPrice = option.AdjustmentType switch
+                {
+                    OptionAdjustmentType.Add => unitPrice + option.PriceAdjustment,
+                    OptionAdjustmentType.Remove => unitPrice + option.PriceAdjustment,
+                    OptionAdjustmentType.Replace => option.PriceAdjustment,
+                    _ => unitPrice
+                };
+            }
+
+            var orderItem = new OrderItem
+            {
+                Id = Guid.NewGuid(),
+                MenuItemId = menuItem.Id,
+                MenuItemNameSnapshot = menuItem.Name,
+                BasePriceSnapshot = menuItem.Price,
+                Quantity = itemRequest.Quantity,
+                UnitPrice = unitPrice,
+                ItemInstructions = itemRequest.ItemInstructions,
+                AllergyInfo = itemRequest.AllergyInfo,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            foreach (var option in selectedOptions)
+            {
+                var groupName = menuItem.OptionGroups
+                    .First(group => group.Id == option.GroupId)
+                    .Name;
+
+                orderItem.SelectedOptions.Add(new OrderItemOption
+                {
+                    MenuItemOptionId = option.Id,
+                    GroupNameSnapshot = groupName,
+                    OptionNameSnapshot = option.Name,
+                    PriceAdjustmentSnapshot = option.PriceAdjustment,
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
+
+            orderItems.Add(orderItem);
+        }
+
+        return new OrderItemBuildResult(orderItems, validationErrors);
     }
+
+    private static OrderResponse MapToResponse(Order order) => new()
+    {
+        Id = order.Id,
+        RestaurantId = order.RestaurantId,
+        TableId = order.TableId,
+        TableNumber = order.Table?.TableNumber,
+        CustomerId = order.CustomerId,
+        OrderNumber = order.OrderNumber,
+        OrderType = (int)order.OrderType,
+        Status = (int)order.Status,
+        PaymentStatus = order.PaymentStatus.ToString(),
+        PaymentMethod = order.PaymentMethod.ToString(),
+        TotalAmount = order.TotalAmount,
+        CustomerNote = order.CustomerNote,
+        ScheduledTime = order.ScheduledTime,
+        CreatedAt = order.CreatedAt,
+        UpdatedAt = order.UpdatedAt,
+        OrderItems = order.OrderItems
+            .OrderBy(item => item.CreatedAt)
+            .ThenBy(item => item.Id)
+            .Select(item => new OrderItemResponse
+            {
+                Id = item.Id,
+                OrderId = item.OrderId,
+                MenuItemId = item.MenuItemId,
+                MenuItemNameSnapshot = item.MenuItemNameSnapshot,
+                ItemNameSnapshot = item.MenuItemNameSnapshot,
+                BasePriceSnapshot = item.BasePriceSnapshot,
+                Quantity = item.Quantity,
+                UnitPrice = item.UnitPrice,
+                ItemInstructions = item.ItemInstructions,
+                Note = item.ItemInstructions,
+                AllergyInfo = item.AllergyInfo,
+                CreatedAt = item.CreatedAt,
+                UpdatedAt = item.UpdatedAt,
+                SelectedOptions = item.SelectedOptions
+                    .OrderBy(option => option.CreatedAt)
+                    .ThenBy(option => option.Id)
+                    .Select(option => new OrderItemOptionResponse
+                    {
+                        Id = option.Id,
+                        MenuItemOptionId = option.MenuItemOptionId,
+                        GroupNameSnapshot = option.GroupNameSnapshot,
+                        OptionNameSnapshot = option.OptionNameSnapshot,
+                        PriceAdjustmentSnapshot = option.PriceAdjustmentSnapshot
+                    })
+                    .ToList()
+            })
+            .ToList()
+    };
+
+    private static string GenerateOrderNumber() =>
+        $"ORD-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid().ToString("N")[..6].ToUpper()}";
+
+    private sealed record OrderItemBuildResult(
+        List<OrderItem> OrderItems,
+        List<string> ValidationErrors);
 }

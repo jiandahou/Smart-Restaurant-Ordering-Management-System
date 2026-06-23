@@ -22,6 +22,16 @@ public class MenuItem
 
     public bool IsSoldOut { get; set; } = false;
 
+    public bool IsVegetarian { get; set; } = false;
+
+    public bool IsVegan { get; set; } = false;
+
+    public bool IsGlutenFree { get; set; } = false;
+
+    public bool IsHalal { get; set; } = false;
+
+    public string? Allergens { get; set; }
+
     public int DisplayOrder { get; set; }
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -29,4 +39,6 @@ public class MenuItem
     public DateTime? UpdatedAt { get; set; }
 
     public MenuCategory? Category { get; set; }
+
+    public ICollection<MenuItemOptionGroup> OptionGroups { get; set; } = [];
 }

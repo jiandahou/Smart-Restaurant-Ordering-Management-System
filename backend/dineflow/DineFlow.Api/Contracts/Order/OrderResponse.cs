@@ -43,6 +43,10 @@ public class OrderItemResponse
 
     public Guid? MenuItemId { get; set; }
 
+    public string MenuItemNameSnapshot { get; set; } = string.Empty;
+
+    public decimal BasePriceSnapshot { get; set; }
+
     public string ItemNameSnapshot { get; set; } = string.Empty;
 
     public int Quantity { get; set; }
@@ -51,9 +55,28 @@ public class OrderItemResponse
 
     public decimal TotalPrice => Quantity * UnitPrice;
 
+    public string? ItemInstructions { get; set; }
+
     public string? Note { get; set; }
+
+    public string? AllergyInfo { get; set; }
 
     public DateTime CreatedAt { get; set; }
 
     public DateTime? UpdatedAt { get; set; }
+
+    public List<OrderItemOptionResponse> SelectedOptions { get; set; } = new();
+}
+
+public class OrderItemOptionResponse
+{
+    public Guid Id { get; set; }
+
+    public Guid? MenuItemOptionId { get; set; }
+
+    public string GroupNameSnapshot { get; set; } = string.Empty;
+
+    public string OptionNameSnapshot { get; set; } = string.Empty;
+
+    public decimal PriceAdjustmentSnapshot { get; set; }
 }

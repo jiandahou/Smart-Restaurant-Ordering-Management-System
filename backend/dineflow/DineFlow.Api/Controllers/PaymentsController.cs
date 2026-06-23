@@ -197,7 +197,7 @@ public class PaymentsController : ControllerBase
         }
 
         var menuItemIdsForNameFallback = order.OrderItems
-            .Where(item => string.IsNullOrWhiteSpace(item.ItemNameSnapshot) && item.MenuItemId.HasValue)
+            .Where(item => string.IsNullOrWhiteSpace(item.MenuItemNameSnapshot) && item.MenuItemId.HasValue)
             .Select(item => item.MenuItemId!.Value)
             .Distinct()
             .ToArray();
@@ -459,9 +459,9 @@ public class PaymentsController : ControllerBase
         OrderItem item,
         IReadOnlyDictionary<Guid, string> menuItemNamesById)
     {
-        if (!string.IsNullOrWhiteSpace(item.ItemNameSnapshot))
+        if (!string.IsNullOrWhiteSpace(item.MenuItemNameSnapshot))
         {
-            return item.ItemNameSnapshot.Trim();
+            return item.MenuItemNameSnapshot.Trim();
         }
 
         if (item.MenuItemId.HasValue &&

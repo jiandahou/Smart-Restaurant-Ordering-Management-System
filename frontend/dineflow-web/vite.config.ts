@@ -23,15 +23,18 @@ export default defineConfig(({ mode }) => {
         '/health': {
           target: backendTarget,
           changeOrigin: true,
+          secure: false,
         },
         '/api': {
           target: backendTarget,
           changeOrigin: true,
+          secure: false,
           ws: true,
         },
         '/uploads': {
           target: backendTarget,
           changeOrigin: true,
+          secure: false,
         },
       },
     },

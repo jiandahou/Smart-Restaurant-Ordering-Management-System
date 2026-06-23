@@ -105,7 +105,7 @@ public class AdminOrdersController : ControllerBase
                 (order.Customer != null && order.Customer.FullName != null && EF.Functions.ILike(order.Customer.FullName, pattern)) ||
                 (order.Customer != null && order.Customer.Email != null && EF.Functions.ILike(order.Customer.Email, pattern)) ||
                 (order.Table != null && EF.Functions.ILike(order.Table.TableNumber, pattern)) ||
-                order.OrderItems.Any(item => EF.Functions.ILike(item.ItemNameSnapshot, pattern)) ||
+                order.OrderItems.Any(item => EF.Functions.ILike(item.MenuItemNameSnapshot, pattern)) ||
                 order.Payments.Any(payment =>
                     (payment.ProviderCheckoutSessionId != null && EF.Functions.ILike(payment.ProviderCheckoutSessionId, pattern)) ||
                     (payment.ProviderPaymentIntentId != null && EF.Functions.ILike(payment.ProviderPaymentIntentId, pattern))));
@@ -506,11 +506,11 @@ public class AdminOrdersController : ControllerBase
                 {
                     Id = item.Id,
                     MenuItemId = item.MenuItemId,
-                    ItemNameSnapshot = item.ItemNameSnapshot,
+                    ItemNameSnapshot = item.MenuItemNameSnapshot,
                     Quantity = item.Quantity,
                     UnitPrice = item.UnitPrice,
                     TotalPrice = item.Quantity * item.UnitPrice,
-                    Note = item.Note
+                    Note = item.ItemInstructions
                 })
                 .ToList()
         };
