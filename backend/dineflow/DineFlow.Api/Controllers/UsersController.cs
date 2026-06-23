@@ -1,6 +1,8 @@
 using System.Security.Claims;
 using DineFlow.Api.Authorization;
+using DineFlow.Api.Contracts.Common;
 using DineFlow.Api.Contracts.Users;
+using DineFlow.Api.Extensions;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Persistence;
@@ -27,27 +29,34 @@ public class UsersController : ControllerBase
 
     [Authorize(Policy = AuthorizationPolicies.PlatformOwnerOnly)]
     [HttpGet("users")]
-    public async Task<IActionResult> GetUsers()
+    public Task<ActionResult<PagedResponse<UserListResponse>>> GetUsers(
+        [FromQuery] UserListRequest request,
+        CancellationToken cancellationToken)
     {
-        return Ok(await BuildUserListResponseAsync(_userManager.Users));
+        return BuildUserListResponseAsync(_userManager.Users.AsNoTracking(), request, cancellationToken);
     }
 
     [Authorize(Policy = AuthorizationPolicies.PlatformOwnerOnly)]
     [HttpGet("restaurants/{restaurantId:guid}/users")]
-    public async Task<IActionResult> GetRestaurantUsers(Guid restaurantId)
+    public Task<ActionResult<PagedResponse<UserListResponse>>> GetRestaurantUsers(
+        Guid restaurantId,
+        [FromQuery] UserListRequest request,
+        CancellationToken cancellationToken)
     {
         var query = _userManager.Users.Where(user => user.RestaurantId == restaurantId);
 
-        return Ok(await BuildUserListResponseAsync(query));
+        return BuildUserListResponseAsync(query.AsNoTracking(), request, cancellationToken);
     }
 
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]
     [HttpGet("restaurant/users")]
-    public async Task<IActionResult> GetCurrentRestaurantUsers()
+    public async Task<ActionResult<PagedResponse<UserListResponse>>> GetCurrentRestaurantUsers(
+        [FromQuery] UserListRequest request,
+        CancellationToken cancellationToken)
     {
         if (User.IsInRole(ApplicationRoles.PlatformOwner))
         {
-            return Ok(await BuildUserListResponseAsync(_userManager.Users));
+            return await BuildUserListResponseAsync(_userManager.Users.AsNoTracking(), request, cancellationToken);
         }
 
         var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -72,7 +81,7 @@ public class UsersController : ControllerBase
 
         var query = _userManager.Users.Where(user => user.RestaurantId == currentUser.RestaurantId);
 
-        return Ok(await BuildUserListResponseAsync(query));
+        return await BuildUserListResponseAsync(query.AsNoTracking(), request, cancellationToken);
     }
 
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]
@@ -380,32 +389,137 @@ public class UsersController : ControllerBase
         });
     }
 
-    private async Task<List<object>> BuildUserListResponseAsync(IQueryable<ApplicationUser> query)
+    private async Task<ActionResult<PagedResponse<UserListResponse>>> BuildUserListResponseAsync(
+        IQueryable<ApplicationUser> query,
+        UserListRequest request,
+        CancellationToken cancellationToken)
     {
-        var users = await query
-            .OrderBy(user => user.Email)
-            .ToListAsync();
-
-        var response = new List<object>();
-
-        foreach (var user in users)
+        if (!string.IsNullOrWhiteSpace(request.Role))
         {
-            var roles = await _userManager.GetRolesAsync(user);
+            var role = ApplicationRoles.All.FirstOrDefault(candidate =>
+                candidate.Equals(request.Role.Trim(), StringComparison.OrdinalIgnoreCase));
 
-            response.Add(new
+            if (role is null)
             {
-                id = user.Id,
-                email = user.Email,
-                fullName = user.FullName,
-                avatarUrl = user.AvatarUrl,
-                restaurantId = user.RestaurantId,
-                createdAt = user.CreatedAt,
-                updatedAt = user.UpdatedAt,
-                roles
+                return BadRequest(new
+                {
+                    message = $"Unsupported Role value. Allowed values: {string.Join(", ", ApplicationRoles.All)}."
+                });
+            }
+
+            var normalizedRole = role.ToUpperInvariant();
+            query = query.Where(user =>
+                _dbContext.UserRoles.Any(userRole =>
+                    userRole.UserId == user.Id &&
+                    _dbContext.Roles.Any(identityRole =>
+                        identityRole.Id == userRole.RoleId && identityRole.NormalizedName == normalizedRole)));
+        }
+
+        if (request.RestaurantId.HasValue)
+        {
+            query = query.Where(user => user.RestaurantId == request.RestaurantId);
+        }
+
+        var normalizedScope = string.IsNullOrWhiteSpace(request.Scope)
+            ? "all"
+            : request.Scope.Trim().ToLowerInvariant();
+        query = normalizedScope switch
+        {
+            "all" => query,
+            "platform" => query.Where(user => user.RestaurantId == null),
+            "restaurant" => query.Where(user => user.RestaurantId != null),
+            _ => null!
+        };
+
+        if (query is null)
+        {
+            return BadRequest(new
+            {
+                message = "Unsupported Scope value. Allowed values: all, platform, restaurant."
             });
         }
 
-        return response;
+        var search = request.Search?.Trim();
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var pattern = $"%{search}%";
+            query = query.Where(user =>
+                (user.FullName != null && EF.Functions.ILike(user.FullName, pattern)) ||
+                (user.Email != null && EF.Functions.ILike(user.Email, pattern)) ||
+                _dbContext.UserRoles.Any(userRole =>
+                    userRole.UserId == user.Id &&
+                    _dbContext.Roles.Any(identityRole =>
+                        identityRole.Id == userRole.RoleId &&
+                        identityRole.Name != null &&
+                        EF.Functions.ILike(identityRole.Name, pattern))));
+        }
+
+        var sortedQuery = ApplySorting(query, request.SortBy, request.IsDescending);
+        if (sortedQuery is null)
+        {
+            return BadRequest(new
+            {
+                message = "Unsupported sortBy value.",
+                allowedValues = new[] { "fullName", "email", "restaurant", "role", "createdAt", "updatedAt" }
+            });
+        }
+
+        var responseQuery = sortedQuery.Select(user => new UserListResponse
+        {
+            Id = user.Id,
+            Email = user.Email,
+            FullName = user.FullName,
+            AvatarUrl = user.AvatarUrl,
+            RestaurantId = user.RestaurantId,
+            CreatedAt = user.CreatedAt,
+            UpdatedAt = user.UpdatedAt,
+            Roles = (from userRole in _dbContext.UserRoles
+                     join identityRole in _dbContext.Roles on userRole.RoleId equals identityRole.Id
+                     where userRole.UserId == user.Id && identityRole.Name != null
+                     orderby identityRole.Name
+                     select identityRole.Name!).ToList()
+        });
+
+        return Ok(await responseQuery.ToPagedResponseAsync(
+            request.Page,
+            request.PageSize,
+            cancellationToken));
+    }
+
+    private IOrderedQueryable<ApplicationUser>? ApplySorting(
+        IQueryable<ApplicationUser> query,
+        string? sortBy,
+        bool descending)
+    {
+        var normalizedSort = string.IsNullOrWhiteSpace(sortBy) ? "email" : sortBy.Trim();
+        IOrderedQueryable<ApplicationUser>? sorted = normalizedSort.ToLowerInvariant() switch
+        {
+            "fullname" => descending ? query.OrderByDescending(user => user.FullName) : query.OrderBy(user => user.FullName),
+            "email" => descending ? query.OrderByDescending(user => user.Email) : query.OrderBy(user => user.Email),
+            "restaurant" => descending ? query.OrderByDescending(user => user.RestaurantId) : query.OrderBy(user => user.RestaurantId),
+            "role" => descending
+                ? query.OrderByDescending(user =>
+                    (from userRole in _dbContext.UserRoles
+                     join identityRole in _dbContext.Roles on userRole.RoleId equals identityRole.Id
+                     where userRole.UserId == user.Id
+                     orderby identityRole.Name
+                     select identityRole.Name).FirstOrDefault())
+                : query.OrderBy(user =>
+                    (from userRole in _dbContext.UserRoles
+                     join identityRole in _dbContext.Roles on userRole.RoleId equals identityRole.Id
+                     where userRole.UserId == user.Id
+                     orderby identityRole.Name
+                     select identityRole.Name).FirstOrDefault()),
+            "createdat" => descending ? query.OrderByDescending(user => user.CreatedAt) : query.OrderBy(user => user.CreatedAt),
+            "updatedat" => descending ? query.OrderByDescending(user => user.UpdatedAt) : query.OrderBy(user => user.UpdatedAt),
+            _ => null
+        };
+
+        return sorted is null
+            ? null
+            : descending
+                ? sorted.ThenByDescending(user => user.Id)
+                : sorted.ThenBy(user => user.Id);
     }
 
     private async Task<ApplicationUser?> GetCurrentUserAsync()

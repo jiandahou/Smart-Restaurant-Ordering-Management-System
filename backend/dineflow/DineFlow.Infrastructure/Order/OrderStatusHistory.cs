@@ -12,7 +12,11 @@ public class OrderStatusHistory
 
     public OrderStatus NewStatus { get; set; }
 
+    public string Action { get; set; } = string.Empty;
+
     public string? ChangedByUserId { get; set; }
+
+    public string? Reason { get; set; }
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 

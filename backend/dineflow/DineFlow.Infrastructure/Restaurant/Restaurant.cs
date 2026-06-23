@@ -17,6 +17,8 @@ public class Restaurant
 
     public string Currency { get; set; } = string.Empty;
 
+    public RestaurantPaymentPolicy PaymentPolicy { get; set; } = RestaurantPaymentPolicy.PayAtCounterAllowed;
+
     public bool IsActive { get; set; } = true;
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -25,4 +27,10 @@ public class Restaurant
 
     public ICollection<ApplicationUser> Users { get; set; } = [];
     public ICollection<MenuCategory> MenuCategories { get; set; } = [];
+}
+
+public enum RestaurantPaymentPolicy
+{
+    PrepayRequired = 0,
+    PayAtCounterAllowed = 1
 }

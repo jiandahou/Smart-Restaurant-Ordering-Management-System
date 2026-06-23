@@ -28,6 +28,12 @@ public sealed class AdminOrderResponse
 
     public string PaymentStatus { get; set; } = string.Empty;
 
+    public string PaymentMethod { get; set; } = string.Empty;
+
+    public bool CanProcess { get; set; }
+
+    public List<string> AvailableActions { get; set; } = [];
+
     public decimal TotalAmount { get; set; }
 
     public string? CustomerNote { get; set; }

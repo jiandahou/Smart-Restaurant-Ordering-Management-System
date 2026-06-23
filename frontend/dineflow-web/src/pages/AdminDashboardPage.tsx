@@ -18,15 +18,19 @@ import { Link, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
   getAdminOrders,
+  getAdminOrderSummary,
   getRestaurants,
   getRestaurantTables,
   type AdminOrder,
+  type AdminOrderSummary,
   type AuthUser,
   type Restaurant,
   type RestaurantTable,
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { Badge } from '../components/ui/badge'
+import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
+import { PaymentStatusBadge } from '../components/orders/PaymentStatusBadge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../components/ui/collapsible'
@@ -39,7 +43,6 @@ import {
   DialogTrigger,
 } from '../components/ui/dialog'
 import { buildTablePublicUrl, buildTakeawayPublicUrl } from '../lib/publicUrls'
-import { getOrderStats } from '../lib/orderStats'
 
 type DashboardRestaurant = Pick<Restaurant, 'id' | 'name' | 'isActive' | 'currency'>
 
@@ -333,6 +336,15 @@ function DemoIdentitySwitcher() {
 export function AdminDashboardPage() {
   const { user } = useAuth()
   const [orders, setOrders] = useState<AdminOrder[]>([])
+  const [stats, setStats] = useState<AdminOrderSummary>({
+    total: 0,
+    activeKitchen: 0,
+    paid: 0,
+    pendingPayment: 0,
+    failedPayment: 0,
+    payable: 0,
+    revenue: 0,
+  })
   const [restaurants, setRestaurants] = useState<DashboardRestaurant[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -346,14 +358,18 @@ export function AdminDashboardPage() {
     setError(null)
 
     try {
-      const loadedOrders = await getAdminOrders()
-      setOrders(loadedOrders)
+      const [loadedOrders, loadedStats] = await Promise.all([
+        getAdminOrders({ pageSize: 5, sortBy: 'createdAt', sortDirection: 'desc' }),
+        getAdminOrderSummary(),
+      ])
+      setOrders(loadedOrders.items)
+      setStats(loadedStats)
 
       if (canLoadRestaurantDirectory) {
         const loadedRestaurants = await getRestaurants()
         setRestaurants(loadedRestaurants)
       } else {
-        const scopedRestaurant = getScopedRestaurantFromOrders(user, loadedOrders)
+        const scopedRestaurant = getScopedRestaurantFromOrders(user, loadedOrders.items)
         setRestaurants(scopedRestaurant ? [scopedRestaurant] : [])
       }
 
@@ -382,7 +398,6 @@ export function AdminDashboardPage() {
   )
 
   const scopedCurrency = activeRestaurants[0]?.currency || orders[0]?.currency || 'AUD'
-  const stats = useMemo(() => getOrderStats(orders), [orders])
   const recentOrders = orders.slice(0, 5)
 
   return (
@@ -469,13 +484,13 @@ export function AdminDashboardPage() {
             <div className="dashboard-order-list">
               {recentOrders.map((order) => (
                 <div key={order.id} className="dashboard-order-row">
-                  <div>
+                  <div className="dashboard-order-copy">
                     <strong>{order.orderNumber}</strong>
                     <span>{order.restaurantName || 'Assigned restaurant'} - {order.tableNumber ? `Table ${order.tableNumber}` : order.orderType}</span>
                   </div>
                   <div className="dashboard-order-state">
-                    <Badge variant="secondary">{order.status}</Badge>
-                    <Badge variant={order.paymentStatus === 'Paid' ? 'default' : 'outline'}>{order.paymentStatus}</Badge>
+                    <OrderStatusBadge status={order.status} />
+                    <PaymentStatusBadge status={order.paymentStatus} />
                   </div>
                   {isStaff && (
                     <Button type="button" variant="outline" size="sm" disabled>

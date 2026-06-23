@@ -23,7 +23,9 @@ public class Order
 
     public OrderStatus Status { get; set; } = OrderStatus.Pending;
 
-    public PaymentStatus PaymentStatus { get; set; } = PaymentStatus.Pending;
+    public PaymentStatus PaymentStatus { get; set; } = PaymentStatus.Unpaid;
+
+    public PaymentMethod PaymentMethod { get; set; } = PaymentMethod.Online;
 
     public decimal TotalAmount { get; set; }
 

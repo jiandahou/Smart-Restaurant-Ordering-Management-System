@@ -565,6 +565,9 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<int>("OrderType")
                         .HasColumnType("integer");
 
+                    b.Property<int>("PaymentMethod")
+                        .HasColumnType("integer");
+
                     b.Property<int>("PaymentStatus")
                         .HasColumnType("integer");
 
@@ -597,7 +600,10 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.HasIndex("TableId");
 
-                    b.ToTable("Orders");
+                    b.ToTable("Orders", t =>
+                        {
+                            t.HasCheckConstraint("CK_Orders_PaymentMethod", "\"PaymentMethod\" IN (0, 1)");
+                        });
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Orders.OrderItem", b =>
@@ -689,8 +695,14 @@ namespace DineFlow.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("Action")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
                     b.Property<string>("ChangedByUserId")
-                        .HasColumnType("text");
+                        .HasMaxLength(450)
+                        .HasColumnType("character varying(450)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -704,11 +716,15 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<int>("PreviousStatus")
                         .HasColumnType("integer");
 
+                    b.Property<string>("Reason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
                     b.HasKey("Id");
 
                     b.HasIndex("ChangedByUserId");
 
-                    b.HasIndex("OrderId");
+                    b.HasIndex("OrderId", "CreatedAt");
 
                     b.ToTable("OrderStatusHistories");
                 });
@@ -756,6 +772,10 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
+                    b.Property<string>("RecordedByUserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("character varying(450)");
+
                     b.Property<int>("Status")
                         .HasColumnType("integer");
 
@@ -796,6 +816,9 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<int>("PaymentPolicy")
+                        .HasColumnType("integer");
 
                     b.Property<string>("Phone")
                         .IsRequired()

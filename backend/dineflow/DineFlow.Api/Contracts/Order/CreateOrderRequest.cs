@@ -12,6 +12,10 @@ public class CreateOrderRequest
 
     public int OrderType { get; set; }
 
+    public int Status { get; set; }
+
+    public string PaymentMethod { get; set; } = "Online";
+
     public string? CustomerNote { get; set; }
 
     public DateTime? ScheduledTime { get; set; }

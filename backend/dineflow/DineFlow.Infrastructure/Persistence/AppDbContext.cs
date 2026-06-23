@@ -250,6 +250,13 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(order => order.OrderNumber)
                 .IsUnique();
 
+            entity.ToTable(table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_Orders_PaymentMethod",
+                    "\"PaymentMethod\" IN (0, 1)");
+            });
+
             entity.HasOne(order => order.Restaurant)
                 .WithMany()
                 .HasForeignKey(order => order.RestaurantId)
@@ -297,6 +304,21 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(opt => opt.OrderItemId);
         });
 
+        builder.Entity<OrderStatusHistory>(entity =>
+        {
+            entity.Property(history => history.Action)
+                .HasMaxLength(40)
+                .IsRequired();
+
+            entity.Property(history => history.Reason)
+                .HasMaxLength(1_000);
+
+            entity.Property(history => history.ChangedByUserId)
+                .HasMaxLength(450);
+
+            entity.HasIndex(history => new { history.OrderId, history.CreatedAt });
+        });
+
         builder.Entity<Payment>(entity =>
         {
             entity.HasKey(payment => payment.Id);
@@ -305,6 +327,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(payment => payment.ProviderPaymentIntentId).HasMaxLength(255);
             entity.Property(payment => payment.Currency).HasMaxLength(8).IsRequired();
             entity.Property(payment => payment.FailureReason).HasMaxLength(1_000);
+            entity.Property(payment => payment.RecordedByUserId).HasMaxLength(450);
             entity.HasIndex(payment => payment.OrderId);
             entity.HasIndex(payment => payment.ProviderCheckoutSessionId);
             entity.HasIndex(payment => payment.ProviderPaymentIntentId);

@@ -1,6 +1,7 @@
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Orders;
+using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
 using DineFlow.Infrastructure.Restaurant;
 using Microsoft.AspNetCore.Identity;
@@ -361,6 +362,343 @@ public static class IdentitySeeder
 
         foreach (var seedUser in seedUsers)
             await UpsertUserAsync(userManager, seedUser, seedPassword);
+
+        await SeedPaginationDemoDataAsync(dbContext);
+    }
+
+    private static async Task SeedPaginationDemoDataAsync(AppDbContext dbContext)
+    {
+        var restaurantSeeds = new[]
+        {
+            new SeedRestaurant(Guid.Parse("44444444-4444-4444-4444-444444444444"), "Harbour & Hearth", "18 Marina Walk, Adelaide SA", "+61 8 7000 0401", true),
+            new SeedRestaurant(Guid.Parse("55555555-5555-5555-5555-555555555555"), "Laneway Noodles", "42 Peel Street, Adelaide SA", "+61 8 7000 0502", true),
+            new SeedRestaurant(Guid.Parse("66666666-6666-6666-6666-666666666666"), "North Terrace Cafe", "126 North Terrace, Adelaide SA", "+61 8 7000 0603", true),
+            new SeedRestaurant(Guid.Parse("77777777-7777-7777-7777-777777777777"), "Parkside Pizza Room", "77 Unley Road, Parkside SA", "+61 8 7000 0704", true),
+            new SeedRestaurant(Guid.Parse("88888888-8888-8888-8888-888888888888"), "Glenelg Sunset Grill", "9 Jetty Road, Glenelg SA", "+61 8 7000 0805", true),
+            new SeedRestaurant(Guid.Parse("99999999-9999-9999-9999-999999999999"), "Norwood Garden Kitchen", "151 The Parade, Norwood SA", "+61 8 7000 0906", true),
+            new SeedRestaurant(Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), "Central Market Table", "44 Gouger Street, Adelaide SA", "+61 8 7000 1007", true),
+            new SeedRestaurant(Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"), "West End Test Kitchen", "23 Hindley Street, Adelaide SA", "+61 8 7000 1108", false),
+            new SeedRestaurant(Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc"), "Hills Seasonal Dining", "6 Mount Barker Road, Stirling SA", "+61 8 7000 1209", true)
+        };
+
+        var existingRestaurantIds = (await dbContext.Restaurants
+            .Where(restaurant => restaurantSeeds.Select(seed => seed.Id).Contains(restaurant.Id))
+            .Select(restaurant => restaurant.Id)
+            .ToListAsync())
+            .ToHashSet();
+
+        var missingRestaurants = restaurantSeeds
+            .Where(seed => !existingRestaurantIds.Contains(seed.Id))
+            .Select(seed => new RestaurantEntity
+            {
+                Id = seed.Id,
+                Name = seed.Name,
+                Address = seed.Address,
+                Phone = seed.Phone,
+                Timezone = "Australia/Adelaide",
+                Currency = "AUD",
+                IsActive = seed.IsActive,
+                CreatedAt = DateTime.UtcNow.AddDays(-120)
+            })
+            .ToList();
+
+        if (missingRestaurants.Count > 0)
+        {
+            await dbContext.Restaurants.AddRangeAsync(missingRestaurants);
+            await dbContext.SaveChangesAsync();
+        }
+
+        await SeedDemoMenusAsync(dbContext, restaurantSeeds);
+
+        var coreRestaurantIds = (await dbContext.Restaurants
+            .Where(restaurant => restaurant.Id == RestaurantOneId || restaurant.Id == RestaurantTwoId)
+            .Select(restaurant => restaurant.Id)
+            .ToListAsync())
+            .ToHashSet();
+
+        var orderRestaurantIds = new List<Guid>();
+        if (coreRestaurantIds.Contains(RestaurantOneId))
+        {
+            orderRestaurantIds.AddRange(Enumerable.Repeat(RestaurantOneId, 40));
+        }
+
+        if (coreRestaurantIds.Contains(RestaurantTwoId))
+        {
+            orderRestaurantIds.AddRange(Enumerable.Repeat(RestaurantTwoId, 25));
+        }
+
+        foreach (var restaurant in restaurantSeeds)
+        {
+            orderRestaurantIds.AddRange(Enumerable.Repeat(restaurant.Id, 3));
+        }
+
+        var existingOrderNumbers = (await dbContext.Orders
+            .Where(order => order.OrderNumber.StartsWith("DEMO-"))
+            .Select(order => order.OrderNumber)
+            .ToListAsync())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var customerIds = await dbContext.Users
+            .Where(user => user.Email != null && user.Email.StartsWith("customer."))
+            .OrderBy(user => user.Email)
+            .Select(user => user.Id)
+            .ToListAsync();
+        var tablesByRestaurant = await dbContext.RestaurantTables
+            .Where(table => table.IsActive && (table.RestaurantId == RestaurantOneId || table.RestaurantId == RestaurantTwoId))
+            .OrderBy(table => table.TableNumber)
+            .GroupBy(table => table.RestaurantId)
+            .ToDictionaryAsync(group => group.Key, group => group.Select(table => table.Id).ToList());
+
+        var orderStatuses = new[]
+        {
+            OrderStatus.Pending,
+            OrderStatus.Accepted,
+            OrderStatus.Preparing,
+            OrderStatus.Ready,
+            OrderStatus.Completed,
+            OrderStatus.Cancelled,
+            OrderStatus.Rejected
+        };
+        var paymentStatuses = new[]
+        {
+            PaymentStatus.Pending,
+            PaymentStatus.Paid,
+            PaymentStatus.Failed,
+            PaymentStatus.Expired,
+            PaymentStatus.Refunded,
+            PaymentStatus.PartiallyRefunded,
+            PaymentStatus.Cancelled,
+            PaymentStatus.NotRequired
+        };
+        var itemNames = new[]
+        {
+            "Butter Chicken", "Mango Lassi", "Grilled Salmon", "Veg Fried Rice",
+            "Chicken Wings", "Mushroom Pasta", "Paneer Tikka Skewers", "Masala Cola",
+            "Garlic Bread", "Chocolate Lava Cake", "Tandoori Chicken", "Fresh Lime Soda"
+        };
+        var itemPrices = new decimal[] { 24.50m, 8.50m, 32.00m, 18.00m, 16.50m, 22.00m, 17.50m, 7.00m, 9.50m, 12.00m, 27.50m, 6.50m };
+        var now = DateTime.UtcNow;
+        var newOrders = new List<Order>();
+
+        for (var index = 0; index < orderRestaurantIds.Count; index++)
+        {
+            var sequence = index + 1;
+            var orderNumber = $"DEMO-{sequence:0000}";
+
+            if (existingOrderNumbers.Contains(orderNumber))
+            {
+                continue;
+            }
+
+            var restaurantId = orderRestaurantIds[index];
+            var orderType = (OrderType)(index % 3);
+            var createdAt = now.AddHours(-(index * 7 + index % 5));
+            var firstItemIndex = index % itemNames.Length;
+            var secondItemIndex = (index * 5 + 3) % itemNames.Length;
+            var firstQuantity = index % 3 + 1;
+            var secondQuantity = index % 2 + 1;
+            var totalAmount = firstQuantity * itemPrices[firstItemIndex] + secondQuantity * itemPrices[secondItemIndex];
+            Guid? tableId = null;
+
+            if (orderType == OrderType.DineIn &&
+                tablesByRestaurant.TryGetValue(restaurantId, out var tableIds) &&
+                tableIds.Count > 0)
+            {
+                tableId = tableIds[index % tableIds.Count];
+            }
+
+            var paymentStatus = paymentStatuses[index % paymentStatuses.Length];
+            var order = new Order
+            {
+                Id = CreateSeedGuid(1, sequence),
+                RestaurantId = restaurantId,
+                TableId = tableId,
+                CustomerId = customerIds.Count == 0 ? null : customerIds[index % customerIds.Count],
+                OrderNumber = orderNumber,
+                OrderType = orderType,
+                Status = orderStatuses[index % orderStatuses.Length],
+                PaymentStatus = paymentStatus,
+                TotalAmount = totalAmount,
+                CustomerNote = index % 6 == 0 ? $"Pagination demo note {sequence}" : null,
+                ScheduledTime = orderType == OrderType.Scheduled ? createdAt.AddHours(3) : null,
+                CreatedAt = createdAt,
+                UpdatedAt = createdAt.AddMinutes(15)
+            };
+
+            order.OrderItems.Add(new OrderItem
+            {
+                Id = CreateSeedGuid(2, sequence * 2 - 1),
+                OrderId = order.Id,
+                MenuItemNameSnapshot = itemNames[firstItemIndex],
+                BasePriceSnapshot = itemPrices[firstItemIndex],
+                Quantity = firstQuantity,
+                UnitPrice = itemPrices[firstItemIndex],
+                ItemInstructions = index % 9 == 0 ? "Seeded special request" : null,
+                CreatedAt = createdAt
+            });
+            order.OrderItems.Add(new OrderItem
+            {
+                Id = CreateSeedGuid(2, sequence * 2),
+                OrderId = order.Id,
+                MenuItemNameSnapshot = itemNames[secondItemIndex],
+                BasePriceSnapshot = itemPrices[secondItemIndex],
+                Quantity = secondQuantity,
+                UnitPrice = itemPrices[secondItemIndex],
+                CreatedAt = createdAt.AddSeconds(10)
+            });
+
+            if (paymentStatus != PaymentStatus.NotRequired)
+            {
+                var paymentCreatedAt = createdAt.AddMinutes(2);
+                order.Payments.Add(new Payment
+                {
+                    Id = CreateSeedGuid(3, sequence),
+                    OrderId = order.Id,
+                    Provider = PaymentProviders.Stripe,
+                    ProviderCheckoutSessionId = $"cs_demo_{sequence:0000}",
+                    ProviderPaymentIntentId = $"pi_demo_{sequence:0000}",
+                    AmountCents = Convert.ToInt64(totalAmount * 100),
+                    Currency = "aud",
+                    Status = paymentStatus,
+                    FailureReason = paymentStatus == PaymentStatus.Failed ? "Seeded card decline for filtering tests" : null,
+                    CreatedAt = paymentCreatedAt,
+                    UpdatedAt = paymentCreatedAt.AddMinutes(5),
+                    PaidAt = paymentStatus == PaymentStatus.Paid ? paymentCreatedAt.AddMinutes(2) : null,
+                    FailedAt = paymentStatus == PaymentStatus.Failed ? paymentCreatedAt.AddMinutes(2) : null
+                });
+            }
+
+            newOrders.Add(order);
+        }
+
+        if (newOrders.Count > 0)
+        {
+            await dbContext.Orders.AddRangeAsync(newOrders);
+            await dbContext.SaveChangesAsync();
+        }
+    }
+
+    private static async Task SeedDemoMenusAsync(
+        AppDbContext dbContext,
+        IReadOnlyList<SeedRestaurant> restaurants)
+    {
+        var categoryNames = new[]
+        {
+            new[] { "From the Sea", "Fire & Grill", "Desserts & Drinks" },
+            new[] { "Small Bowls", "Noodle House", "Sides & Sips" },
+            new[] { "Breakfast", "Cafe Lunch", "Bakes & Coffee" },
+            new[] { "Antipasti", "Stone-Baked Pizza", "Dolci & Drinks" },
+            new[] { "Coastal Starters", "Sunset Grill", "Sweet Finish" },
+            new[] { "Garden Plates", "Seasonal Mains", "Pantry Treats" },
+            new[] { "Market Snacks", "Fresh Counter", "Drinks & Sweets" },
+            new[] { "Test Bites", "Experimental Mains", "Lab Drinks" },
+            new[] { "Hills Starters", "Seasonal Dining", "Cellar & Dessert" }
+        };
+        var dishNames = new[]
+        {
+            new[] { "Charred Spencer Gulf Prawns", "Coffin Bay Oysters", "Wood-Fired Barramundi", "Peppercorn Steak", "Lemon Myrtle Pavlova", "Harbour Spritz" },
+            new[] { "Pork & Chive Dumplings", "Crispy Tofu Bites", "Spicy Beef Noodles", "Miso Mushroom Udon", "Cucumber Sesame Salad", "Lychee Iced Tea" },
+            new[] { "Smashed Avocado Toast", "Ricotta Hotcakes", "Chicken Club Sandwich", "Roasted Pumpkin Salad", "Almond Croissant", "Flat White" },
+            new[] { "Burrata & Tomato", "Garlic Rosemary Focaccia", "Margherita Pizza", "Prosciutto Funghi Pizza", "Tiramisu", "Blood Orange Soda" },
+            new[] { "Salt & Pepper Squid", "Grilled Halloumi", "Herb-Crusted Salmon", "Flame-Grilled Chicken", "Mango Cheesecake", "Sunset Cooler" },
+            new[] { "Zucchini Fritters", "Roasted Beet Salad", "Wild Mushroom Risotto", "Garden Herb Gnocchi", "Carrot Cake", "Elderflower Fizz" },
+            new[] { "Market Arancini", "Seasonal Bruschetta", "Barossa Beef Burger", "Market Vegetable Bowl", "Chocolate Brownie", "Fresh Lemonade" },
+            new[] { "Prototype Croquettes", "Beta Bruschetta", "Version Two Burger", "Feature Flag Curry", "Sandbox Sundae", "Debugging Tonic" },
+            new[] { "Adelaide Hills Olives", "Smoked Trout Crostini", "Slow-Cooked Lamb Shoulder", "Chestnut Mushroom Pie", "Apple Crumble", "Hills Pinot Spritz" }
+        };
+        var imageFallbackNames = new[]
+        {
+            "Chicken Wings", "Veg Spring Rolls", "Grilled Salmon",
+            "Mushroom Pasta", "Chocolate Lava Cake", "Fresh Lime Soda"
+        };
+        var categoryIds = restaurants
+            .SelectMany((_, restaurantIndex) => Enumerable.Range(0, 3)
+                .Select(categoryIndex => CreateSeedGuid(4, restaurantIndex * 10 + categoryIndex + 1)))
+            .ToArray();
+        var existingCategoryIds = (await dbContext.MenuCategories
+            .Where(category => categoryIds.Contains(category.Id))
+            .Select(category => category.Id)
+            .ToListAsync())
+            .ToHashSet();
+        var newCategories = new List<MenuCategory>();
+
+        for (var restaurantIndex = 0; restaurantIndex < restaurants.Count; restaurantIndex++)
+        {
+            for (var categoryIndex = 0; categoryIndex < 3; categoryIndex++)
+            {
+                var categoryId = CreateSeedGuid(4, restaurantIndex * 10 + categoryIndex + 1);
+                if (existingCategoryIds.Contains(categoryId))
+                {
+                    continue;
+                }
+
+                newCategories.Add(new MenuCategory
+                {
+                    Id = categoryId,
+                    RestaurantId = restaurants[restaurantIndex].Id,
+                    Name = categoryNames[restaurantIndex][categoryIndex],
+                    Description = $"Seeded menu section for {restaurants[restaurantIndex].Name}",
+                    DisplayOrder = categoryIndex + 1,
+                    IsActive = !(categoryIndex == 2 && restaurantIndex % 3 == 1),
+                    CreatedAt = DateTime.UtcNow.AddDays(-60 + restaurantIndex)
+                });
+            }
+        }
+
+        if (newCategories.Count > 0)
+        {
+            await dbContext.MenuCategories.AddRangeAsync(newCategories);
+            await dbContext.SaveChangesAsync();
+        }
+
+        var itemIds = restaurants
+            .SelectMany((_, restaurantIndex) => Enumerable.Range(0, 6)
+                .Select(itemIndex => CreateSeedGuid(5, restaurantIndex * 100 + itemIndex + 1)))
+            .ToArray();
+        var existingItemIds = (await dbContext.MenuItems
+            .Where(item => itemIds.Contains(item.Id))
+            .Select(item => item.Id)
+            .ToListAsync())
+            .ToHashSet();
+        var newItems = new List<MenuItem>();
+
+        for (var restaurantIndex = 0; restaurantIndex < restaurants.Count; restaurantIndex++)
+        {
+            for (var itemIndex = 0; itemIndex < 6; itemIndex++)
+            {
+                var itemId = CreateSeedGuid(5, restaurantIndex * 100 + itemIndex + 1);
+                if (existingItemIds.Contains(itemId))
+                {
+                    continue;
+                }
+
+                var categoryIndex = itemIndex / 2;
+                newItems.Add(new MenuItem
+                {
+                    Id = itemId,
+                    RestaurantId = restaurants[restaurantIndex].Id,
+                    CategoryId = CreateSeedGuid(4, restaurantIndex * 10 + categoryIndex + 1),
+                    Name = dishNames[restaurantIndex][itemIndex],
+                    Description = $"A signature selection from {restaurants[restaurantIndex].Name}.",
+                    Price = 8.50m + restaurantIndex * 1.25m + itemIndex * 4.75m,
+                    ImageUrl = GetSeedMenuImageUrl(imageFallbackNames[itemIndex]),
+                    IsAvailable = !(itemIndex == 4 && restaurantIndex % 2 == 0),
+                    IsSoldOut = itemIndex == 2 && restaurantIndex % 3 == 0,
+                    DisplayOrder = itemIndex % 2 + 1,
+                    CreatedAt = DateTime.UtcNow.AddDays(-55 + restaurantIndex)
+                });
+            }
+        }
+
+        if (newItems.Count > 0)
+        {
+            await dbContext.MenuItems.AddRangeAsync(newItems);
+            await dbContext.SaveChangesAsync();
+        }
+    }
+
+    private static Guid CreateSeedGuid(int group, int sequence)
+    {
+        return Guid.Parse($"d{group:0000000}-0000-0000-0000-{sequence:000000000000}");
     }
 
     private static async Task UpsertUserAsync(
@@ -459,6 +797,13 @@ public static class IdentitySeeder
     {
         public string AvatarUrl => $"/seed-avatars/avatar-{GetStableAvatarIndex(Email)}.svg";
     }
+
+    private sealed record SeedRestaurant(
+        Guid Id,
+        string Name,
+        string Address,
+        string Phone,
+        bool IsActive);
 
     private static int GetStableAvatarIndex(string value)
     {

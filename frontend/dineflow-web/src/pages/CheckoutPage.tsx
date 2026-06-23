@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
-import { AlertCircle, CheckCircle, CreditCard, Loader2, Receipt, ShoppingBag, Utensils } from 'lucide-react'
+import { AlertCircle, Banknote, CheckCircle, CreditCard, Loader2, Receipt, ShoppingBag, Utensils } from 'lucide-react'
 import { toast } from 'sonner'
-import { createPublicPaymentSession, type SubmittedOrder } from '@/api/carts'
+import { createPublicPaymentSession, selectOrderPaymentMethod, type SubmittedOrder } from '@/api/carts'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -15,6 +15,7 @@ export type CheckoutNavigationState = {
   currency: string
   restaurantName: string
   tableNumber: string | null
+  paymentPolicy: 'PrepayRequired' | 'PayAtCounterAllowed'
 }
 
 type PageState =
@@ -32,7 +33,14 @@ export function CheckoutPage() {
     return <Navigate to="/" replace />
   }
 
-  const { order, cartId, participantToken, currency, restaurantName, tableNumber } = routerState
+  const { order, cartId, participantToken, currency, restaurantName, tableNumber, paymentPolicy } = routerState
+  const isDineIn = order.orderType === 0
+  const displayedTableNumber = order.tableNumber ?? tableNumber
+  const orderScope = displayedTableNumber
+    ? `Table ${displayedTableNumber}`
+    : isDineIn
+      ? 'Dine in'
+      : 'Takeaway'
   const currencyFormatter = createCurrencyFormatter(currency)
 
   const handlePay = async () => {
@@ -42,12 +50,20 @@ export function CheckoutPage() {
       window.location.assign(result.checkoutUrl)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not start payment'
-      if (message.toLowerCase().includes('not configured')) {
-        setPageState({ status: 'pay_offline' })
-      } else {
-        setPageState({ status: 'error', message })
-        toast.error('Payment failed', { description: message })
-      }
+      setPageState({ status: 'error', message })
+      toast.error('Payment failed', { description: message })
+    }
+  }
+
+  const handlePayAtCounter = async () => {
+    setPageState({ status: 'paying' })
+    try {
+      await selectOrderPaymentMethod(cartId, participantToken, 'PayAtCounter')
+      setPageState({ status: 'pay_offline' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not select counter payment'
+      setPageState({ status: 'error', message })
+      toast.error('Payment method could not be changed', { description: message })
     }
   }
 
@@ -55,7 +71,7 @@ export function CheckoutPage() {
     return (
       <main className="flex min-h-svh flex-col items-center justify-start bg-background px-4 pt-8 pb-16">
         <div className="w-full max-w-lg space-y-5">
-          <OrderContextHeader restaurantName={restaurantName} tableNumber={tableNumber} />
+          <OrderContextHeader restaurantName={restaurantName} tableNumber={displayedTableNumber} isDineIn={isDineIn} />
           <Card>
             <CardContent className="flex flex-col items-center gap-4 p-8 text-center">
               <div className="flex size-14 items-center justify-center rounded-full bg-green-100 text-green-600">
@@ -65,7 +81,9 @@ export function CheckoutPage() {
                 <h2 className="text-lg font-semibold">Order placed</h2>
                 <p className="text-sm text-muted-foreground">
                   Your order <span className="font-medium text-foreground">{order.orderNumber}</span> has been
-                  received. Please pay at the counter.
+                  received. {isDineIn
+                    ? 'Enjoy your meal and pay at the counter when you are ready.'
+                    : 'We will prepare it now. Pay at the counter when you pick it up.'}
                 </p>
               </div>
               <Badge variant="secondary" className="h-8 px-3 text-sm">
@@ -83,14 +101,17 @@ export function CheckoutPage() {
   return (
     <main className="flex min-h-svh flex-col items-center justify-start bg-background px-4 pt-8 pb-16">
       <div className="w-full max-w-lg space-y-5">
-        <OrderContextHeader restaurantName={restaurantName} tableNumber={tableNumber} />
+        <OrderContextHeader restaurantName={restaurantName} tableNumber={displayedTableNumber} isDineIn={isDineIn} />
 
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Receipt className="size-4" />
-              Order {order.orderNumber}
-            </CardTitle>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Receipt className="size-4" />
+                Order {order.orderNumber}
+              </CardTitle>
+              <Badge variant="outline">{orderScope}</Badge>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-3">
@@ -152,8 +173,32 @@ export function CheckoutPage() {
             : `Pay ${currencyFormatter.format(order.totalAmount)}`}
         </Button>
 
+        {paymentPolicy === 'PayAtCounterAllowed' ? (
+          <Button
+            type="button"
+            variant="outline"
+            className="h-auto min-h-16 w-full items-start justify-center gap-3 rounded-xl px-5 py-3 text-left font-normal"
+            disabled={isPaying}
+            onClick={() => void handlePayAtCounter()}
+          >
+            <span className="flex size-5 shrink-0 items-center justify-center">
+              <Banknote className="size-5" />
+            </span>
+            <span className="flex flex-col items-start gap-0.5 leading-none">
+              <span className="text-base font-medium leading-5">
+                {isDineIn ? 'Enjoy your meal now' : 'Place your order now'}
+              </span>
+              <span className="text-xs font-normal leading-4 text-muted-foreground">
+                {isDineIn ? 'Pay at the counter when you are ready' : 'Pay at the counter when you pick it up'}
+              </span>
+            </span>
+          </Button>
+        ) : null}
+
         <p className="text-center text-xs text-muted-foreground">
-          Secured by Stripe. Your payment details are never stored on our servers.
+          {paymentPolicy === 'PrepayRequired'
+            ? 'Online payment is required before the restaurant can process this order.'
+            : 'Choose secure online payment or settle this order at the counter.'}
         </p>
       </div>
     </main>
@@ -163,14 +208,16 @@ export function CheckoutPage() {
 function OrderContextHeader({
   restaurantName,
   tableNumber,
+  isDineIn,
 }: {
   restaurantName: string
   tableNumber: string | null
+  isDineIn: boolean
 }) {
   return (
     <div className="flex items-center gap-3">
       <div className="flex size-11 shrink-0 items-center justify-center rounded-full border bg-muted/60">
-        {tableNumber ? <Utensils className="size-5" /> : <ShoppingBag className="size-5" />}
+        {isDineIn ? <Utensils className="size-5" /> : <ShoppingBag className="size-5" />}
       </div>
       <div className="min-w-0">
         <p className="text-xs font-semibold uppercase text-muted-foreground">Checkout</p>

@@ -3,7 +3,7 @@ import type { AdminOrder } from '../api/auth'
 const activeOrderStatuses = new Set(['Pending', 'Accepted', 'Preparing', 'Ready'])
 
 export function isOrderPayable(order: AdminOrder) {
-  if (order.paymentStatus === 'Paid') {
+  if (order.paymentStatus === 'Paid' || order.paymentMethod !== 'Online') {
     return false
   }
 

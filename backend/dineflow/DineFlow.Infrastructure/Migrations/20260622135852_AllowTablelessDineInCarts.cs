@@ -5,7 +5,7 @@
 namespace DineFlow.Infrastructure.Migrations
 {
     /// <inheritdoc />
-    public partial class AllowTablelessDineInCarts : Migration
+    public partial class AllowTablelessDineInCartsMain : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)

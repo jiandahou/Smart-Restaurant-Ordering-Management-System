@@ -260,8 +260,8 @@
   background: var(--panel-bg);
 }
 
-.navbar-user strong,
-.navbar-user span {
+.navbar-user-copy strong,
+.navbar-user-copy > span {
   display: block;
   max-width: 190px;
   overflow: hidden;
@@ -269,13 +269,13 @@
   white-space: nowrap;
 }
 
-.navbar-user strong {
+.navbar-user-copy strong {
   color: var(--text-h);
   font-size: 13px;
   line-height: 1.1;
 }
 
-.navbar-user span {
+.navbar-user-copy > span {
   color: var(--muted-foreground);
   font-size: 11px;
   line-height: 1.2;
@@ -1974,12 +1974,12 @@
   align-items: center;
 }
 
-.dashboard-order-row strong,
-.dashboard-order-row span {
+.dashboard-order-copy strong,
+.dashboard-order-copy > span {
   display: block;
 }
 
-.dashboard-order-row span {
+.dashboard-order-copy > span {
   margin-top: 3px;
   color: var(--muted-foreground);
   font-size: 13px;
@@ -2264,11 +2264,18 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: nowrap;
   gap: 8px;
 }
 
 .page-size-select {
-  width: 112px;
+  flex: 0 0 140px;
+  width: 140px;
+}
+
+.pagination-actions > span {
+  flex: none;
+  white-space: nowrap;
 }
 
 .data-table tr:last-child td {
@@ -2597,8 +2604,8 @@
     border-radius: 8px;
   }
 
-  .navbar-user strong,
-  .navbar-user span {
+  .navbar-user-copy strong,
+  .navbar-user-copy > span {
     max-width: none;
   }
 
@@ -2795,6 +2802,7 @@
   }
 
   .pagination-actions {
+    flex-wrap: wrap;
     justify-content: flex-start;
   }
 

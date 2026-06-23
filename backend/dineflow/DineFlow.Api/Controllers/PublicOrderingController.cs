@@ -27,7 +27,8 @@ public class PublicOrderingController(AppDbContext dbContext) : ControllerBase
                 Address = item.Address,
                 Phone = item.Phone,
                 Timezone = item.Timezone,
-                Currency = item.Currency
+                Currency = item.Currency,
+                PaymentPolicy = item.PaymentPolicy.ToString()
             })
             .FirstOrDefaultAsync(cancellationToken);
 
@@ -41,6 +42,7 @@ public class PublicOrderingController(AppDbContext dbContext) : ControllerBase
             Restaurant = restaurant,
             Table = null,
             OrderType = OrderType.Takeaway.ToString(),
+            AvailableOrderTypes = [OrderType.DineIn.ToString(), OrderType.Takeaway.ToString()],
             MenuEntryUrl = $"/r/{restaurant.Id}/menu"
         });
     }
@@ -69,7 +71,8 @@ public class PublicOrderingController(AppDbContext dbContext) : ControllerBase
                         Address = restaurant.Address,
                         Phone = restaurant.Phone,
                         Timezone = restaurant.Timezone,
-                        Currency = restaurant.Currency
+                        Currency = restaurant.Currency,
+                        PaymentPolicy = restaurant.PaymentPolicy.ToString()
                     },
                     Table = new PublicOrderingTableResponse
                     {
@@ -78,6 +81,7 @@ public class PublicOrderingController(AppDbContext dbContext) : ControllerBase
                         Capacity = table.Capacity
                     },
                     OrderType = OrderType.DineIn.ToString(),
+                    AvailableOrderTypes = new[] { OrderType.DineIn.ToString() },
                     MenuEntryUrl = $"/table/{table.QrToken}"
                 })
             .FirstOrDefaultAsync(cancellationToken);

@@ -13,7 +13,7 @@ namespace DineFlow.Infrastructure.Migrations
 {
     [DbContext(typeof(AppDbContext))]
     [Migration("20260622135852_AllowTablelessDineInCarts")]
-    partial class AllowTablelessDineInCarts
+    partial class AllowTablelessDineInCartsMain
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)

@@ -10,6 +10,7 @@ using DineFlow.Infrastructure.Carts;
 using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
+using DineFlow.Infrastructure.Restaurant;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.WebUtilities;
@@ -17,6 +18,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Stripe;
 using Stripe.Checkout;
+using PaymentMethod = DineFlow.Infrastructure.Payments.PaymentMethod;
 
 namespace DineFlow.Api.Controllers;
 
@@ -53,6 +55,23 @@ public class PublicCartsController(
             {
                 message = "Provide either restaurantId or tableQrToken, but not both."
             });
+        }
+
+        if (hasTableToken &&
+            !string.IsNullOrWhiteSpace(request.OrderType) &&
+            !request.OrderType.Equals(nameof(OrderType.DineIn), StringComparison.OrdinalIgnoreCase))
+        {
+            return BadRequest(new { message = "Table QR ordering only supports DineIn." });
+        }
+
+        var requestedOrderType = OrderType.Takeaway;
+        if (hasRestaurantId && !string.IsNullOrWhiteSpace(request.OrderType))
+        {
+            if (!Enum.TryParse<OrderType>(request.OrderType, true, out requestedOrderType) ||
+                requestedOrderType is not (OrderType.DineIn or OrderType.Takeaway))
+            {
+                return BadRequest(new { message = "OrderType must be DineIn or Takeaway." });
+            }
         }
 
         await using var transaction = await dbContext.Database.BeginTransactionAsync(
@@ -134,9 +153,9 @@ public class PublicCartsController(
                 Id = Guid.NewGuid(),
                 RestaurantId = restaurantId,
                 TableId = null,
-                OrderType = OrderType.Takeaway,
+                OrderType = requestedOrderType,
                 Status = CartStatus.Active,
-                ExpiresAt = now.Add(TakeawayCartLifetime),
+                ExpiresAt = now.Add(requestedOrderType == OrderType.DineIn ? DineInCartLifetime : TakeawayCartLifetime),
                 CreatedAt = now
             };
 
@@ -443,9 +462,9 @@ public class PublicCartsController(
             return StatusCode(StatusCodes.Status410Gone, new { message = "Cart has expired." });
         }
 
-        var restaurantIsActive = await dbContext.Restaurants
+        var restaurant = await dbContext.Restaurants
             .AsNoTracking()
-            .AnyAsync(
+            .FirstOrDefaultAsync(
                 restaurant => restaurant.Id == cart.RestaurantId && restaurant.IsActive,
                 cancellationToken);
 
@@ -457,7 +476,7 @@ public class PublicCartsController(
                     table.IsActive,
                 cancellationToken);
 
-        if (!restaurantIsActive || !tableIsActive)
+        if (restaurant is null || !tableIsActive)
         {
             return Conflict(new { message = "Restaurant or table is no longer available for ordering." });
         }
@@ -493,7 +512,8 @@ public class PublicCartsController(
             OrderNumber = await GenerateOrderNumberAsync(cancellationToken),
             OrderType = cart.OrderType,
             Status = OrderStatus.Pending,
-            PaymentStatus = PaymentStatus.Pending,
+            PaymentStatus = PaymentStatus.Unpaid,
+            PaymentMethod = PaymentMethod.Online,
             CustomerNote = cart.CustomerNote,
             CreatedAt = now
         };
@@ -557,6 +577,77 @@ public class PublicCartsController(
         });
     }
 
+    [HttpPut("{cartId:guid}/payment-method")]
+    public async Task<IActionResult> SelectPaymentMethod(
+        Guid cartId,
+        SelectOrderPaymentMethodRequest request,
+        [FromHeader(Name = ParticipantTokenHeader)] string? participantToken,
+        CancellationToken cancellationToken)
+    {
+        if (!Enum.TryParse<PaymentMethod>(request.PaymentMethod, true, out var paymentMethod) ||
+            !Enum.IsDefined(paymentMethod))
+        {
+            return BadRequest(new
+            {
+                message = $"PaymentMethod must be one of: {string.Join(", ", Enum.GetNames<PaymentMethod>())}."
+            });
+        }
+
+        var access = await AuthorizeCartAsync(cartId, participantToken, cancellationToken);
+
+        if (access.ErrorResult is not null)
+        {
+            return access.ErrorResult;
+        }
+
+        var cart = access.Cart!;
+        if (cart.Status != CartStatus.Submitted || !cart.OrderId.HasValue)
+        {
+            return Conflict(new { message = "Cart must be checked out before selecting payment." });
+        }
+
+        var order = await dbContext.Orders
+            .Include(item => item.OrderItems)
+            .Include(item => item.Payments)
+            .Include(item => item.Restaurant)
+            .Include(item => item.Table)
+            .FirstOrDefaultAsync(item => item.Id == cart.OrderId.Value, cancellationToken);
+
+        if (order is null)
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
+        if (order.PaymentStatus == PaymentStatus.Paid)
+        {
+            return Conflict(new { message = "The payment method cannot be changed after payment." });
+        }
+
+        if (order.Payments.Any(payment => payment.Status == PaymentStatus.Pending))
+        {
+            return Conflict(new { message = "The payment method cannot be changed while an online payment is pending." });
+        }
+
+        if (paymentMethod == PaymentMethod.PayAtCounter &&
+            order.Restaurant?.PaymentPolicy != RestaurantPaymentPolicy.PayAtCounterAllowed)
+        {
+            return Conflict(new { message = "This restaurant requires online payment before the order can be processed." });
+        }
+
+        order.PaymentMethod = paymentMethod;
+        order.PaymentStatus = PaymentStatus.Unpaid;
+        order.UpdatedAt = DateTime.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(new CheckoutCartResponse
+        {
+            Message = paymentMethod == PaymentMethod.PayAtCounter
+                ? "Pay at counter selected."
+                : "Online payment selected.",
+            Order = MapOrder(order)
+        });
+    }
+
     private async Task<CartAccessResult> AuthorizeMutableCartAsync(
         Guid cartId,
         string? participantToken,
@@ -613,6 +704,23 @@ public class PublicCartsController(
         if (access.Failure == CartAccessFailure.Expired)
         {
             await cartRealtimeNotifier.CartExpiredAsync(cartId, cancellationToken);
+        }
+
+        if (access.Failure == CartAccessFailure.None && access.Participant is not null)
+        {
+            var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            if (!string.IsNullOrWhiteSpace(currentUserId) &&
+                !string.Equals(access.Participant.CustomerId, currentUserId, StringComparison.Ordinal))
+            {
+                access.Participant.CustomerId = currentUserId;
+                access.Participant.LastSeenAt = DateTime.UtcNow;
+                await dbContext.SaveChangesAsync(cancellationToken);
+                var customerReference = dbContext.Entry(access.Participant)
+                    .Reference(participant => participant.Customer);
+                customerReference.IsLoaded = false;
+                await customerReference.LoadAsync(cancellationToken);
+            }
         }
 
         var errorResult = access.Failure switch
@@ -687,6 +795,7 @@ public class PublicCartsController(
         return await dbContext.Orders
             .AsNoTracking()
             .Include(order => order.OrderItems)
+            .Include(order => order.Table)
             .FirstOrDefaultAsync(order => order.Id == orderId, cancellationToken);
     }
 
@@ -697,10 +806,13 @@ public class PublicCartsController(
             Id = order.Id,
             RestaurantId = order.RestaurantId,
             TableId = order.TableId,
+            TableNumber = order.Table?.TableNumber,
             CustomerId = order.CustomerId,
             OrderNumber = order.OrderNumber,
             OrderType = (int)order.OrderType,
             Status = (int)order.Status,
+            PaymentStatus = order.PaymentStatus.ToString(),
+            PaymentMethod = order.PaymentMethod.ToString(),
             TotalAmount = order.TotalAmount,
             CustomerNote = order.CustomerNote,
             ScheduledTime = order.ScheduledTime,
@@ -797,6 +909,11 @@ public class PublicCartsController(
         if (order.PaymentStatus == PaymentStatus.Paid)
         {
             return Conflict(new { message = "This order has already been paid." });
+        }
+
+        if (order.PaymentMethod != PaymentMethod.Online)
+        {
+            return Conflict(new { message = "This order is configured for payment at the counter." });
         }
 
         if (order.Status is OrderStatus.Cancelled or OrderStatus.Rejected)

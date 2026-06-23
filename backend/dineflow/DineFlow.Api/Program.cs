@@ -27,7 +27,10 @@ var builder = WebApplication.CreateBuilder(args);
 const string FrontendCorsPolicy = "FrontendCorsPolicy";
 
 builder.Services.AddControllers();
-builder.Services.AddSignalR();
+builder.Services.AddSignalR(options =>
+{
+    options.EnableDetailedErrors = builder.Environment.IsDevelopment();
+});
 builder.Services.AddMemoryCache();
 builder.Services.AddCors(options =>
 {
@@ -294,6 +297,12 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy(AuthorizationPolicies.StaffApi, policy =>
         policy.RequireRole(
             ApplicationRoles.PlatformOwner,
+            ApplicationRoles.RestaurantOwner,
+            ApplicationRoles.Admin,
+            ApplicationRoles.Staff));
+
+    options.AddPolicy(AuthorizationPolicies.RestaurantStaffApi, policy =>
+        policy.RequireRole(
             ApplicationRoles.RestaurantOwner,
             ApplicationRoles.Admin,
             ApplicationRoles.Staff));

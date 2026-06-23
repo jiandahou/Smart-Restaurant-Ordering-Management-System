@@ -1,6 +1,8 @@
 using System.Security.Claims;
 using DineFlow.Api.Authorization;
+using DineFlow.Api.Contracts.Common;
 using DineFlow.Api.Contracts.Payments;
+using DineFlow.Api.Extensions;
 using DineFlow.Api.Options;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
@@ -14,6 +16,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Stripe;
 using Stripe.Checkout;
+using PaymentMethod = DineFlow.Infrastructure.Payments.PaymentMethod;
 
 namespace DineFlow.Api.Controllers;
 
@@ -43,6 +46,97 @@ public class PaymentsController : ControllerBase
         _stripeClient = stripeClient;
         _stripeOptions = stripeOptions.Value;
         _logger = logger;
+    }
+
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    [HttpGet]
+    public async Task<ActionResult<PagedResponse<AdminPaymentResponse>>> GetPayments(
+        [FromQuery] AdminPaymentListRequest request,
+        CancellationToken cancellationToken)
+    {
+        var currentRestaurantId = await GetCurrentRestaurantIdAsync();
+
+        if (!User.IsInRole(ApplicationRoles.PlatformOwner) && currentRestaurantId is null)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                message = "Current user is not assigned to a restaurant."
+            });
+        }
+
+        var query = _dbContext.Payments
+            .AsNoTracking()
+            .Include(payment => payment.Order)
+                .ThenInclude(order => order!.Restaurant)
+            .Include(payment => payment.Order)
+                .ThenInclude(order => order!.Customer)
+            .AsQueryable();
+
+        if (!User.IsInRole(ApplicationRoles.PlatformOwner))
+        {
+            query = query.Where(payment => payment.Order != null && payment.Order.RestaurantId == currentRestaurantId);
+        }
+
+        if (request.RestaurantId.HasValue)
+        {
+            query = query.Where(payment => payment.Order != null && payment.Order.RestaurantId == request.RestaurantId);
+        }
+
+        if (!TryParseFilter<PaymentStatus>(request.Status, nameof(request.Status), out var paymentStatus, out var filterError) ||
+            !TryParseFilter<OrderStatus>(request.OrderStatus, nameof(request.OrderStatus), out var orderStatus, out filterError) ||
+            !TryParseFilter<OrderType>(request.OrderType, nameof(request.OrderType), out var orderType, out filterError))
+        {
+            return BadRequest(new { message = filterError });
+        }
+
+        if (paymentStatus.HasValue)
+        {
+            query = query.Where(payment => payment.Status == paymentStatus.Value);
+        }
+
+        if (orderStatus.HasValue)
+        {
+            query = query.Where(payment => payment.Order != null && payment.Order.Status == orderStatus.Value);
+        }
+
+        if (orderType.HasValue)
+        {
+            query = query.Where(payment => payment.Order != null && payment.Order.OrderType == orderType.Value);
+        }
+
+        var search = request.Search?.Trim();
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var pattern = $"%{search}%";
+            query = query.Where(payment =>
+                EF.Functions.ILike(payment.Id.ToString(), pattern) ||
+                (payment.ProviderCheckoutSessionId != null && EF.Functions.ILike(payment.ProviderCheckoutSessionId, pattern)) ||
+                (payment.ProviderPaymentIntentId != null && EF.Functions.ILike(payment.ProviderPaymentIntentId, pattern)) ||
+                (payment.Order != null && EF.Functions.ILike(payment.Order.OrderNumber, pattern)) ||
+                (payment.Order != null && payment.Order.Restaurant != null && EF.Functions.ILike(payment.Order.Restaurant.Name, pattern)) ||
+                (payment.Order != null && payment.Order.Customer != null && payment.Order.Customer.FullName != null && EF.Functions.ILike(payment.Order.Customer.FullName, pattern)) ||
+                (payment.Order != null && payment.Order.Customer != null && payment.Order.Customer.Email != null && EF.Functions.ILike(payment.Order.Customer.Email, pattern)));
+        }
+
+        var sortedQuery = ApplyPaymentSorting(query, request.SortBy, request.IsDescending);
+        if (sortedQuery is null)
+        {
+            return BadRequest(new
+            {
+                message = "Unsupported sortBy value.",
+                allowedValues = new[] { "createdAt", "updatedAt", "orderNumber", "restaurantName", "status", "amount" }
+            });
+        }
+
+        var page = await sortedQuery.ToPagedResponseAsync(request.Page, request.PageSize, cancellationToken);
+
+        return Ok(new PagedResponse<AdminPaymentResponse>
+        {
+            Items = page.Items.Select(MapToAdminPaymentResponse).ToList(),
+            Page = page.Page,
+            PageSize = page.PageSize,
+            TotalItems = page.TotalItems
+        });
     }
 
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]
@@ -90,6 +184,11 @@ public class PaymentsController : ControllerBase
         if (order.PaymentStatus == PaymentStatus.Paid)
         {
             return Conflict(new { message = "This order has already been paid." });
+        }
+
+        if (order.PaymentMethod != PaymentMethod.Online)
+        {
+            return Conflict(new { message = "This order is configured for payment at the counter." });
         }
 
         if (order.Status is OrderStatus.Cancelled or OrderStatus.Rejected)
@@ -272,6 +371,83 @@ public class PaymentsController : ControllerBase
         return string.IsNullOrWhiteSpace(currency)
             ? "aud"
             : currency.Trim().ToLowerInvariant();
+    }
+
+    private static IOrderedQueryable<Payment>? ApplyPaymentSorting(
+        IQueryable<Payment> query,
+        string? sortBy,
+        bool descending)
+    {
+        var normalizedSort = string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy.Trim();
+
+        IOrderedQueryable<Payment>? sorted = normalizedSort.ToLowerInvariant() switch
+        {
+            "createdat" => descending ? query.OrderByDescending(payment => payment.CreatedAt) : query.OrderBy(payment => payment.CreatedAt),
+            "updatedat" => descending ? query.OrderByDescending(payment => payment.UpdatedAt) : query.OrderBy(payment => payment.UpdatedAt),
+            "ordernumber" => descending ? query.OrderByDescending(payment => payment.Order!.OrderNumber) : query.OrderBy(payment => payment.Order!.OrderNumber),
+            "restaurantname" => descending ? query.OrderByDescending(payment => payment.Order!.Restaurant!.Name) : query.OrderBy(payment => payment.Order!.Restaurant!.Name),
+            "status" => descending ? query.OrderByDescending(payment => payment.Status) : query.OrderBy(payment => payment.Status),
+            "amount" => descending ? query.OrderByDescending(payment => payment.AmountCents) : query.OrderBy(payment => payment.AmountCents),
+            _ => null
+        };
+
+        return sorted is null
+            ? null
+            : descending
+                ? sorted.ThenByDescending(payment => payment.Id)
+                : sorted.ThenBy(payment => payment.Id);
+    }
+
+    private static AdminPaymentResponse MapToAdminPaymentResponse(Payment payment)
+    {
+        return new AdminPaymentResponse
+        {
+            Id = payment.Id,
+            OrderId = payment.OrderId,
+            OrderNumber = payment.Order?.OrderNumber ?? string.Empty,
+            RestaurantId = payment.Order?.RestaurantId,
+            RestaurantName = payment.Order?.Restaurant?.Name,
+            CustomerName = payment.Order?.Customer?.FullName,
+            CustomerEmail = payment.Order?.Customer?.Email,
+            OrderStatus = payment.Order?.Status.ToString() ?? string.Empty,
+            OrderType = payment.Order?.OrderType.ToString() ?? string.Empty,
+            Provider = payment.Provider,
+            Status = payment.Status.ToString(),
+            AmountCents = payment.AmountCents,
+            Currency = payment.Currency,
+            ProviderCheckoutSessionId = payment.ProviderCheckoutSessionId,
+            ProviderPaymentIntentId = payment.ProviderPaymentIntentId,
+            FailureReason = payment.FailureReason,
+            CreatedAt = payment.CreatedAt,
+            UpdatedAt = payment.UpdatedAt,
+            PaidAt = payment.PaidAt,
+            FailedAt = payment.FailedAt
+        };
+    }
+
+    private static bool TryParseFilter<TEnum>(
+        string? value,
+        string parameterName,
+        out TEnum? parsed,
+        out string? error)
+        where TEnum : struct, Enum
+    {
+        parsed = null;
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        if (Enum.TryParse<TEnum>(value, true, out var result) && Enum.IsDefined(result))
+        {
+            parsed = result;
+            return true;
+        }
+
+        error = $"Unsupported {parameterName} value. Allowed values: {string.Join(", ", Enum.GetNames<TEnum>())}.";
+        return false;
     }
 
     private static long ConvertAmountToCents(decimal amount)
