@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 import { AlertCircle, Banknote, CheckCircle, CreditCard, Loader2, Receipt, ShoppingBag, Utensils } from 'lucide-react'
 import { toast } from 'sonner'
@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
+import { rememberGuestOrder } from '@/lib/guestOrders'
 
 export type CheckoutNavigationState = {
   order: SubmittedOrder
@@ -29,6 +30,10 @@ export function CheckoutPage() {
   const routerState = location.state as CheckoutNavigationState | null
   const [pageState, setPageState] = useState<PageState>({ status: 'ready' })
 
+  useEffect(() => {
+    rememberGuestOrder(routerState?.order.id)
+  }, [routerState?.order.id])
+
   if (!routerState?.order) {
     return <Navigate to="/" replace />
   }
@@ -47,6 +52,7 @@ export function CheckoutPage() {
     setPageState({ status: 'paying' })
     try {
       const result = await createPublicPaymentSession(cartId, participantToken)
+      rememberGuestOrder(result.orderId)
       window.location.assign(result.checkoutUrl)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not start payment'
@@ -58,7 +64,8 @@ export function CheckoutPage() {
   const handlePayAtCounter = async () => {
     setPageState({ status: 'paying' })
     try {
-      await selectOrderPaymentMethod(cartId, participantToken, 'PayAtCounter')
+      const result = await selectOrderPaymentMethod(cartId, participantToken, 'PayAtCounter')
+      rememberGuestOrder(result.order.id)
       setPageState({ status: 'pay_offline' })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not select counter payment'
@@ -119,6 +126,19 @@ export function CheckoutPage() {
                 <div key={item.id} className="flex items-start justify-between gap-3">
                   <div className="min-w-0 space-y-0.5">
                     <p className="font-medium leading-snug">{item.itemNameSnapshot}</p>
+                    {item.selectedOptions.length > 0 ? (
+                      <div className="space-y-0.5 text-xs text-muted-foreground">
+                        {item.selectedOptions.map((option) => (
+                          <p key={`${option.menuItemOptionId ?? `${option.groupNameSnapshot}:${option.optionNameSnapshot}`}×${option.quantity ?? 1}`}>
+                            {option.groupNameSnapshot}: {option.optionNameSnapshot}
+                            {(option.quantity ?? 1) > 1 ? ` ×${option.quantity ?? 1}` : ''}
+                            {option.priceAdjustmentSnapshot === 0
+                              ? ''
+                              : ` (${option.priceAdjustmentSnapshot * (option.quantity ?? 1) > 0 ? '+' : ''}${currencyFormatter.format(option.priceAdjustmentSnapshot * (option.quantity ?? 1))})`}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
                     {item.note ? (
                       <p className="text-xs text-muted-foreground">{item.note}</p>
                     ) : null}

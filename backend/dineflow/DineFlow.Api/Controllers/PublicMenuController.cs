@@ -53,7 +53,43 @@ public class PublicMenuController(AppDbContext dbContext) : ControllerBase
                         ImageUrl = item.ImageUrl,
                         IsAvailable = item.IsAvailable,
                         IsSoldOut = item.IsSoldOut,
-                        DisplayOrder = item.DisplayOrder
+                        DisplayOrder = item.DisplayOrder,
+                        OptionGroups = item.OptionGroups
+                            .Where(group => group.IsActive)
+                            .OrderBy(group => group.DisplayOrder)
+                            .ThenBy(group => group.Name)
+                            .Select(group => new MenuOptionGroupResponse
+                            {
+                                Id = group.Id,
+                                MenuItemId = group.MenuItemId,
+                                Name = group.Name,
+                                IsRequired = group.IsRequired,
+                                MinSelections = group.MinSelections,
+                                MaxSelections = group.MaxSelections,
+                                DisplayOrder = group.DisplayOrder,
+                                IsActive = group.IsActive,
+                                CreatedAt = group.CreatedAt,
+                                UpdatedAt = group.UpdatedAt,
+                                Options = group.Options
+                                    .Where(option => option.IsAvailable)
+                                    .OrderBy(option => option.DisplayOrder)
+                                    .ThenBy(option => option.Name)
+                                    .Select(option => new MenuOptionResponse
+                                    {
+                                        Id = option.Id,
+                                        GroupId = option.GroupId,
+                                        Name = option.Name,
+                                        PriceAdjustment = option.PriceAdjustment,
+                                        AdjustmentType = (int)option.AdjustmentType,
+                                        MaxQuantity = option.MaxQuantity,
+                                        DisplayOrder = option.DisplayOrder,
+                                        IsAvailable = option.IsAvailable,
+                                        CreatedAt = option.CreatedAt,
+                                        UpdatedAt = option.UpdatedAt
+                                    })
+                                    .ToList()
+                            })
+                            .ToList()
                     })
                     .ToList()
             })

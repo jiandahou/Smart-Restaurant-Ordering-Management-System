@@ -276,6 +276,57 @@ export type DeleteMenuCategoryResponse = {
   categoryId: string
 }
 
+export type MenuOption = {
+  id: string
+  groupId: string
+  name: string
+  priceAdjustment: number
+  adjustmentType: 0 | 1 | 2
+  maxQuantity: number
+  displayOrder: number
+  isAvailable: boolean
+  createdAt: string
+  updatedAt: string | null
+}
+
+export type MenuOptionGroup = {
+  id: string
+  menuItemId: string
+  name: string
+  isRequired: boolean
+  minSelections: number
+  maxSelections: number
+  displayOrder: number
+  isActive: boolean
+  createdAt: string
+  updatedAt: string | null
+  options: MenuOption[]
+}
+
+export type CreateMenuOptionGroupRequest = {
+  name: string
+  isRequired: boolean
+  minSelections: number
+  maxSelections: number
+  displayOrder: number
+}
+
+export type UpdateMenuOptionGroupRequest = CreateMenuOptionGroupRequest & {
+  isActive: boolean
+}
+
+export type CreateMenuOptionRequest = {
+  name: string
+  priceAdjustment: number
+  adjustmentType: 0 | 1 | 2
+  maxQuantity: number
+  displayOrder: number
+}
+
+export type UpdateMenuOptionRequest = CreateMenuOptionRequest & {
+  isAvailable: boolean
+}
+
 export type MenuItem = {
   id: string
   restaurantId: string
@@ -287,9 +338,15 @@ export type MenuItem = {
   imageUrl: string | null
   isAvailable: boolean
   isSoldOut: boolean
+  isVegetarian: boolean
+  isVegan: boolean
+  isGlutenFree: boolean
+  isHalal: boolean
+  allergens: string | null
   displayOrder: number
   createdAt: string
   updatedAt: string | null
+  optionGroups: MenuOptionGroup[]
 }
 
 export type CreateMenuItemRequest = {
@@ -400,6 +457,16 @@ export type AdminOrderItem = {
   unitPrice: number
   totalPrice: number
   note: string | null
+  selectedOptions: AdminOrderItemOption[]
+}
+
+export type AdminOrderItemOption = {
+  id: string
+  menuItemOptionId: string | null
+  groupNameSnapshot: string
+  optionNameSnapshot: string
+  priceAdjustmentSnapshot: number
+  quantity: number
 }
 
 export type AdminOrderPayment = {
@@ -453,8 +520,18 @@ export type CustomerOrderItem = {
   unitPrice: number
   totalPrice: number
   note: string | null
+  selectedOptions: CustomerOrderItemOption[]
   createdAt: string
   updatedAt: string | null
+}
+
+export type CustomerOrderItemOption = {
+  id: string
+  menuItemOptionId: string | null
+  groupNameSnapshot: string
+  optionNameSnapshot: string
+  priceAdjustmentSnapshot: number
+  quantity: number
 }
 
 export type CustomerOrder = {
@@ -464,6 +541,7 @@ export type CustomerOrder = {
   tableNumber: string | null
   customerId: string | null
   orderNumber: string
+  currency: string
   orderType: number
   status: number
   paymentStatus: AdminPaymentStatus
@@ -706,7 +784,12 @@ async function request<T>(path: string, options: RequestInit = {}) {
     throw new Error(message)
   }
 
-  return (await response.json()) as T
+  if (response.status === 204) {
+    return undefined as T
+  }
+
+  const responseText = await response.text()
+  return responseText ? JSON.parse(responseText) as T : undefined as T
 }
 
 export function login(email: string, password: string) {
@@ -1026,6 +1109,58 @@ export function deleteMenuItem(itemId: string) {
   })
 }
 
+export function createMenuOptionGroup(itemId: string, payload: CreateMenuOptionGroupRequest) {
+  return request<MenuOptionGroup>(`/api/menu/items/${itemId}/option-groups`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateMenuOptionGroup(itemId: string, groupId: string, payload: UpdateMenuOptionGroupRequest) {
+  return request<MenuOptionGroup>(`/api/menu/items/${itemId}/option-groups/${groupId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function archiveMenuOptionGroup(itemId: string, groupId: string) {
+  return request<void>(`/api/menu/items/${itemId}/option-groups/${groupId}/archive`, {
+    method: 'POST',
+  })
+}
+
+export function deleteMenuOptionGroup(itemId: string, groupId: string) {
+  return request<void>(`/api/menu/items/${itemId}/option-groups/${groupId}`, {
+    method: 'DELETE',
+  })
+}
+
+export function createMenuOption(itemId: string, groupId: string, payload: CreateMenuOptionRequest) {
+  return request<MenuOption>(`/api/menu/items/${itemId}/option-groups/${groupId}/options`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateMenuOption(itemId: string, groupId: string, optionId: string, payload: UpdateMenuOptionRequest) {
+  return request<MenuOption>(`/api/menu/items/${itemId}/option-groups/${groupId}/options/${optionId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function archiveMenuOption(itemId: string, groupId: string, optionId: string) {
+  return request<void>(`/api/menu/items/${itemId}/option-groups/${groupId}/options/${optionId}/archive`, {
+    method: 'POST',
+  })
+}
+
+export function deleteMenuOption(itemId: string, groupId: string, optionId: string) {
+  return request<void>(`/api/menu/items/${itemId}/option-groups/${groupId}/options/${optionId}`, {
+    method: 'DELETE',
+  })
+}
+
 export async function uploadMenuItemImage(restaurantId: string, file: File) {
   const upload = await request<CreateMenuItemImageUploadUrlResponse>('/api/admin/menu/items/image-upload-url', {
     method: 'POST',
@@ -1105,6 +1240,13 @@ export function transitionAdminOrder(
 
 export function getMyOrders() {
   return request<CustomerOrder[]>('/api/order/mine')
+}
+
+export function getGuestOrders(orderIds: string[]) {
+  return request<CustomerOrder[]>('/api/order/guest', {
+    method: 'POST',
+    body: JSON.stringify({ orderIds }),
+  })
 }
 
 export function getAdminPayments(params: AdminPaymentListParams = {}) {

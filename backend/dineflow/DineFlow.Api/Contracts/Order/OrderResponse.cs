@@ -14,6 +14,8 @@ public class OrderResponse
 
     public string OrderNumber { get; set; } = string.Empty;
 
+    public string Currency { get; set; } = string.Empty;
+
     public int OrderType { get; set; }
 
     public int Status { get; set; }
@@ -79,4 +81,11 @@ public class OrderItemOptionResponse
     public string OptionNameSnapshot { get; set; } = string.Empty;
 
     public decimal PriceAdjustmentSnapshot { get; set; }
+
+    public int Quantity { get; set; } = 1;
+}
+
+public sealed class GuestOrderLookupRequest
+{
+    public List<Guid> OrderIds { get; set; } = new();
 }

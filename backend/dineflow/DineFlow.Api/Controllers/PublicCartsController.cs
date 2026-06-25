@@ -7,6 +7,7 @@ using DineFlow.Api.Contracts.Payments;
 using DineFlow.Api.Options;
 using DineFlow.Api.Services;
 using DineFlow.Infrastructure.Carts;
+using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
@@ -229,28 +230,40 @@ public class PublicCartsController(
         var cart = access.Cart!;
         var menuItem = await dbContext.MenuItems
             .AsNoTracking()
+            .Include(item => item.Category)
+            .Include(item => item.OptionGroups.Where(group => group.IsActive))
+                .ThenInclude(group => group.Options.Where(option => option.IsAvailable))
             .Where(item =>
                 item.Id == request.MenuItemId &&
                 item.RestaurantId == cart.RestaurantId &&
                 item.IsAvailable &&
                 !item.IsSoldOut)
-            .Join(
-                dbContext.MenuCategories.AsNoTracking().Where(category =>
-                    category.RestaurantId == cart.RestaurantId && category.IsActive),
-                item => item.CategoryId,
-                category => category.Id,
-                (item, _) => item)
             .FirstOrDefaultAsync(cancellationToken);
 
-        if (menuItem is null)
+        if (menuItem is null ||
+            menuItem.Category is null ||
+            menuItem.Category.RestaurantId != cart.RestaurantId ||
+            !menuItem.Category.IsActive)
         {
             return Conflict(new { message = "Menu item is unavailable, sold out, or belongs to another restaurant." });
         }
 
+        var optionSelection = ValidateOptionSelection(menuItem, request.SelectedOptionIds);
+
+        if (optionSelection.Errors.Count > 0)
+        {
+            return BadRequest(new { message = string.Join(" ", optionSelection.Errors) });
+        }
+
         var note = NormalizeNote(request.Note);
-        var existingLine = await dbContext.CartItems.FirstOrDefaultAsync(
-            item => item.CartId == cartId && item.MenuItemId == request.MenuItemId && item.Note == note,
-            cancellationToken);
+        var selectedOptionIds = optionSelection.SelectedOptions
+            .SelectMany(selection => Enumerable.Repeat(selection.Option.Id, selection.Quantity))
+            .ToArray();
+        var matchingLines = await dbContext.CartItems
+            .Where(item => item.CartId == cartId && item.MenuItemId == request.MenuItemId && item.Note == note)
+            .ToListAsync(cancellationToken);
+        var existingLine = matchingLines.FirstOrDefault(item =>
+            OptionIdsEqual(item.SelectedOptionIds, selectedOptionIds));
 
         if (existingLine is null)
         {
@@ -261,6 +274,7 @@ public class PublicCartsController(
                 MenuItemId = request.MenuItemId,
                 Quantity = request.Quantity,
                 Note = note,
+                SelectedOptionIds = selectedOptionIds,
                 CreatedAt = DateTime.UtcNow
             }, cancellationToken);
         }
@@ -499,6 +513,8 @@ public class PublicCartsController(
         var menuItems = await dbContext.MenuItems
             .AsNoTracking()
             .Include(item => item.Category)
+            .Include(item => item.OptionGroups.Where(group => group.IsActive))
+                .ThenInclude(group => group.Options.Where(option => option.IsAvailable))
             .Where(item => menuItemIds.Contains(item.Id))
             .ToDictionaryAsync(item => item.Id, cancellationToken);
 
@@ -534,17 +550,47 @@ public class PublicCartsController(
                 });
             }
 
-            order.OrderItems.Add(new OrderItem
+            var optionSelection = ValidateOptionSelection(menuItem, cartItem.SelectedOptionIds);
+
+            if (optionSelection.Errors.Count > 0)
+            {
+                return Conflict(new
+                {
+                    message = $"Cart contains invalid options for '{menuItem.Name}'. {string.Join(" ", optionSelection.Errors)}"
+                });
+            }
+
+            var orderItem = new OrderItem
             {
                 Id = Guid.NewGuid(),
                 MenuItemId = menuItem.Id,
                 MenuItemNameSnapshot = menuItem.Name,
                 BasePriceSnapshot = menuItem.Price,
                 Quantity = cartItem.Quantity,
-                UnitPrice = menuItem.Price,
+                UnitPrice = optionSelection.UnitPrice,
                 ItemInstructions = cartItem.Note,
                 CreatedAt = now
-            });
+            };
+
+            foreach (var selectedOption in optionSelection.SelectedOptions)
+            {
+                var option = selectedOption.Option;
+                var groupName = menuItem.OptionGroups
+                    .First(group => group.Id == option.GroupId)
+                    .Name;
+
+                orderItem.SelectedOptions.Add(new OrderItemOption
+                {
+                    MenuItemOptionId = option.Id,
+                    GroupNameSnapshot = groupName,
+                    OptionNameSnapshot = option.Name,
+                    PriceAdjustmentSnapshot = option.PriceAdjustment,
+                    Quantity = selectedOption.Quantity,
+                    CreatedAt = now
+                });
+            }
+
+            order.OrderItems.Add(orderItem);
         }
 
         order.TotalAmount = order.OrderItems.Sum(item => item.Quantity * item.UnitPrice);
@@ -608,6 +654,7 @@ public class PublicCartsController(
 
         var order = await dbContext.Orders
             .Include(item => item.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
             .Include(item => item.Payments)
             .Include(item => item.Restaurant)
             .Include(item => item.Table)
@@ -795,6 +842,8 @@ public class PublicCartsController(
         return await dbContext.Orders
             .AsNoTracking()
             .Include(order => order.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
+            .Include(order => order.Restaurant)
             .Include(order => order.Table)
             .FirstOrDefaultAsync(order => order.Id == orderId, cancellationToken);
     }
@@ -809,6 +858,7 @@ public class PublicCartsController(
             TableNumber = order.Table?.TableNumber,
             CustomerId = order.CustomerId,
             OrderNumber = order.OrderNumber,
+            Currency = string.IsNullOrWhiteSpace(order.Restaurant?.Currency) ? "AUD" : order.Restaurant.Currency,
             OrderType = (int)order.OrderType,
             Status = (int)order.Status,
             PaymentStatus = order.PaymentStatus.ToString(),
@@ -841,7 +891,8 @@ public class PublicCartsController(
                         MenuItemOptionId = option.MenuItemOptionId,
                         GroupNameSnapshot = option.GroupNameSnapshot,
                         OptionNameSnapshot = option.OptionNameSnapshot,
-                        PriceAdjustmentSnapshot = option.PriceAdjustmentSnapshot
+                        PriceAdjustmentSnapshot = option.PriceAdjustmentSnapshot,
+                        Quantity = option.Quantity
                     }).ToList()
                 })
                 .ToList()
@@ -866,6 +917,108 @@ public class PublicCartsController(
     private static string? NormalizeNote(string? note)
     {
         return string.IsNullOrWhiteSpace(note) ? null : note.Trim();
+    }
+
+    private static bool OptionIdsEqual(IReadOnlyList<Guid> first, IReadOnlyList<Guid> second)
+    {
+        if (first.Count != second.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < first.Count; index++)
+        {
+            if (first[index] != second[index])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static CartOptionSelectionResult ValidateOptionSelection(
+        MenuItem menuItem,
+        IEnumerable<Guid>? selectedOptionIds)
+    {
+        var errors = new List<string>();
+        var requestedOptionIds = (selectedOptionIds ?? [])
+            .Where(optionId => optionId != Guid.Empty)
+            .ToList();
+        var requestedOptionCounts = requestedOptionIds
+            .GroupBy(optionId => optionId)
+            .ToDictionary(group => group.Key, group => group.Count());
+        var optionGroups = menuItem.OptionGroups
+            .OrderBy(group => group.DisplayOrder)
+            .ThenBy(group => group.Name)
+            .ToList();
+        var availableOptions = optionGroups
+            .SelectMany(group => group.Options)
+            .ToDictionary(option => option.Id);
+
+        foreach (var optionId in requestedOptionCounts.Keys)
+        {
+            if (!availableOptions.ContainsKey(optionId))
+            {
+                errors.Add($"Option {optionId} is not available for '{menuItem.Name}'.");
+            }
+        }
+
+        var selectedOptions = optionGroups
+            .SelectMany(group => group.Options
+                .OrderBy(option => option.DisplayOrder)
+                .ThenBy(option => option.Name))
+            .Where(option => requestedOptionCounts.ContainsKey(option.Id))
+            .Select(option => new SelectedMenuOption(option, requestedOptionCounts[option.Id]))
+            .ToList();
+
+        foreach (var selection in selectedOptions)
+        {
+            if (selection.Quantity > selection.Option.MaxQuantity)
+            {
+                errors.Add($"'{selection.Option.Name}' allows at most {selection.Option.MaxQuantity} per item.");
+            }
+        }
+
+        foreach (var group in optionGroups)
+        {
+            var selectedInGroup = selectedOptions
+                .Where(selection => selection.Option.GroupId == group.Id)
+                .Sum(selection => selection.Quantity);
+
+            if (group.IsRequired && selectedInGroup < group.MinSelections)
+            {
+                errors.Add($"'{group.Name}' requires at least {group.MinSelections} selection(s) for '{menuItem.Name}'.");
+            }
+
+            if (selectedInGroup > group.MaxSelections)
+            {
+                errors.Add($"'{group.Name}' allows at most {group.MaxSelections} selection(s) for '{menuItem.Name}'.");
+            }
+        }
+
+        var unitPrice = CalculateUnitPrice(menuItem.Price, selectedOptions);
+
+        return new CartOptionSelectionResult(unitPrice, selectedOptions, errors);
+    }
+
+    private static decimal CalculateUnitPrice(decimal basePrice, IEnumerable<SelectedMenuOption> selectedOptions)
+    {
+        var unitPrice = basePrice;
+
+        foreach (var selection in selectedOptions)
+        {
+            var option = selection.Option;
+            unitPrice = option.AdjustmentType switch
+            {
+                OptionAdjustmentType.Add => unitPrice + option.PriceAdjustment * selection.Quantity,
+                OptionAdjustmentType.Remove => unitPrice + option.PriceAdjustment * selection.Quantity,
+                OptionAdjustmentType.Replace => option.PriceAdjustment,
+                _ => unitPrice
+            };
+        }
+
+        return unitPrice;
     }
 
     [HttpPost("{cartId:guid}/payment-session")]
@@ -1042,4 +1195,11 @@ public class PublicCartsController(
         Cart? Cart,
         CartParticipant? Participant,
         IActionResult? ErrorResult);
+
+    private sealed record CartOptionSelectionResult(
+        decimal UnitPrice,
+        IReadOnlyList<SelectedMenuOption> SelectedOptions,
+        List<string> Errors);
+
+    private sealed record SelectedMenuOption(MenuItemOption Option, int Quantity);
 }

@@ -241,9 +241,46 @@ public class AdminMenuItemsController : ControllerBase
                 ImageUrl = item.ImageUrl,
                 IsAvailable = item.IsAvailable,
                 IsSoldOut = item.IsSoldOut,
+                IsVegetarian = item.IsVegetarian,
+                IsVegan = item.IsVegan,
+                IsGlutenFree = item.IsGlutenFree,
+                IsHalal = item.IsHalal,
+                Allergens = item.Allergens,
                 DisplayOrder = item.DisplayOrder,
                 CreatedAt = item.CreatedAt,
-                UpdatedAt = item.UpdatedAt
+                UpdatedAt = item.UpdatedAt,
+                OptionGroups = item.OptionGroups
+                    .OrderBy(group => group.DisplayOrder)
+                    .Select(group => new MenuOptionGroupResponse
+                    {
+                        Id = group.Id,
+                        MenuItemId = group.MenuItemId,
+                        Name = group.Name,
+                        IsRequired = group.IsRequired,
+                        MinSelections = group.MinSelections,
+                        MaxSelections = group.MaxSelections,
+                        DisplayOrder = group.DisplayOrder,
+                        IsActive = group.IsActive,
+                        CreatedAt = group.CreatedAt,
+                        UpdatedAt = group.UpdatedAt,
+                        Options = group.Options
+                            .OrderBy(option => option.DisplayOrder)
+                            .Select(option => new MenuOptionResponse
+                            {
+                                Id = option.Id,
+                                GroupId = option.GroupId,
+                                Name = option.Name,
+                                PriceAdjustment = option.PriceAdjustment,
+                                AdjustmentType = (int)option.AdjustmentType,
+                                MaxQuantity = option.MaxQuantity,
+                                DisplayOrder = option.DisplayOrder,
+                                IsAvailable = option.IsAvailable,
+                                CreatedAt = option.CreatedAt,
+                                UpdatedAt = option.UpdatedAt
+                            })
+                            .ToList()
+                    })
+                    .ToList()
             })
             .ToListAsync(cancellationToken);
 
@@ -605,9 +642,46 @@ public class AdminMenuItemsController : ControllerBase
                 ImageUrl = item.ImageUrl,
                 IsAvailable = item.IsAvailable,
                 IsSoldOut = item.IsSoldOut,
+                IsVegetarian = item.IsVegetarian,
+                IsVegan = item.IsVegan,
+                IsGlutenFree = item.IsGlutenFree,
+                IsHalal = item.IsHalal,
+                Allergens = item.Allergens,
                 DisplayOrder = item.DisplayOrder,
                 CreatedAt = item.CreatedAt,
-                UpdatedAt = item.UpdatedAt
+                UpdatedAt = item.UpdatedAt,
+                OptionGroups = item.OptionGroups
+                    .OrderBy(group => group.DisplayOrder)
+                    .Select(group => new MenuOptionGroupResponse
+                    {
+                        Id = group.Id,
+                        MenuItemId = group.MenuItemId,
+                        Name = group.Name,
+                        IsRequired = group.IsRequired,
+                        MinSelections = group.MinSelections,
+                        MaxSelections = group.MaxSelections,
+                        DisplayOrder = group.DisplayOrder,
+                        IsActive = group.IsActive,
+                        CreatedAt = group.CreatedAt,
+                        UpdatedAt = group.UpdatedAt,
+                        Options = group.Options
+                            .OrderBy(option => option.DisplayOrder)
+                            .Select(option => new MenuOptionResponse
+                            {
+                                Id = option.Id,
+                                GroupId = option.GroupId,
+                                Name = option.Name,
+                                PriceAdjustment = option.PriceAdjustment,
+                                AdjustmentType = (int)option.AdjustmentType,
+                                MaxQuantity = option.MaxQuantity,
+                                DisplayOrder = option.DisplayOrder,
+                                IsAvailable = option.IsAvailable,
+                                CreatedAt = option.CreatedAt,
+                                UpdatedAt = option.UpdatedAt
+                            })
+                            .ToList()
+                    })
+                    .ToList()
             })
             .FirstOrDefaultAsync(cancellationToken);
     }
@@ -798,9 +872,46 @@ public class AdminMenuItemsController : ControllerBase
             ImageUrl = item.ImageUrl,
             IsAvailable = item.IsAvailable,
             IsSoldOut = item.IsSoldOut,
+            IsVegetarian = item.IsVegetarian,
+            IsVegan = item.IsVegan,
+            IsGlutenFree = item.IsGlutenFree,
+            IsHalal = item.IsHalal,
+            Allergens = item.Allergens,
             DisplayOrder = item.DisplayOrder,
             CreatedAt = item.CreatedAt,
-            UpdatedAt = item.UpdatedAt
+            UpdatedAt = item.UpdatedAt,
+            OptionGroups = item.OptionGroups
+                .OrderBy(group => group.DisplayOrder)
+                .Select(group => new MenuOptionGroupResponse
+                {
+                    Id = group.Id,
+                    MenuItemId = group.MenuItemId,
+                    Name = group.Name,
+                    IsRequired = group.IsRequired,
+                    MinSelections = group.MinSelections,
+                    MaxSelections = group.MaxSelections,
+                    DisplayOrder = group.DisplayOrder,
+                    IsActive = group.IsActive,
+                    CreatedAt = group.CreatedAt,
+                    UpdatedAt = group.UpdatedAt,
+                    Options = group.Options
+                        .OrderBy(option => option.DisplayOrder)
+                        .Select(option => new MenuOptionResponse
+                        {
+                            Id = option.Id,
+                            GroupId = option.GroupId,
+                            Name = option.Name,
+                            PriceAdjustment = option.PriceAdjustment,
+                            AdjustmentType = (int)option.AdjustmentType,
+                            MaxQuantity = option.MaxQuantity,
+                            DisplayOrder = option.DisplayOrder,
+                            IsAvailable = option.IsAvailable,
+                            CreatedAt = option.CreatedAt,
+                            UpdatedAt = option.UpdatedAt
+                        })
+                        .ToList()
+                })
+                .ToList()
         };
     }
 }

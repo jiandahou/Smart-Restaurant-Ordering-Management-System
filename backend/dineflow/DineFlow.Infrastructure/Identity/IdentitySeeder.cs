@@ -33,6 +33,17 @@ public static class IdentitySeeder
             ["Gulab Jamun"] = "/seed-menu/gulab-jamun.svg",
             ["Chocolate Lava Cake"] = "/seed-menu/chocolate-lava-cake.svg"
         };
+    private static readonly string[] DemoOrderItemNames =
+    [
+        "Butter Chicken", "Mango Lassi", "Grilled Salmon", "Veg Fried Rice",
+        "Chicken Wings", "Mushroom Pasta", "Paneer Tikka Skewers", "Masala Cola",
+        "Garlic Bread", "Chocolate Lava Cake", "Tandoori Chicken", "Fresh Lime Soda"
+    ];
+    private static readonly decimal[] DemoOrderItemPrices =
+    [
+        24.50m, 8.50m, 32.00m, 18.00m, 16.50m, 22.00m,
+        17.50m, 7.00m, 9.50m, 12.00m, 27.50m, 6.50m
+    ];
 
     public static async Task SeedAsync(IServiceProvider serviceProvider)
     {
@@ -364,6 +375,7 @@ public static class IdentitySeeder
             await UpsertUserAsync(userManager, seedUser, seedPassword);
 
         await SeedPaginationDemoDataAsync(dbContext);
+        await SeedMenuOptionsAsync(dbContext);
     }
 
     private static async Task SeedPaginationDemoDataAsync(AppDbContext dbContext)
@@ -469,13 +481,6 @@ public static class IdentitySeeder
             PaymentStatus.Cancelled,
             PaymentStatus.NotRequired
         };
-        var itemNames = new[]
-        {
-            "Butter Chicken", "Mango Lassi", "Grilled Salmon", "Veg Fried Rice",
-            "Chicken Wings", "Mushroom Pasta", "Paneer Tikka Skewers", "Masala Cola",
-            "Garlic Bread", "Chocolate Lava Cake", "Tandoori Chicken", "Fresh Lime Soda"
-        };
-        var itemPrices = new decimal[] { 24.50m, 8.50m, 32.00m, 18.00m, 16.50m, 22.00m, 17.50m, 7.00m, 9.50m, 12.00m, 27.50m, 6.50m };
         var now = DateTime.UtcNow;
         var newOrders = new List<Order>();
 
@@ -492,11 +497,11 @@ public static class IdentitySeeder
             var restaurantId = orderRestaurantIds[index];
             var orderType = (OrderType)(index % 3);
             var createdAt = now.AddHours(-(index * 7 + index % 5));
-            var firstItemIndex = index % itemNames.Length;
-            var secondItemIndex = (index * 5 + 3) % itemNames.Length;
+            var firstItemIndex = index % DemoOrderItemNames.Length;
+            var secondItemIndex = (index * 5 + 3) % DemoOrderItemNames.Length;
             var firstQuantity = index % 3 + 1;
             var secondQuantity = index % 2 + 1;
-            var totalAmount = firstQuantity * itemPrices[firstItemIndex] + secondQuantity * itemPrices[secondItemIndex];
+            var totalAmount = firstQuantity * DemoOrderItemPrices[firstItemIndex] + secondQuantity * DemoOrderItemPrices[secondItemIndex];
             Guid? tableId = null;
 
             if (orderType == OrderType.DineIn &&
@@ -528,10 +533,10 @@ public static class IdentitySeeder
             {
                 Id = CreateSeedGuid(2, sequence * 2 - 1),
                 OrderId = order.Id,
-                MenuItemNameSnapshot = itemNames[firstItemIndex],
-                BasePriceSnapshot = itemPrices[firstItemIndex],
+                MenuItemNameSnapshot = DemoOrderItemNames[firstItemIndex],
+                BasePriceSnapshot = DemoOrderItemPrices[firstItemIndex],
                 Quantity = firstQuantity,
-                UnitPrice = itemPrices[firstItemIndex],
+                UnitPrice = DemoOrderItemPrices[firstItemIndex],
                 ItemInstructions = index % 9 == 0 ? "Seeded special request" : null,
                 CreatedAt = createdAt
             });
@@ -539,10 +544,10 @@ public static class IdentitySeeder
             {
                 Id = CreateSeedGuid(2, sequence * 2),
                 OrderId = order.Id,
-                MenuItemNameSnapshot = itemNames[secondItemIndex],
-                BasePriceSnapshot = itemPrices[secondItemIndex],
+                MenuItemNameSnapshot = DemoOrderItemNames[secondItemIndex],
+                BasePriceSnapshot = DemoOrderItemPrices[secondItemIndex],
                 Quantity = secondQuantity,
-                UnitPrice = itemPrices[secondItemIndex],
+                UnitPrice = DemoOrderItemPrices[secondItemIndex],
                 CreatedAt = createdAt.AddSeconds(10)
             });
 
@@ -696,6 +701,366 @@ public static class IdentitySeeder
         }
     }
 
+    private static async Task SeedMenuOptionsAsync(AppDbContext dbContext)
+    {
+        var explicitSeeds = BuildSeedMenuOptionGroups();
+        var explicitNames = explicitSeeds
+            .Select(seed => seed.MenuItemName)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var demoItemSequencesById = BuildDemoMenuItemSequences();
+        var demoItemIds = demoItemSequencesById.Keys.ToArray();
+
+        var menuItems = await dbContext.MenuItems
+            .Where(item => explicitNames.Contains(item.Name) || demoItemIds.Contains(item.Id))
+            .Select(item => new
+            {
+                item.Id,
+                item.RestaurantId,
+                item.Name
+            })
+            .ToListAsync();
+
+        if (menuItems.Count == 0)
+        {
+            return;
+        }
+
+        var resolvedSeeds = new List<ResolvedMenuOptionGroupSeed>();
+
+        foreach (var seed in explicitSeeds)
+        {
+            foreach (var menuItem in menuItems.Where(item =>
+                         string.Equals(item.Name, seed.MenuItemName, StringComparison.OrdinalIgnoreCase)))
+            {
+                resolvedSeeds.Add(seed.Resolve(menuItem.Id, menuItem.RestaurantId));
+            }
+        }
+
+        foreach (var menuItem in menuItems.Where(item => demoItemSequencesById.ContainsKey(item.Id)))
+        {
+            if (explicitNames.Contains(menuItem.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var sequence = demoItemSequencesById[menuItem.Id];
+            resolvedSeeds.AddRange(BuildGenericSeedMenuOptionGroups(menuItem.Id, menuItem.RestaurantId, sequence));
+        }
+
+        if (resolvedSeeds.Count == 0)
+        {
+            return;
+        }
+
+        var seededMenuItemIds = resolvedSeeds
+            .Select(seed => seed.MenuItemId)
+            .Distinct()
+            .ToArray();
+        var existingGroups = await dbContext.MenuItemOptionGroups
+            .Include(group => group.Options)
+            .Where(group => seededMenuItemIds.Contains(group.MenuItemId))
+            .ToListAsync();
+        var existingGroupsByKey = existingGroups
+            .GroupBy(group => MenuOptionGroupKey(group.MenuItemId, group.Name))
+            .ToDictionary(group => group.Key, group => group.First());
+        var newGroups = new List<MenuItemOptionGroup>();
+        var newOptions = new List<MenuItemOption>();
+
+        foreach (var seed in resolvedSeeds)
+        {
+            var groupKey = MenuOptionGroupKey(seed.MenuItemId, seed.Name);
+            if (!existingGroupsByKey.TryGetValue(groupKey, out var group))
+            {
+                group = new MenuItemOptionGroup
+                {
+                    Id = CreateSeedGuid(6, seed.Sequence),
+                    MenuItemId = seed.MenuItemId,
+                    RestaurantId = seed.RestaurantId,
+                    Name = seed.Name,
+                    IsRequired = seed.IsRequired,
+                    MinSelections = seed.MinSelections,
+                    MaxSelections = seed.MaxSelections,
+                    DisplayOrder = seed.DisplayOrder,
+                    IsActive = true,
+                    CreatedAt = DateTime.UtcNow.AddDays(-45)
+                };
+
+                existingGroupsByKey[groupKey] = group;
+                newGroups.Add(group);
+            }
+
+            var existingOptionNames = group.Options
+                .Select(option => option.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var optionSeed in seed.Options)
+            {
+                if (existingOptionNames.Contains(optionSeed.Name))
+                {
+                    continue;
+                }
+
+                newOptions.Add(new MenuItemOption
+                {
+                    Id = CreateSeedGuid(7, seed.Sequence * 100 + optionSeed.Sequence),
+                    GroupId = group.Id,
+                    MenuItemId = seed.MenuItemId,
+                    RestaurantId = seed.RestaurantId,
+                    Name = optionSeed.Name,
+                    PriceAdjustment = optionSeed.PriceAdjustment,
+                    AdjustmentType = optionSeed.AdjustmentType,
+                    MaxQuantity = optionSeed.MaxQuantity,
+                    DisplayOrder = optionSeed.DisplayOrder,
+                    IsAvailable = optionSeed.IsAvailable,
+                    CreatedAt = DateTime.UtcNow.AddDays(-44)
+                });
+                existingOptionNames.Add(optionSeed.Name);
+            }
+        }
+
+        if (newGroups.Count > 0)
+        {
+            await dbContext.MenuItemOptionGroups.AddRangeAsync(newGroups);
+        }
+
+        if (newOptions.Count > 0)
+        {
+            await dbContext.MenuItemOptions.AddRangeAsync(newOptions);
+        }
+
+        if (newGroups.Count > 0 || newOptions.Count > 0)
+        {
+            await dbContext.SaveChangesAsync();
+        }
+    }
+
+    private static IReadOnlyList<MenuOptionGroupSeed> BuildSeedMenuOptionGroups() =>
+    [
+        new("Veg Spring Rolls", 900001, "Dip", true, 1, 1, 1,
+        [
+            new(1, "Sweet chilli", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Mint chutney", 20, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Extra spicy dip", 20, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Veg Spring Rolls", 900002, "Add-ons", false, 0, 2, 2,
+        [
+            new(1, "Extra roll", 90, OptionAdjustmentType.Add, 3, 1),
+            new(2, "Sesame sprinkle", 15, OptionAdjustmentType.Add, 1, 2)
+        ]),
+        new("Chicken Wings", 900003, "Sauce", true, 1, 1, 1,
+        [
+            new(1, "Buffalo", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Smoky BBQ", 20, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Honey garlic", 30, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Chicken Wings", 900004, "Heat level", true, 1, 1, 2,
+        [
+            new(1, "Mild", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Hot", 0, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Extra hot", 10, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Garlic Bread", 900005, "Finish", false, 0, 2, 1,
+        [
+            new(1, "Add mozzarella", 80, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Extra garlic butter", 25, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Chilli flakes", 0, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Butter Chicken", 900006, "Spice level", true, 1, 1, 1,
+        [
+            new(1, "Mild", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Medium", 0, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Hot", 0, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Butter Chicken", 900007, "Side", true, 1, 1, 2,
+        [
+            new(1, "Steamed rice", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Butter naan", 120, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Garlic naan", 150, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Butter Chicken", 900008, "Extras", false, 0, 2, 3,
+        [
+            new(1, "Extra chicken", 180, OptionAdjustmentType.Add, 2, 1),
+            new(2, "Extra gravy", 80, OptionAdjustmentType.Add, 2, 2)
+        ]),
+        new("Veg Fried Rice", 900009, "Protein", false, 0, 1, 1,
+        [
+            new(1, "Add egg", 80, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Add paneer", 120, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Add chicken", 160, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Veg Fried Rice", 900010, "Spice level", true, 1, 1, 2,
+        [
+            new(1, "No chilli", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Medium", 0, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Spicy", 0, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Grilled Salmon", 900011, "Doneness", true, 1, 1, 1,
+        [
+            new(1, "Medium", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Medium well", 0, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Well done", 0, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Grilled Salmon", 900012, "Sauce", true, 1, 1, 2,
+        [
+            new(1, "Lemon butter", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Garlic herb", 30, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Chilli glaze", 30, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Grilled Salmon", 900013, "Side", false, 0, 1, 3,
+        [
+            new(1, "Garden salad", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Chips", 80, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Steamed rice", 50, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Mushroom Pasta", 900014, "Sauce base", true, 1, 1, 1,
+        [
+            new(1, "Cream sauce", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Tomato sauce", 0, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Garlic olive oil", 0, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Mushroom Pasta", 900015, "Add-ons", false, 0, 3, 2,
+        [
+            new(1, "Extra mushrooms", 90, OptionAdjustmentType.Add, 2, 1),
+            new(2, "Parmesan", 60, OptionAdjustmentType.Add, 2, 2),
+            new(3, "Truffle oil", 140, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Mango Lassi", 900016, "Size", true, 1, 1, 1,
+        [
+            new(1, "Regular", 200, OptionAdjustmentType.Replace, 1, 1),
+            new(2, "Large", 280, OptionAdjustmentType.Replace, 1, 2)
+        ]),
+        new("Mango Lassi", 900017, "Sweetness", true, 1, 1, 2,
+        [
+            new(1, "Less sweet", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Regular", 0, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Extra sweet", 0, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Masala Chai", 900018, "Milk", true, 1, 1, 1,
+        [
+            new(1, "Regular milk", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Oat milk", 40, OptionAdjustmentType.Add, 1, 2),
+            new(3, "No milk", 0, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Fresh Lime Soda", 900019, "Style", true, 1, 1, 1,
+        [
+            new(1, "Sweet", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Salted", 0, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Sweet and salted", 0, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Fresh Lime Soda", 900020, "Size", true, 1, 1, 2,
+        [
+            new(1, "Regular", 150, OptionAdjustmentType.Replace, 1, 1),
+            new(2, "Large", 210, OptionAdjustmentType.Replace, 1, 2)
+        ]),
+        new("Gulab Jamun", 900021, "Serve with", false, 0, 2, 1,
+        [
+            new(1, "Vanilla ice cream", 90, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Extra syrup", 30, OptionAdjustmentType.Add, 1, 2)
+        ]),
+        new("Chocolate Lava Cake", 900022, "Topping", false, 0, 2, 1,
+        [
+            new(1, "Vanilla ice cream", 90, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Berry compote", 70, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Extra chocolate sauce", 50, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Paneer Tikka Skewers", 900023, "Spice level", true, 1, 1, 1,
+        [
+            new(1, "Mild", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Medium", 0, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Fiery", 15, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Paneer Tikka Skewers", 900024, "Chutney", false, 0, 2, 2,
+        [
+            new(1, "Mint chutney", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Tamarind chutney", 20, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Extra onions", 15, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Corn Cheese Balls", 900025, "Dip", true, 1, 1, 1,
+        [
+            new(1, "Tomato ketchup", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Cheese sauce", 35, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Spicy mayo", 35, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Tandoori Chicken", 900026, "Portion", true, 1, 1, 1,
+        [
+            new(1, "Half", 590, OptionAdjustmentType.Replace, 1, 1),
+            new(2, "Full", 1080, OptionAdjustmentType.Replace, 1, 2)
+        ]),
+        new("Tandoori Chicken", 900027, "Side", false, 0, 2, 2,
+        [
+            new(1, "Roomali roti", 90, OptionAdjustmentType.Add, 2, 1),
+            new(2, "Onion salad", 40, OptionAdjustmentType.Add, 1, 2)
+        ]),
+        new("Smoky Paneer Sizzler", 900028, "Sauce", true, 1, 1, 1,
+        [
+            new(1, "Smoky masala", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Pepper cream", 60, OptionAdjustmentType.Add, 1, 2),
+            new(3, "Chilli garlic", 40, OptionAdjustmentType.Add, 1, 3)
+        ]),
+        new("Rose Falooda", 900029, "Size", true, 1, 1, 1,
+        [
+            new(1, "Regular", 240, OptionAdjustmentType.Replace, 1, 1),
+            new(2, "Large", 320, OptionAdjustmentType.Replace, 1, 2)
+        ]),
+        new("Masala Cola", 900030, "Ice", true, 1, 1, 1,
+        [
+            new(1, "Regular ice", 0, OptionAdjustmentType.Add, 1, 1),
+            new(2, "Less ice", 0, OptionAdjustmentType.Add, 1, 2),
+            new(3, "No ice", 0, OptionAdjustmentType.Add, 1, 3)
+        ])
+    ];
+
+    private static IReadOnlyList<ResolvedMenuOptionGroupSeed> BuildGenericSeedMenuOptionGroups(
+        Guid menuItemId,
+        Guid restaurantId,
+        int menuItemSequence)
+    {
+        var preferenceSequence = menuItemSequence * 10 + 1;
+        var addOnSequence = menuItemSequence * 10 + 2;
+
+        return
+        [
+            new(
+                menuItemId,
+                restaurantId,
+                preferenceSequence,
+                "Preparation",
+                true,
+                1,
+                1,
+                1,
+                [
+                    new(1, "Standard", 0, OptionAdjustmentType.Add, 1, 1),
+                    new(2, "Light seasoning", 0, OptionAdjustmentType.Add, 1, 2),
+                    new(3, "Extra seasoning", 1.00m, OptionAdjustmentType.Add, 1, 3)
+                ]),
+            new(
+                menuItemId,
+                restaurantId,
+                addOnSequence,
+                "Add-ons",
+                false,
+                0,
+                3,
+                2,
+                [
+                    new(1, "Extra sauce", 1.50m, OptionAdjustmentType.Add, 2, 1),
+                    new(2, "Side salad", 4.00m, OptionAdjustmentType.Add, 1, 2),
+                    new(3, "Gluten-free swap", 2.00m, OptionAdjustmentType.Add, 1, 3)
+                ])
+        ];
+    }
+
+    private static IReadOnlyDictionary<Guid, int> BuildDemoMenuItemSequences() =>
+        Enumerable.Range(0, 9)
+            .SelectMany(restaurantIndex => Enumerable.Range(0, 6)
+                .Select(itemIndex => restaurantIndex * 100 + itemIndex + 1))
+            .ToDictionary(sequence => CreateSeedGuid(5, sequence), sequence => sequence);
+
+    private static string MenuOptionGroupKey(Guid menuItemId, string name) =>
+        $"{menuItemId:N}|{name.Trim().ToUpperInvariant()}";
+
     private static Guid CreateSeedGuid(int group, int sequence)
     {
         return Guid.Parse($"d{group:0000000}-0000-0000-0000-{sequence:000000000000}");
@@ -805,6 +1170,49 @@ public static class IdentitySeeder
         string Phone,
         bool IsActive);
 
+    private sealed record MenuOptionGroupSeed(
+        string MenuItemName,
+        int Sequence,
+        string Name,
+        bool IsRequired,
+        int MinSelections,
+        int MaxSelections,
+        int DisplayOrder,
+        IReadOnlyList<MenuOptionSeed> Options)
+    {
+        public ResolvedMenuOptionGroupSeed Resolve(Guid menuItemId, Guid restaurantId) =>
+            new(
+                menuItemId,
+                restaurantId,
+                Sequence,
+                Name,
+                IsRequired,
+                MinSelections,
+                MaxSelections,
+                DisplayOrder,
+                Options);
+    }
+
+    private sealed record ResolvedMenuOptionGroupSeed(
+        Guid MenuItemId,
+        Guid RestaurantId,
+        int Sequence,
+        string Name,
+        bool IsRequired,
+        int MinSelections,
+        int MaxSelections,
+        int DisplayOrder,
+        IReadOnlyList<MenuOptionSeed> Options);
+
+    private sealed record MenuOptionSeed(
+        int Sequence,
+        string Name,
+        decimal PriceAdjustment,
+        OptionAdjustmentType AdjustmentType,
+        int MaxQuantity,
+        int DisplayOrder,
+        bool IsAvailable = true);
+
     private static int GetStableAvatarIndex(string value)
     {
         var sum = value.Aggregate(0, (current, character) => current + character);
@@ -845,39 +1253,109 @@ public static class IdentitySeeder
         var orderItems = await dbContext.OrderItems
             .Where(item => item.MenuItemNameSnapshot == string.Empty && item.MenuItemId.HasValue)
             .ToListAsync();
+        var hasChanges = false;
 
-        if (orderItems.Count == 0)
+        if (orderItems.Count > 0)
         {
-            return;
-        }
+            var menuItemIds = orderItems
+                .Select(item => item.MenuItemId!.Value)
+                .Distinct()
+                .ToArray();
 
-        var menuItemIds = orderItems
-            .Select(item => item.MenuItemId!.Value)
-            .Distinct()
-            .ToArray();
+            var menuItemNamesById = await dbContext.MenuItems
+                .Where(item => menuItemIds.Contains(item.Id))
+                .Select(item => new
+                {
+                    item.Id,
+                    item.Name
+                })
+                .ToDictionaryAsync(item => item.Id, item => item.Name);
 
-        var menuItemNamesById = await dbContext.MenuItems
-            .Where(item => menuItemIds.Contains(item.Id))
-            .Select(item => new
+            foreach (var orderItem in orderItems)
             {
-                item.Id,
-                item.Name
-            })
-            .ToDictionaryAsync(item => item.Id, item => item.Name);
+                if (!orderItem.MenuItemId.HasValue ||
+                    !menuItemNamesById.TryGetValue(orderItem.MenuItemId.Value, out var menuItemName) ||
+                    string.IsNullOrWhiteSpace(menuItemName))
+                {
+                    continue;
+                }
 
-        foreach (var orderItem in orderItems)
-        {
-            if (!orderItem.MenuItemId.HasValue ||
-                !menuItemNamesById.TryGetValue(orderItem.MenuItemId.Value, out var menuItemName) ||
-                string.IsNullOrWhiteSpace(menuItemName))
-            {
-                continue;
+                orderItem.MenuItemNameSnapshot = menuItemName;
+                orderItem.UpdatedAt = DateTime.UtcNow;
+                hasChanges = true;
             }
-
-            orderItem.MenuItemNameSnapshot = menuItemName;
-            orderItem.UpdatedAt = DateTime.UtcNow;
         }
 
-        await dbContext.SaveChangesAsync();
+        var demoOrders = await dbContext.Orders
+            .Include(order => order.OrderItems)
+            .Where(order => order.OrderNumber.StartsWith("DEMO-") &&
+                order.OrderItems.Any(item => item.MenuItemNameSnapshot == string.Empty))
+            .ToListAsync();
+
+        foreach (var order in demoOrders)
+        {
+            var orderedItems = order.OrderItems
+                .OrderBy(item => item.CreatedAt)
+                .ThenBy(item => item.Id)
+                .ToList();
+
+            for (var itemIndex = 0; itemIndex < orderedItems.Count; itemIndex++)
+            {
+                var orderItem = orderedItems[itemIndex];
+                if (!string.IsNullOrWhiteSpace(orderItem.MenuItemNameSnapshot) ||
+                    !TryGetDemoOrderItemSnapshot(order.OrderNumber, itemIndex, out var itemName, out var basePrice))
+                {
+                    continue;
+                }
+
+                orderItem.MenuItemNameSnapshot = itemName;
+                if (orderItem.BasePriceSnapshot <= 0)
+                {
+                    orderItem.BasePriceSnapshot = basePrice;
+                }
+
+                orderItem.UpdatedAt = DateTime.UtcNow;
+                hasChanges = true;
+            }
+        }
+
+        if (hasChanges)
+        {
+            await dbContext.SaveChangesAsync();
+        }
+    }
+
+    private static bool TryGetDemoOrderItemSnapshot(
+        string orderNumber,
+        int itemIndex,
+        out string itemName,
+        out decimal basePrice)
+    {
+        itemName = string.Empty;
+        basePrice = 0;
+
+        if (!orderNumber.StartsWith("DEMO-", StringComparison.OrdinalIgnoreCase) ||
+            !int.TryParse(orderNumber["DEMO-".Length..], out var sequence) ||
+            sequence < 1)
+        {
+            return false;
+        }
+
+        var orderIndex = sequence - 1;
+        var itemNameIndex = itemIndex switch
+        {
+            0 => orderIndex % DemoOrderItemNames.Length,
+            1 => (orderIndex * 5 + 3) % DemoOrderItemNames.Length,
+            _ => -1
+        };
+
+        if (itemNameIndex < 0)
+        {
+            return false;
+        }
+
+        itemName = DemoOrderItemNames[itemNameIndex];
+        basePrice = DemoOrderItemPrices[itemNameIndex];
+        return true;
     }
 }

@@ -4,15 +4,18 @@ import {
   ClipboardList,
   CreditCard,
   LayoutDashboard,
+  LogIn,
   LogOut,
   ShieldCheck,
+  ShoppingBag,
   Store,
   UsersRound,
   Utensils,
   UserRound,
+  UserPlus,
 } from 'lucide-react'
 import { motion } from 'motion/react'
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useAuth } from '../auth/AuthContext'
 import { Avatar, AvatarFallback, AvatarImage } from '../components/ui/avatar'
@@ -44,10 +47,11 @@ function getInitials(name?: string | null, email?: string | null) {
 }
 
 export function AppLayout() {
-  const { user, logout, hasAnyRole } = useAuth()
+  const { user, token, logout, hasAnyRole } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('idle')
+  const isSignedIn = Boolean(token)
   const canUseAdminArea = hasAnyRole(consoleRoles)
   const canUseAdminTools = hasAnyRole(adminRoles)
   const canUseStaffOrders = hasAnyRole(restaurantStaffRoles)
@@ -96,14 +100,20 @@ export function AppLayout() {
               <AvatarFallback>{getInitials(user?.fullName, user?.email)}</AvatarFallback>
             </Avatar>
             <div className="navbar-user-copy">
-              <strong>{user?.fullName || 'Not set'}</strong>
-              <span>{user?.email}</span>
+              <strong>{user?.fullName || (isSignedIn ? 'Not set' : 'Guest')}</strong>
+              <span>{user?.email || 'Browser order tracking'}</span>
             </div>
           </div>
-          <NavLink to="/me" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
-            <UserRound size={18} />
-            Profile
+          <NavLink to="/my-orders" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+            <ShoppingBag size={18} />
+            My Orders
           </NavLink>
+          {isSignedIn && (
+            <NavLink to="/me" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+              <UserRound size={18} />
+              Profile
+            </NavLink>
+          )}
           {canUseAdminArea && (
             <>
               {canUseStaffOrders && (
@@ -167,17 +177,36 @@ export function AppLayout() {
               </svg>
             </span>
           </Button>
-          <Button type="button" variant="ghost" onClick={handleLogout}>
-            <LogOut size={18} />
-            Sign out
-          </Button>
+          {isSignedIn ? (
+            <Button type="button" variant="ghost" onClick={handleLogout}>
+              <LogOut size={18} />
+              Sign out
+            </Button>
+          ) : (
+            <>
+              <Button type="button" variant="ghost" asChild>
+                <Link to="/login">
+                  <LogIn size={18} />
+                  Log in
+                </Link>
+              </Button>
+              <Button type="button" variant="outline" asChild>
+                <Link to="/register">
+                  <UserPlus size={18} />
+                  Register
+                </Link>
+              </Button>
+            </>
+          )}
         </nav>
       </header>
 
-      <section className="identity-strip">
-        <span>{user?.email}</span>
-        <span>{user?.roles.join(', ')}</span>
-      </section>
+      {isSignedIn && (
+        <section className="identity-strip">
+          <span>{user?.email}</span>
+          <span>{user?.roles.join(', ')}</span>
+        </section>
+      )}
 
       {canUseAdminArea && isAdminArea && (
         <nav className="admin-shell-nav" aria-label="Admin area">

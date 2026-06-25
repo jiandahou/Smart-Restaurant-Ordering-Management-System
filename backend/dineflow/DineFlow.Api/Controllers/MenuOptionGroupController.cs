@@ -165,6 +165,22 @@ public class MenuOptionGroupController : ControllerBase
         return NoContent();
     }
 
+    [HttpDelete("{groupId:guid}")]
+    public async Task<IActionResult> DeleteGroup(Guid itemId, Guid groupId)
+    {
+        var group = await _db.MenuItemOptionGroups
+            .FirstOrDefaultAsync(g => g.Id == groupId && g.MenuItemId == itemId);
+
+        if (group is null) return NotFound(new { message = "Option group not found." });
+
+        var item = await LoadItemForTenantAsync(itemId);
+        if (item is null) return Forbid();
+
+        _db.MenuItemOptionGroups.Remove(group);
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
     // ── option endpoints ─────────────────────────────────────────────────────
 
     [HttpGet("{groupId:guid}/options")]
@@ -269,6 +285,22 @@ public class MenuOptionGroupController : ControllerBase
 
         option.IsAvailable = false;
         option.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    [HttpDelete("{groupId:guid}/options/{optionId:guid}")]
+    public async Task<IActionResult> DeleteOption(Guid itemId, Guid groupId, Guid optionId)
+    {
+        var option = await _db.MenuItemOptions
+            .FirstOrDefaultAsync(o => o.Id == optionId && o.GroupId == groupId && o.MenuItemId == itemId);
+
+        if (option is null) return NotFound(new { message = "Option not found." });
+
+        var item = await LoadItemForTenantAsync(itemId);
+        if (item is null) return Forbid();
+
+        _db.MenuItemOptions.Remove(option);
         await _db.SaveChangesAsync();
         return NoContent();
     }

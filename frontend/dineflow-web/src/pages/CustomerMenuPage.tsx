@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   AlertCircle,
   ArrowRight,
+  Check,
   ClipboardList,
   ChevronDown,
   ChevronUp,
@@ -44,6 +45,8 @@ import {
   type PublicMenu,
   type PublicMenuCategory,
   type PublicMenuItem,
+  type PublicMenuOption,
+  type PublicMenuOptionGroup,
   type PublicOrderingContext,
 } from '@/api/publicMenu'
 import { createCartRealtimeClient, type CartRealtimeClient } from '@/realtime/cartConnection'
@@ -80,6 +83,7 @@ import {
 } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
+import { rememberGuestOrder } from '@/lib/guestOrders'
 import { cn } from '@/lib/utils'
 
 type StoredCartSession = {
@@ -135,6 +139,7 @@ export function CustomerMenuPage() {
   const [selectedItem, setSelectedItem] = useState<PublicMenuItem | null>(null)
   const [selectedItemQuantity, setSelectedItemQuantity] = useState(1)
   const [selectedItemNote, setSelectedItemNote] = useState('')
+  const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([])
   const [cartActivityBanners, setCartActivityBanners] = useState<Array<CartActivityBanner | null>>(
     Array.from({ length: cartActivityBannerLaneCount }, () => null),
   )
@@ -402,7 +407,10 @@ export function CustomerMenuPage() {
             return true
           }
 
-          return [item.name, item.description ?? '']
+          const optionText = getAvailableOptionGroups(item)
+            .flatMap((group) => [group.name, ...group.options.map((option) => option.name)])
+
+          return [item.name, item.description ?? '', ...optionText]
             .join(' ')
             .toLowerCase()
             .includes(normalizedSearch)
@@ -545,6 +553,7 @@ export function CustomerMenuPage() {
     setSelectedItem(item)
     setSelectedItemQuantity(1)
     setSelectedItemNote('')
+    setSelectedOptionIds(getDefaultSelectedOptionIds(item))
   }
 
   const closeItemDetail = () => {
@@ -552,22 +561,25 @@ export function CustomerMenuPage() {
       setSelectedItem(null)
       setSelectedItemQuantity(1)
       setSelectedItemNote('')
+      setSelectedOptionIds([])
     }
   }
 
-  const addItem = async (item: PublicMenuItem, quantity = 1, note = '') => {
+  const addItem = async (item: PublicMenuItem, quantity = 1, note = '', optionIds: string[] = []) => {
     if (item.isSoldOut || !item.isAvailable || addingItemId) {
       return false
     }
 
     setAddingItemId(item.id)
     const normalizedNote = note.trim()
+    const normalizedOptionIds = getOrderedSelectedOptionIds(item, optionIds)
 
     try {
       const updatedCart = await addCartItem(cart.id, participantToken, {
         menuItemId: item.id,
         quantity,
         ...(normalizedNote ? { note: normalizedNote } : {}),
+        ...(normalizedOptionIds.length > 0 ? { selectedOptionIds: normalizedOptionIds } : {}),
       })
       latestCartRef.current = updatedCart
       setState((current) =>
@@ -589,11 +601,38 @@ export function CustomerMenuPage() {
       return
     }
 
-    const added = await addItem(selectedItem, selectedItemQuantity, selectedItemNote)
+    const validationMessage = getOptionSelectionError(selectedItem, selectedOptionIds)
+
+    if (validationMessage) {
+      toast.error(validationMessage)
+      return
+    }
+
+    const added = await addItem(selectedItem, selectedItemQuantity, selectedItemNote, selectedOptionIds)
 
     if (added) {
       closeItemDetail()
     }
+  }
+
+  const toggleSelectedOption = (group: PublicMenuOptionGroup, option: PublicMenuOption) => {
+    if (!selectedItem || addingItemId) {
+      return
+    }
+
+    setSelectedOptionIds((current) => toggleOptionSelection(current, group, option))
+  }
+
+  const changeSelectedOptionQuantity = (
+    group: PublicMenuOptionGroup,
+    option: PublicMenuOption,
+    quantity: number,
+  ) => {
+    if (!selectedItem || addingItemId) {
+      return
+    }
+
+    setSelectedOptionIds((current) => setOptionQuantity(current, group, option, quantity))
   }
 
   const updateCartLineQuantity = async (item: CartItem, nextQuantity: number) => {
@@ -651,6 +690,7 @@ export function CustomerMenuPage() {
     setCheckingOut(true)
     try {
       const result = await checkoutCart(cart.id, participantToken)
+      rememberGuestOrder(result.order.id)
       navigate('/checkout', {
         state: {
           order: result.order,
@@ -795,11 +835,14 @@ export function CustomerMenuPage() {
         item={selectedItem}
         quantity={selectedItemQuantity}
         note={selectedItemNote}
+        selectedOptionIds={selectedOptionIds}
         currencyFormatter={currencyFormatter}
         isAdding={selectedItem ? addingItemId === selectedItem.id : false}
         onClose={closeItemDetail}
         onQuantityChange={setSelectedItemQuantity}
         onNoteChange={setSelectedItemNote}
+        onToggleOption={toggleSelectedOption}
+        onOptionQuantityChange={changeSelectedOptionQuantity}
         onAddToCart={addSelectedItem}
       />
 
@@ -909,7 +952,170 @@ function detectCartAddition(previousCart: Cart, nextCart: Cart) {
 }
 
 function getCartItemKey(item: CartItem) {
-  return `${item.menuItemId}:${item.note ?? ''}`
+  const optionKey = item.selectedOptions
+    .map((option) => `${option.menuItemOptionId ?? `${option.groupNameSnapshot}:${option.optionNameSnapshot}`}×${option.quantity ?? 1}`)
+    .join(',')
+
+  return `${item.menuItemId}:${optionKey}:${item.note ?? ''}`
+}
+
+function getAvailableOptionGroups(item: PublicMenuItem) {
+  return [...(item.optionGroups ?? [])]
+    .filter((group) => group.isActive && group.options.some((option) => option.isAvailable))
+    .sort((first, second) => first.displayOrder - second.displayOrder || first.name.localeCompare(second.name))
+    .map((group) => ({
+      ...group,
+      options: [...group.options]
+        .filter((option) => option.isAvailable)
+        .sort((first, second) => first.displayOrder - second.displayOrder || first.name.localeCompare(second.name)),
+    }))
+}
+
+function getDefaultSelectedOptionIds(item: PublicMenuItem) {
+  return getAvailableOptionGroups(item)
+    .flatMap((group) => {
+      if (!group.isRequired) {
+        return []
+      }
+
+      const selectedIds: string[] = []
+      for (const option of group.options) {
+        const remainingSelections = group.minSelections - selectedIds.length
+        if (remainingSelections <= 0) {
+          break
+        }
+
+        selectedIds.push(...Array.from(
+          { length: Math.min(option.maxQuantity, remainingSelections) },
+          () => option.id,
+        ))
+      }
+
+      return selectedIds
+    })
+}
+
+function getOptionQuantity(selectedOptionIds: string[], optionId: string) {
+  return selectedOptionIds.filter((selectedOptionId) => selectedOptionId === optionId).length
+}
+
+function getSelectedCountInGroup(selectedOptionIds: string[], group: PublicMenuOptionGroup) {
+  const groupOptionIds = new Set(group.options.map((option) => option.id))
+  return selectedOptionIds.filter((optionId) => groupOptionIds.has(optionId)).length
+}
+
+function getOrderedSelectedOptions(item: PublicMenuItem, selectedOptionIds: string[]) {
+  const selectedQuantities = selectedOptionIds.reduce<Map<string, number>>((map, optionId) => {
+    map.set(optionId, (map.get(optionId) ?? 0) + 1)
+    return map
+  }, new Map())
+
+  return getAvailableOptionGroups(item)
+    .flatMap((group) => group.options.map((option) => ({ group, option })))
+    .flatMap(({ group, option }) => {
+      const quantity = selectedQuantities.get(option.id) ?? 0
+      return quantity > 0 ? [{ group, option, quantity }] : []
+    })
+}
+
+function getOrderedSelectedOptionIds(item: PublicMenuItem, selectedOptionIds: string[]) {
+  return getOrderedSelectedOptions(item, selectedOptionIds)
+    .flatMap(({ option, quantity }) => Array.from({ length: quantity }, () => option.id))
+}
+
+function setOptionQuantity(
+  selectedOptionIds: string[],
+  group: PublicMenuOptionGroup,
+  option: PublicMenuOption,
+  nextQuantity: number,
+) {
+  if (group.maxSelections <= 1) {
+    const groupOptionIds = new Set(group.options.map((entry) => entry.id))
+    const withoutGroup = selectedOptionIds.filter((optionId) => !groupOptionIds.has(optionId))
+    return nextQuantity > 0 ? [...withoutGroup, option.id] : withoutGroup
+  }
+
+  const currentQuantity = getOptionQuantity(selectedOptionIds, option.id)
+  const selectedInGroup = getSelectedCountInGroup(selectedOptionIds, group)
+  const availableGroupSlots = group.maxSelections - (selectedInGroup - currentQuantity)
+  const clampedQuantity = Math.max(0, Math.min(nextQuantity, option.maxQuantity, availableGroupSlots))
+  const withoutOption = selectedOptionIds.filter((optionId) => optionId !== option.id)
+
+  return [
+    ...withoutOption,
+    ...Array.from({ length: clampedQuantity }, () => option.id),
+  ]
+}
+
+function toggleOptionSelection(
+  selectedOptionIds: string[],
+  group: PublicMenuOptionGroup,
+  option: PublicMenuOption,
+) {
+  const currentQuantity = getOptionQuantity(selectedOptionIds, option.id)
+  return setOptionQuantity(selectedOptionIds, group, option, currentQuantity > 0 ? 0 : 1)
+}
+
+function getOptionSelectionError(item: PublicMenuItem, selectedOptionIds: string[]) {
+  for (const group of getAvailableOptionGroups(item)) {
+    const selectedInGroup = getSelectedCountInGroup(selectedOptionIds, group)
+
+    if (group.isRequired && selectedInGroup < group.minSelections) {
+      return `${group.name} requires at least ${group.minSelections} selection${group.minSelections === 1 ? '' : 's'}.`
+    }
+
+    if (selectedInGroup > group.maxSelections) {
+      return `${group.name} allows at most ${group.maxSelections} selection${group.maxSelections === 1 ? '' : 's'}.`
+    }
+
+    for (const option of group.options) {
+      const selectedQuantity = getOptionQuantity(selectedOptionIds, option.id)
+      if (selectedQuantity > option.maxQuantity) {
+        return `${option.name} allows at most ${option.maxQuantity}.`
+      }
+    }
+  }
+
+  return null
+}
+
+function calculateItemUnitPrice(item: PublicMenuItem, selectedOptionIds: string[]) {
+  return getOrderedSelectedOptions(item, selectedOptionIds)
+    .reduce((unitPrice, { option, quantity }) => {
+      if (option.adjustmentType === 2) {
+        return option.priceAdjustment
+      }
+
+      return unitPrice + option.priceAdjustment * quantity
+    }, item.price)
+}
+
+function getSelectionRule(group: PublicMenuOptionGroup) {
+  if (group.minSelections === group.maxSelections) {
+    return group.minSelections === 1 ? 'Choose 1' : `Choose ${group.minSelections}`
+  }
+
+  if (group.minSelections === 0) {
+    return `Up to ${group.maxSelections}`
+  }
+
+  return `Choose ${group.minSelections}-${group.maxSelections}`
+}
+
+function getOptionAdjustmentLabel(option: PublicMenuOption, currencyFormatter: Intl.NumberFormat) {
+  if (option.adjustmentType === 2) {
+    return `Set ${currencyFormatter.format(option.priceAdjustment)}`
+  }
+
+  if (option.priceAdjustment === 0) {
+    return 'Included'
+  }
+
+  if (option.adjustmentType === 1 || option.priceAdjustment < 0) {
+    return currencyFormatter.format(option.priceAdjustment)
+  }
+
+  return `+${currencyFormatter.format(option.priceAdjustment)}`
 }
 
 function CartActivityBannerView({ banner }: { banner: CartActivityBanner }) {
@@ -1116,21 +1322,27 @@ function ItemDetailOverlay({
   item,
   quantity,
   note,
+  selectedOptionIds,
   currencyFormatter,
   isAdding,
   onClose,
   onQuantityChange,
   onNoteChange,
+  onToggleOption,
+  onOptionQuantityChange,
   onAddToCart,
 }: {
   item: PublicMenuItem | null
   quantity: number
   note: string
+  selectedOptionIds: string[]
   currencyFormatter: Intl.NumberFormat
   isAdding: boolean
   onClose: () => void
   onQuantityChange: (quantity: number) => void
   onNoteChange: (note: string) => void
+  onToggleOption: (group: PublicMenuOptionGroup, option: PublicMenuOption) => void
+  onOptionQuantityChange: (group: PublicMenuOptionGroup, option: PublicMenuOption, quantity: number) => void
   onAddToCart: () => Promise<void> | void
 }) {
   const isMobile = useIsMobile()
@@ -1147,7 +1359,9 @@ function ItemDetailOverlay({
 
   const description = item.isSoldOut || !item.isAvailable
     ? 'This item is currently unavailable.'
-    : 'Choose quantity and add optional item notes.'
+    : item.optionGroups?.length
+      ? 'Choose your options, quantity, and any item notes.'
+      : 'Choose quantity and add optional item notes.'
 
   if (isMobile) {
     return (
@@ -1161,10 +1375,13 @@ function ItemDetailOverlay({
             item={item}
             quantity={quantity}
             note={note}
+            selectedOptionIds={selectedOptionIds}
             currencyFormatter={currencyFormatter}
             isAdding={isAdding}
             onQuantityChange={onQuantityChange}
             onNoteChange={onNoteChange}
+            onToggleOption={onToggleOption}
+            onOptionQuantityChange={onOptionQuantityChange}
             onAddToCart={onAddToCart}
             className="min-h-0 overflow-y-auto px-4 pb-4"
           />
@@ -1184,10 +1401,13 @@ function ItemDetailOverlay({
           item={item}
           quantity={quantity}
           note={note}
+          selectedOptionIds={selectedOptionIds}
           currencyFormatter={currencyFormatter}
           isAdding={isAdding}
           onQuantityChange={onQuantityChange}
           onNoteChange={onNoteChange}
+          onToggleOption={onToggleOption}
+          onOptionQuantityChange={onOptionQuantityChange}
           onAddToCart={onAddToCart}
           className="max-h-[calc(90svh-5.5rem)] overflow-y-auto px-5 pb-5"
         />
@@ -1200,26 +1420,36 @@ function ItemDetailContent({
   item,
   quantity,
   note,
+  selectedOptionIds,
   currencyFormatter,
   isAdding,
   onQuantityChange,
   onNoteChange,
+  onToggleOption,
+  onOptionQuantityChange,
   onAddToCart,
   className,
 }: {
   item: PublicMenuItem
   quantity: number
   note: string
+  selectedOptionIds: string[]
   currencyFormatter: Intl.NumberFormat
   isAdding: boolean
   onQuantityChange: (quantity: number) => void
   onNoteChange: (note: string) => void
+  onToggleOption: (group: PublicMenuOptionGroup, option: PublicMenuOption) => void
+  onOptionQuantityChange: (group: PublicMenuOptionGroup, option: PublicMenuOption, quantity: number) => void
   onAddToCart: () => Promise<void> | void
   className?: string
 }) {
   const disabled = item.isSoldOut || !item.isAvailable
   const imageUrl = resolvePublicAssetUrl(item.imageUrl)
-  const lineTotal = item.price * quantity
+  const optionGroups = getAvailableOptionGroups(item)
+  const selectedOptions = getOrderedSelectedOptions(item, selectedOptionIds)
+  const optionSelectionError = getOptionSelectionError(item, selectedOptionIds)
+  const unitPrice = calculateItemUnitPrice(item, selectedOptionIds)
+  const lineTotal = unitPrice * quantity
 
   return (
     <div className={cn('space-y-5', className)}>
@@ -1261,7 +1491,131 @@ function ItemDetailContent({
             ) : (
               <p className="text-sm text-muted-foreground">No description provided.</p>
             )}
+            {selectedOptions.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {selectedOptions.map(({ group, option, quantity: optionQuantity }) => (
+                  <Badge key={option.id} variant="secondary" className="h-auto rounded-full px-2 py-1 text-xs">
+                    {group.name}: {option.name}
+                    {optionQuantity > 1 ? ` ×${optionQuantity}` : ''}
+                  </Badge>
+                ))}
+              </div>
+            ) : null}
           </div>
+
+          {optionGroups.length > 0 ? (
+            <div className="space-y-3">
+              {optionGroups.map((group) => {
+                const selectedInGroup = getSelectedCountInGroup(selectedOptionIds, group)
+                const maxReached = selectedInGroup >= group.maxSelections
+
+                return (
+                  <div key={group.id} className="rounded-lg border bg-muted/20 p-3">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="font-medium leading-tight">{group.name}</p>
+                        <p className="text-xs text-muted-foreground">{getSelectionRule(group)}</p>
+                      </div>
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          'rounded-full',
+                          group.isRequired
+                            ? 'border-amber-300 bg-amber-50 text-amber-900'
+                            : 'bg-muted/50 text-muted-foreground',
+                        )}
+                      >
+                        {group.isRequired ? 'Required' : 'Optional'}
+                      </Badge>
+                    </div>
+
+                    <div className="grid gap-2">
+                      {group.options.map((option) => {
+                        const selectedQuantity = getOptionQuantity(selectedOptionIds, option.id)
+                        const selected = selectedQuantity > 0
+                        const optionDisabled = disabled || isAdding || (!selected && maxReached)
+                        const canDecrease = selected && !disabled && !isAdding
+                        const canIncrease = !disabled &&
+                          !isAdding &&
+                          selected &&
+                          selectedQuantity < option.maxQuantity &&
+                          selectedInGroup < group.maxSelections
+
+                        return (
+                          <div
+                            key={option.id}
+                            className={cn(
+                              'flex min-h-12 w-full items-center justify-between gap-3 rounded-lg border bg-background px-3 py-2 text-left transition-colors',
+                              selected && 'border-primary bg-primary/5',
+                              optionDisabled && 'cursor-not-allowed opacity-55',
+                            )}
+                          >
+                            <button
+                              type="button"
+                              className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                              disabled={optionDisabled}
+                              onClick={() => onToggleOption(group, option)}
+                            >
+                              <span className={cn(
+                                'flex size-5 shrink-0 items-center justify-center rounded-full border',
+                                selected ? 'border-primary bg-primary text-primary-foreground' : 'bg-background',
+                              )}>
+                                {selected ? <Check className="size-3" /> : null}
+                              </span>
+                              <span className="min-w-0">
+                                <span className="block truncate text-sm font-semibold">{option.name}</span>
+                                {option.maxQuantity > 1 ? (
+                                  <span className="block text-xs text-muted-foreground">Max {option.maxQuantity}</span>
+                                ) : null}
+                              </span>
+                            </button>
+                            <span className="flex shrink-0 items-center gap-2 text-sm font-semibold text-muted-foreground">
+                              {selected && option.maxQuantity > 1 ? (
+                                <span className="flex items-center gap-1 rounded-full border bg-muted/40 p-0.5">
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="size-7"
+                                    disabled={!canDecrease}
+                                    aria-label={`Decrease ${option.name}`}
+                                    onClick={() => onOptionQuantityChange(group, option, selectedQuantity - 1)}
+                                  >
+                                    <Minus className="size-3.5" />
+                                  </Button>
+                                  <span className="min-w-5 text-center text-xs font-semibold text-foreground">
+                                    {selectedQuantity}
+                                  </span>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="size-7"
+                                    disabled={!canIncrease}
+                                    aria-label={`Increase ${option.name}`}
+                                    onClick={() => onOptionQuantityChange(group, option, selectedQuantity + 1)}
+                                  >
+                                    <Plus className="size-3.5" />
+                                  </Button>
+                                </span>
+                              ) : null}
+                              <span>{getOptionAdjustmentLabel(option, currencyFormatter)}</span>
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )
+              })}
+              {optionSelectionError ? (
+                <p className="flex items-center gap-1.5 rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  <AlertCircle className="size-4" />
+                  {optionSelectionError}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
 
           <div className="space-y-2">
             <p className="text-sm font-medium">Quantity</p>
@@ -1318,7 +1672,7 @@ function ItemDetailContent({
         <Button
           type="button"
           className="h-12 w-full rounded-lg text-base"
-          disabled={disabled || isAdding}
+          disabled={disabled || isAdding || Boolean(optionSelectionError)}
           onClick={() => void onAddToCart()}
         >
           {isAdding ? (
@@ -1606,6 +1960,28 @@ function CartSummaryLine({
           <p className="text-sm text-muted-foreground">
             {item.quantity} x {currencyFormatter.format(item.unitPrice)}
           </p>
+          {item.selectedOptions.length > 0 ? (
+            <div className="space-y-1 rounded-md bg-muted/35 px-2 py-1.5 text-sm text-muted-foreground">
+              {item.selectedOptions.map((option) => (
+                <div
+                  key={`${option.menuItemOptionId ?? `${option.groupNameSnapshot}:${option.optionNameSnapshot}`}×${option.quantity ?? 1}`}
+                  className="flex items-center justify-between gap-2"
+                >
+                  <span className="min-w-0 truncate">
+                    {option.groupNameSnapshot}: {option.optionNameSnapshot}
+                    {(option.quantity ?? 1) > 1 ? ` ×${option.quantity ?? 1}` : ''}
+                  </span>
+                  <span className="shrink-0">
+                    {option.priceAdjustmentSnapshot === 0
+                      ? 'Included'
+                      : option.priceAdjustmentSnapshot * (option.quantity ?? 1) > 0
+                        ? `+${currencyFormatter.format(option.priceAdjustmentSnapshot * (option.quantity ?? 1))}`
+                        : currencyFormatter.format(option.priceAdjustmentSnapshot * (option.quantity ?? 1))}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
           {item.note ? (
             <p className="line-clamp-2 rounded-md bg-muted/50 px-2 py-1 text-sm text-muted-foreground">
               {item.note}

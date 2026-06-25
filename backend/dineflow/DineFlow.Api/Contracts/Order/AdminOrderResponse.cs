@@ -66,6 +66,23 @@ public sealed class AdminOrderItemResponse
     public decimal TotalPrice { get; set; }
 
     public string? Note { get; set; }
+
+    public List<AdminOrderItemOptionResponse> SelectedOptions { get; set; } = [];
+}
+
+public sealed class AdminOrderItemOptionResponse
+{
+    public Guid Id { get; set; }
+
+    public Guid? MenuItemOptionId { get; set; }
+
+    public string GroupNameSnapshot { get; set; } = string.Empty;
+
+    public string OptionNameSnapshot { get; set; } = string.Empty;
+
+    public decimal PriceAdjustmentSnapshot { get; set; }
+
+    public int Quantity { get; set; } = 1;
 }
 
 public sealed class AdminOrderPaymentResponse

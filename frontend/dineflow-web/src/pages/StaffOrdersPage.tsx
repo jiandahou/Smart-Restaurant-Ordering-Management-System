@@ -68,6 +68,17 @@ function getOrderScope(order: AdminOrder) {
   return order.orderType
 }
 
+function groupSelectedOptions(item: AdminOrder['items'][number]) {
+  const grouped = new Map<string, AdminOrder['items'][number]['selectedOptions']>()
+
+  for (const option of item.selectedOptions ?? []) {
+    const groupName = option.groupNameSnapshot || 'Options'
+    grouped.set(groupName, [...(grouped.get(groupName) ?? []), option])
+  }
+
+  return Array.from(grouped, ([groupName, options]) => ({ groupName, options }))
+}
+
 export function StaffOrdersPage() {
   const { user } = useAuth()
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
@@ -330,12 +341,48 @@ export function StaffOrdersPage() {
                       </CardHeader>
                       <CardContent className="space-y-4">
                         <div className="space-y-2">
-                          {order.items.map((item) => (
-                            <div key={item.id} className="flex justify-between gap-3 text-sm">
-                              <span><strong>{item.quantity}x</strong> {item.itemNameSnapshot}</span>
-                              <span>{formatMoney(item.totalPrice, order.currency)}</span>
-                            </div>
-                          ))}
+                          {order.items.map((item) => {
+                            const optionGroups = groupSelectedOptions(item)
+                            const itemName = item.itemNameSnapshot?.trim() || 'Unnamed item'
+
+                            return (
+                              <div key={item.id} className="rounded-lg border bg-muted/20 p-3">
+                                <div className="flex justify-between gap-3 text-sm">
+                                  <span className="font-medium text-foreground">
+                                    <strong>{item.quantity}x</strong> {itemName}
+                                  </span>
+                                  <span className="font-medium">{formatMoney(item.totalPrice, order.currency)}</span>
+                                </div>
+
+                                {optionGroups.length > 0 ? (
+                                  <div className="mt-2 space-y-1.5 border-l pl-3">
+                                    {optionGroups.map((group) => (
+                                      <div key={group.groupName} className="flex flex-wrap items-center gap-1.5 text-xs">
+                                        <span className="font-semibold text-muted-foreground">{group.groupName}</span>
+                                        {group.options.map((option) => (
+                                          <Badge key={option.id} variant="outline" className="h-auto rounded-md px-2 py-0.5 text-[11px] font-medium">
+                                            {option.optionNameSnapshot}
+                                            {(option.quantity ?? 1) > 1 ? ` ×${option.quantity ?? 1}` : ''}
+                                            {option.priceAdjustmentSnapshot !== 0 ? (
+                                              <span className="ml-1 text-muted-foreground">
+                                                {formatOptionAdjustment(option.priceAdjustmentSnapshot * (option.quantity ?? 1), order.currency)}
+                                              </span>
+                                            ) : null}
+                                          </Badge>
+                                        ))}
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : null}
+
+                                {item.note ? (
+                                  <div className="mt-2 rounded-md bg-background/80 px-2 py-1 text-xs text-muted-foreground">
+                                    <strong>Item note: </strong>{item.note}
+                                  </div>
+                                ) : null}
+                              </div>
+                            )
+                          })}
                         </div>
 
                         {order.customerNote ? (
@@ -430,6 +477,11 @@ function formatMoney(amount: number, currency: string) {
     style: 'currency',
     currency: currency || 'AUD',
   }).format(amount)
+}
+
+function formatOptionAdjustment(amount: number, currency: string) {
+  const formattedAmount = formatMoney(Math.abs(amount), currency)
+  return amount > 0 ? `+${formattedAmount}` : `-${formattedAmount}`
 }
 
 function formatTime(value: string) {

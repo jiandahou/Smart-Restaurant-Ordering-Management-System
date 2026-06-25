@@ -27,6 +27,8 @@ public sealed class AddCartItemRequest
     public int Quantity { get; init; } = 1;
 
     public string? Note { get; init; }
+
+    public IReadOnlyList<Guid> SelectedOptionIds { get; init; } = [];
 }
 
 public sealed class UpdateCartItemRequest
@@ -100,6 +102,8 @@ public sealed class CartItemResponse
 
     public string? Note { get; init; }
 
+    public required IReadOnlyCollection<CartItemOptionResponse> SelectedOptions { get; init; }
+
     public bool IsAvailable { get; init; }
 
     public bool IsSoldOut { get; init; }
@@ -107,4 +111,17 @@ public sealed class CartItemResponse
     public DateTime CreatedAt { get; init; }
 
     public DateTime? UpdatedAt { get; init; }
+}
+
+public sealed class CartItemOptionResponse
+{
+    public Guid? MenuItemOptionId { get; init; }
+
+    public required string GroupNameSnapshot { get; init; }
+
+    public required string OptionNameSnapshot { get; init; }
+
+    public decimal PriceAdjustmentSnapshot { get; init; }
+
+    public int Quantity { get; init; } = 1;
 }

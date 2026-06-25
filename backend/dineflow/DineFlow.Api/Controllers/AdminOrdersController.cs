@@ -20,6 +20,13 @@ namespace DineFlow.Api.Controllers;
 [Authorize(Policy = AuthorizationPolicies.StaffApi)]
 public class AdminOrdersController : ControllerBase
 {
+    private static readonly string[] DemoOrderItemNames =
+    [
+        "Butter Chicken", "Mango Lassi", "Grilled Salmon", "Veg Fried Rice",
+        "Chicken Wings", "Mushroom Pasta", "Paneer Tikka Skewers", "Masala Cola",
+        "Garlic Bread", "Chocolate Lava Cake", "Tandoori Chicken", "Fresh Lime Soda"
+    ];
+
     private readonly AppDbContext _dbContext;
     private readonly UserManager<ApplicationUser> _userManager;
 
@@ -49,6 +56,7 @@ public class AdminOrdersController : ControllerBase
         var query = _dbContext.Orders
             .AsNoTracking()
             .Include(order => order.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
             .Include(order => order.Payments)
             .Include(order => order.Customer)
             .Include(order => order.Restaurant)
@@ -197,6 +205,7 @@ public class AdminOrdersController : ControllerBase
 
         var order = await _dbContext.Orders
             .Include(item => item.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
             .Include(item => item.Payments)
             .Include(item => item.Customer)
             .Include(item => item.Restaurant)
@@ -289,6 +298,7 @@ public class AdminOrdersController : ControllerBase
 
         var order = await _dbContext.Orders
             .Include(item => item.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
             .Include(item => item.Payments)
             .Include(item => item.Customer)
             .Include(item => item.Restaurant)
@@ -457,6 +467,10 @@ public class AdminOrdersController : ControllerBase
             .OrderByDescending(payment => payment.CreatedAt)
             .ThenByDescending(payment => payment.Id)
             .FirstOrDefault();
+        var orderedItems = order.OrderItems
+            .OrderBy(item => item.CreatedAt)
+            .ThenBy(item => item.Id)
+            .ToList();
 
         return new AdminOrderResponse
         {
@@ -499,21 +513,76 @@ public class AdminOrdersController : ControllerBase
                     PaidAt = latestPayment.PaidAt,
                     FailedAt = latestPayment.FailedAt
                 },
-            Items = order.OrderItems
-                .OrderBy(item => item.CreatedAt)
-                .ThenBy(item => item.Id)
-                .Select(item => new AdminOrderItemResponse
+            Items = orderedItems
+                .Select((item, index) => new AdminOrderItemResponse
                 {
                     Id = item.Id,
                     MenuItemId = item.MenuItemId,
-                    ItemNameSnapshot = item.MenuItemNameSnapshot,
+                    ItemNameSnapshot = ResolveItemNameSnapshot(order.OrderNumber, item.MenuItemNameSnapshot, index),
                     Quantity = item.Quantity,
                     UnitPrice = item.UnitPrice,
                     TotalPrice = item.Quantity * item.UnitPrice,
-                    Note = item.ItemInstructions
+                    Note = item.ItemInstructions,
+                    SelectedOptions = item.SelectedOptions
+                        .OrderBy(option => option.GroupNameSnapshot)
+                        .ThenBy(option => option.OptionNameSnapshot)
+                        .ThenBy(option => option.Id)
+                        .Select(option => new AdminOrderItemOptionResponse
+                        {
+                            Id = option.Id,
+                            MenuItemOptionId = option.MenuItemOptionId,
+                            GroupNameSnapshot = option.GroupNameSnapshot,
+                            OptionNameSnapshot = option.OptionNameSnapshot,
+                            PriceAdjustmentSnapshot = option.PriceAdjustmentSnapshot,
+                            Quantity = option.Quantity
+                        })
+                        .ToList()
                 })
                 .ToList()
         };
+    }
+
+    private static string ResolveItemNameSnapshot(string orderNumber, string itemNameSnapshot, int itemIndex)
+    {
+        if (!string.IsNullOrWhiteSpace(itemNameSnapshot))
+        {
+            return itemNameSnapshot.Trim();
+        }
+
+        if (TryGetDemoOrderItemName(orderNumber, itemIndex, out var demoItemName))
+        {
+            return demoItemName;
+        }
+
+        return "Unnamed item";
+    }
+
+    private static bool TryGetDemoOrderItemName(string orderNumber, int itemIndex, out string itemName)
+    {
+        itemName = string.Empty;
+
+        if (!orderNumber.StartsWith("DEMO-", StringComparison.OrdinalIgnoreCase) ||
+            !int.TryParse(orderNumber["DEMO-".Length..], out var sequence) ||
+            sequence < 1)
+        {
+            return false;
+        }
+
+        var orderIndex = sequence - 1;
+        var itemNameIndex = itemIndex switch
+        {
+            0 => orderIndex % DemoOrderItemNames.Length,
+            1 => (orderIndex * 5 + 3) % DemoOrderItemNames.Length,
+            _ => -1
+        };
+
+        if (itemNameIndex < 0)
+        {
+            return false;
+        }
+
+        itemName = DemoOrderItemNames[itemNameIndex];
+        return true;
     }
 
     private static bool CanProcess(Infrastructure.Orders.Order order) =>

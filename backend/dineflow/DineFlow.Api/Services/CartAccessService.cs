@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using DineFlow.Api.Contracts.Cart;
 using DineFlow.Infrastructure.Carts;
+using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
@@ -81,6 +82,8 @@ public sealed class CartAccessService(AppDbContext dbContext)
             .Include(item => item.Table)
             .Include(item => item.Items)
                 .ThenInclude(item => item.MenuItem)
+                    .ThenInclude(item => item!.OptionGroups.Where(group => group.IsActive))
+                        .ThenInclude(group => group.Options.Where(option => option.IsAvailable))
             .FirstOrDefaultAsync(item => item.Id == cartId, cancellationToken);
 
         return cart is null ? null : MapCart(cart);
@@ -122,20 +125,34 @@ public sealed class CartAccessService(AppDbContext dbContext)
     {
         var items = cart.Items
             .OrderBy(item => item.CreatedAt)
-            .Select(item => new CartItemResponse
+            .Select(item =>
             {
-                Id = item.Id,
-                MenuItemId = item.MenuItemId,
-                Name = item.MenuItem?.Name ?? "Unavailable item",
-                ImageUrl = item.MenuItem?.ImageUrl,
-                Quantity = item.Quantity,
-                UnitPrice = item.MenuItem?.Price ?? 0,
-                LineTotal = item.Quantity * (item.MenuItem?.Price ?? 0),
-                Note = item.Note,
-                IsAvailable = item.MenuItem?.IsAvailable == true,
-                IsSoldOut = item.MenuItem?.IsSoldOut == true,
-                CreatedAt = item.CreatedAt,
-                UpdatedAt = item.UpdatedAt
+                var selectedOptions = GetSelectedOptions(item);
+                var unitPrice = CalculateUnitPrice(item.MenuItem?.Price ?? 0, selectedOptions);
+
+                return new CartItemResponse
+                {
+                    Id = item.Id,
+                    MenuItemId = item.MenuItemId,
+                    Name = item.MenuItem?.Name ?? "Unavailable item",
+                    ImageUrl = item.MenuItem?.ImageUrl,
+                    Quantity = item.Quantity,
+                    UnitPrice = unitPrice,
+                    LineTotal = item.Quantity * unitPrice,
+                    Note = item.Note,
+                    SelectedOptions = selectedOptions.Select(option => new CartItemOptionResponse
+                    {
+                        MenuItemOptionId = option.Option.Id,
+                        GroupNameSnapshot = option.Group.Name,
+                        OptionNameSnapshot = option.Option.Name,
+                        PriceAdjustmentSnapshot = option.Option.PriceAdjustment,
+                        Quantity = option.Quantity
+                    }).ToList(),
+                    IsAvailable = item.MenuItem?.IsAvailable == true,
+                    IsSoldOut = item.MenuItem?.IsSoldOut == true,
+                    CreatedAt = item.CreatedAt,
+                    UpdatedAt = item.UpdatedAt
+                };
             })
             .ToList();
 
@@ -156,4 +173,48 @@ public sealed class CartAccessService(AppDbContext dbContext)
             Items = items
         };
     }
+
+    private static IReadOnlyList<CartSelectedOption> GetSelectedOptions(CartItem item)
+    {
+        if (item.MenuItem is null || item.SelectedOptionIds.Length == 0)
+        {
+            return [];
+        }
+
+        var selectedOptionCounts = item.SelectedOptionIds
+            .Where(optionId => optionId != Guid.Empty)
+            .GroupBy(optionId => optionId)
+            .ToDictionary(group => group.Key, group => group.Count());
+
+        return item.MenuItem.OptionGroups
+            .OrderBy(group => group.DisplayOrder)
+            .ThenBy(group => group.Name)
+            .SelectMany(group => group.Options
+                .OrderBy(option => option.DisplayOrder)
+                .ThenBy(option => option.Name)
+                .Where(option => selectedOptionCounts.ContainsKey(option.Id))
+                .Select(option => new CartSelectedOption(group, option, selectedOptionCounts[option.Id])))
+            .ToList();
+    }
+
+    private static decimal CalculateUnitPrice(decimal basePrice, IEnumerable<CartSelectedOption> selectedOptions)
+    {
+        var unitPrice = basePrice;
+
+        foreach (var selectedOption in selectedOptions)
+        {
+            var option = selectedOption.Option;
+            unitPrice = option.AdjustmentType switch
+            {
+                OptionAdjustmentType.Add => unitPrice + option.PriceAdjustment * selectedOption.Quantity,
+                OptionAdjustmentType.Remove => unitPrice + option.PriceAdjustment * selectedOption.Quantity,
+                OptionAdjustmentType.Replace => option.PriceAdjustment,
+                _ => unitPrice
+            };
+        }
+
+        return unitPrice;
+    }
+
+    private sealed record CartSelectedOption(MenuItemOptionGroup Group, MenuItemOption Option, int Quantity);
 }

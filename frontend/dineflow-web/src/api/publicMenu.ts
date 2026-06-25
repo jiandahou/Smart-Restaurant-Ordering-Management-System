@@ -34,6 +34,30 @@ export type PublicMenuItem = {
   isAvailable: boolean
   isSoldOut: boolean
   displayOrder: number
+  optionGroups: PublicMenuOptionGroup[]
+}
+
+export type PublicMenuOptionGroup = {
+  id: string
+  menuItemId: string
+  name: string
+  isRequired: boolean
+  minSelections: number
+  maxSelections: number
+  displayOrder: number
+  isActive: boolean
+  options: PublicMenuOption[]
+}
+
+export type PublicMenuOption = {
+  id: string
+  groupId: string
+  name: string
+  priceAdjustment: number
+  adjustmentType: 0 | 1 | 2
+  maxQuantity: number
+  displayOrder: number
+  isAvailable: boolean
 }
 
 export type PublicMenuCategory = {
