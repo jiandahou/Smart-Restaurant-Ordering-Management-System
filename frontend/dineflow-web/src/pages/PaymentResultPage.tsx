@@ -1,4 +1,4 @@
-import { CircleCheck, CircleX, UserRound } from 'lucide-react'
+import { CircleCheck, CircleX, ClipboardList } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
@@ -34,9 +34,9 @@ export function PaymentResultPage({ result }: PaymentResultPageProps) {
               : 'Your order has not been paid yet.'}
           </p>
           <Button asChild>
-            <Link to="/me">
-              <UserRound size={18} />
-              Back to user center
+            <Link to="/my-orders">
+              <ClipboardList size={18} />
+              View my orders
             </Link>
           </Button>
         </CardContent>

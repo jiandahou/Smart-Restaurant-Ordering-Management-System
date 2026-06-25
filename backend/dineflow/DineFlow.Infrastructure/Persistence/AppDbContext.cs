@@ -192,6 +192,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(item => item.Note)
                 .HasMaxLength(2_000);
 
+            entity.Property(item => item.SelectedOptionIds)
+                .HasColumnType("uuid[]")
+                .HasDefaultValueSql("ARRAY[]::uuid[]");
+
             entity.HasIndex(item => item.CartId);
             entity.HasIndex(item => item.MenuItemId);
             entity.HasIndex(item => new { item.CartId, item.MenuItemId });

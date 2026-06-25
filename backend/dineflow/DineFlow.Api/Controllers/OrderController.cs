@@ -15,6 +15,7 @@ namespace DineFlow.Api.Controllers;
 [Route("api/[controller]")]
 public class OrderController : ControllerBase
 {
+    private const int MaximumGuestOrderLookupCount = 50;
     private readonly AppDbContext _dbContext;
     private readonly ILogger<OrderController> _logger;
 
@@ -31,6 +32,7 @@ public class OrderController : ControllerBase
             .AsNoTracking()
             .Include(order => order.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
+            .Include(order => order.Restaurant)
             .Include(order => order.Table)
             .ToListAsync(cancellationToken);
 
@@ -52,8 +54,40 @@ public class OrderController : ControllerBase
             .AsNoTracking()
             .Include(order => order.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
+            .Include(order => order.Restaurant)
             .Include(order => order.Table)
             .Where(order => order.CustomerId == currentUserId)
+            .OrderByDescending(order => order.CreatedAt)
+            .ThenByDescending(order => order.Id)
+            .ToListAsync(cancellationToken);
+
+        return Ok(orders.Select(MapToResponse).ToList());
+    }
+
+    [AllowAnonymous]
+    [HttpPost("guest")]
+    public async Task<IActionResult> GetGuestOrders(
+        [FromBody] GuestOrderLookupRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request?.OrderIds is null || request.OrderIds.Count == 0)
+        {
+            return Ok(Array.Empty<OrderResponse>());
+        }
+
+        var orderIds = request.OrderIds
+            .Where(orderId => orderId != Guid.Empty)
+            .Distinct()
+            .Take(MaximumGuestOrderLookupCount)
+            .ToList();
+
+        var orders = await _dbContext.Orders
+            .AsNoTracking()
+            .Include(order => order.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
+            .Include(order => order.Restaurant)
+            .Include(order => order.Table)
+            .Where(order => orderIds.Contains(order.Id))
             .OrderByDescending(order => order.CreatedAt)
             .ThenByDescending(order => order.Id)
             .ToListAsync(cancellationToken);
@@ -68,6 +102,7 @@ public class OrderController : ControllerBase
             .AsNoTracking()
             .Include(item => item.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
+            .Include(item => item.Restaurant)
             .Include(item => item.Table)
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
 
@@ -143,6 +178,8 @@ public class OrderController : ControllerBase
 
         await _dbContext.Orders.AddAsync(order, cancellationToken);
         await _dbContext.SaveChangesAsync(cancellationToken);
+
+        await _dbContext.Entry(order).Reference(item => item.Restaurant).LoadAsync(cancellationToken);
 
         if (order.TableId.HasValue)
         {
@@ -346,9 +383,13 @@ public class OrderController : ControllerBase
                 .SelectMany(group => group.Options)
                 .ToDictionary(option => option.Id);
 
-            var selectedOptions = new List<MenuItemOption>();
+            var selectedOptionCounts = (itemRequest.SelectedOptionIds ?? [])
+                .Where(optionId => optionId != Guid.Empty)
+                .GroupBy(optionId => optionId)
+                .ToDictionary(group => group.Key, group => group.Count());
+            var selectedOptions = new List<SelectedMenuOption>();
 
-            foreach (var optionId in itemRequest.SelectedOptionIds ?? [])
+            foreach (var optionId in selectedOptionCounts.Keys)
             {
                 if (!allOptions.TryGetValue(optionId, out var option))
                 {
@@ -356,12 +397,22 @@ public class OrderController : ControllerBase
                     continue;
                 }
 
-                selectedOptions.Add(option);
+                selectedOptions.Add(new SelectedMenuOption(option, selectedOptionCounts[optionId]));
+            }
+
+            foreach (var selection in selectedOptions)
+            {
+                if (selection.Quantity > selection.Option.MaxQuantity)
+                {
+                    validationErrors.Add($"'{selection.Option.Name}' allows at most {selection.Option.MaxQuantity} per item.");
+                }
             }
 
             foreach (var group in menuItem.OptionGroups)
             {
-                var selectedInGroup = selectedOptions.Count(option => option.GroupId == group.Id);
+                var selectedInGroup = selectedOptions
+                    .Where(selection => selection.Option.GroupId == group.Id)
+                    .Sum(selection => selection.Quantity);
 
                 if (group.IsRequired && selectedInGroup < group.MinSelections)
                 {
@@ -381,12 +432,13 @@ public class OrderController : ControllerBase
 
             var unitPrice = menuItem.Price;
 
-            foreach (var option in selectedOptions)
+            foreach (var selection in selectedOptions)
             {
+                var option = selection.Option;
                 unitPrice = option.AdjustmentType switch
                 {
-                    OptionAdjustmentType.Add => unitPrice + option.PriceAdjustment,
-                    OptionAdjustmentType.Remove => unitPrice + option.PriceAdjustment,
+                    OptionAdjustmentType.Add => unitPrice + option.PriceAdjustment * selection.Quantity,
+                    OptionAdjustmentType.Remove => unitPrice + option.PriceAdjustment * selection.Quantity,
                     OptionAdjustmentType.Replace => option.PriceAdjustment,
                     _ => unitPrice
                 };
@@ -405,8 +457,9 @@ public class OrderController : ControllerBase
                 CreatedAt = DateTime.UtcNow
             };
 
-            foreach (var option in selectedOptions)
+            foreach (var selection in selectedOptions)
             {
+                var option = selection.Option;
                 var groupName = menuItem.OptionGroups
                     .First(group => group.Id == option.GroupId)
                     .Name;
@@ -417,6 +470,7 @@ public class OrderController : ControllerBase
                     GroupNameSnapshot = groupName,
                     OptionNameSnapshot = option.Name,
                     PriceAdjustmentSnapshot = option.PriceAdjustment,
+                    Quantity = selection.Quantity,
                     CreatedAt = DateTime.UtcNow
                 });
             }
@@ -435,6 +489,7 @@ public class OrderController : ControllerBase
         TableNumber = order.Table?.TableNumber,
         CustomerId = order.CustomerId,
         OrderNumber = order.OrderNumber,
+        Currency = string.IsNullOrWhiteSpace(order.Restaurant?.Currency) ? "AUD" : order.Restaurant.Currency,
         OrderType = (int)order.OrderType,
         Status = (int)order.Status,
         PaymentStatus = order.PaymentStatus.ToString(),
@@ -471,7 +526,8 @@ public class OrderController : ControllerBase
                         MenuItemOptionId = option.MenuItemOptionId,
                         GroupNameSnapshot = option.GroupNameSnapshot,
                         OptionNameSnapshot = option.OptionNameSnapshot,
-                        PriceAdjustmentSnapshot = option.PriceAdjustmentSnapshot
+                        PriceAdjustmentSnapshot = option.PriceAdjustmentSnapshot,
+                        Quantity = option.Quantity
                     })
                     .ToList()
             })
@@ -484,4 +540,6 @@ public class OrderController : ControllerBase
     private sealed record OrderItemBuildResult(
         List<OrderItem> OrderItems,
         List<string> ValidationErrors);
+
+    private sealed record SelectedMenuOption(MenuItemOption Option, int Quantity);
 }

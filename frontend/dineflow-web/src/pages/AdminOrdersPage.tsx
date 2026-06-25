@@ -22,6 +22,7 @@ import {
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { OrderStatusBadge, getOrderStatusLabel, orderStatusOptions } from '../components/orders/OrderStatusBadge'
+import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
 import { OrderTransitionReasonField } from '../components/orders/OrderTransitionReasonField'
 import { PaymentStatusBadge, getPaymentStatusLabel, paymentStatusOptions } from '../components/orders/PaymentStatusBadge'
 import { Badge } from '../components/ui/badge'
@@ -43,6 +44,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select'
+import { HorizontalTableScroll } from '../components/HorizontalTableScroll'
 import { getOrderStats } from '../lib/orderStats'
 
 type SortKey =
@@ -444,7 +446,7 @@ export function AdminOrdersPage() {
             </Button>
           </div>
 
-          <div className="table-wrap" ref={tableWrapRef}>
+          <HorizontalTableScroll ref={tableWrapRef} topScrollLabel="Scroll orders table horizontally">
             <table className="data-table payment-orders-table">
               <thead>
                 <tr>
@@ -622,11 +624,12 @@ export function AdminOrdersPage() {
                                 <div className="order-item-list">
                                   {order.items.map((item) => (
                                     <div key={item.id} className="order-item-line">
-                                      <div>
+                                      <div className="order-item-line-copy">
                                         <strong>{item.itemNameSnapshot || 'Menu item'}</strong>
                                         <span>
                                           {item.quantity} x {formatMoney(item.unitPrice, order.currency)}
                                         </span>
+                                        <OrderItemOptionBadges options={item.selectedOptions} currency={order.currency} />
                                         {item.note && <small>{item.note}</small>}
                                       </div>
                                       <strong>{formatMoney(item.totalPrice, order.currency)}</strong>
@@ -692,7 +695,7 @@ export function AdminOrdersPage() {
                 )}
               </tbody>
             </table>
-          </div>
+          </HorizontalTableScroll>
           <div className="pagination-bar">
             <span>{pageStart}-{pageEnd} of {totalItems}</span>
             <div className="pagination-actions">

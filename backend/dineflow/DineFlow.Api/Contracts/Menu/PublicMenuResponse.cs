@@ -39,4 +39,6 @@ public sealed class PublicMenuItemResponse
     public bool IsSoldOut { get; init; }
 
     public int DisplayOrder { get; init; }
+
+    public IReadOnlyList<MenuOptionGroupResponse> OptionGroups { get; init; } = [];
 }

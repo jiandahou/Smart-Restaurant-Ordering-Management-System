@@ -40,6 +40,7 @@ public sealed class StaffOrdersController(
         var query = dbContext.Orders
             .AsNoTracking()
             .Include(order => order.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
             .Include(order => order.Payments)
             .Include(order => order.Customer)
             .Include(order => order.Restaurant)

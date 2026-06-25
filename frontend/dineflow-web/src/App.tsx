@@ -44,10 +44,10 @@ function App() {
         <Route path="/checkout" element={<CheckoutPage />} />
         <Route path="/r/:restaurantId/menu" element={<CustomerMenuPage />} />
         <Route path="/table/:qrToken" element={<CustomerMenuPage />} />
-        <Route element={<ProtectedRoute />}>
-          <Route element={<AppLayout />}>
+        <Route element={<AppLayout />}>
+          <Route path="/my-orders" element={<MyOrdersPage />} />
+          <Route element={<ProtectedRoute />}>
             <Route path="/me" element={<ProfilePage />} />
-            <Route path="/my-orders" element={<MyOrdersPage />} />
             <Route element={<ProtectedRoute roles={['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']} />}>
               <Route element={<ProtectedRoute roles={['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']} />}>
                 <Route path="/staff/orders" element={<StaffOrdersPage />} />

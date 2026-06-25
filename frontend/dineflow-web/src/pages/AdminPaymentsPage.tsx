@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  ChevronDown,
+  ChevronRight,
   CreditCard,
   ExternalLink,
   ReceiptText,
@@ -16,6 +18,7 @@ import {
   getAdminOrders,
   type AdminOrder,
 } from '../api/auth'
+import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
 import { OrderStatusBadge, getOrderStatusLabel, orderStatusOptions } from '../components/orders/OrderStatusBadge'
 import { PaymentStatusBadge, getPaymentStatusLabel, paymentStatusOptions } from '../components/orders/PaymentStatusBadge'
 import { Button } from '../components/ui/button'
@@ -28,6 +31,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select'
+import { HorizontalTableScroll } from '../components/HorizontalTableScroll'
 import { getOrderStats, isOrderPayable } from '../lib/orderStats'
 
 type SortKey =
@@ -101,6 +105,7 @@ export function AdminPaymentsPage() {
   const [pageSize, setPageSize] = useState(20)
   const [totalItems, setTotalItems] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
+  const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null)
   const [sort, setSort] = useState<{ key: SortKey; direction: 'asc' | 'desc' }>({
     key: 'createdAt',
     direction: 'desc',
@@ -192,6 +197,7 @@ export function AdminPaymentsPage() {
       key: 'createdAt',
       direction: 'desc',
     })
+    setExpandedOrderId(null)
   }
 
   const handleCheckout = async (order: AdminOrder) => {
@@ -354,7 +360,7 @@ export function AdminPaymentsPage() {
             </div>
           </div>
 
-          <div className="table-wrap">
+          <HorizontalTableScroll topScrollLabel="Scroll payment orders table horizontally">
             <table className="data-table payment-orders-table admin-payments-table">
               <colgroup>
                 <col className="payment-col-order" />
@@ -424,69 +430,148 @@ export function AdminPaymentsPage() {
                 {filteredOrders.map((order) => {
                   const payable = isOrderPayable(order)
                   const submitting = submittingOrderId === order.id
+                  const isExpanded = expandedOrderId === order.id
 
                   return (
-                    <tr key={order.id}>
-                      <td>
-                        <span className="table-name">
-                          <ReceiptText size={16} />
-                          {order.orderNumber}
-                        </span>
-                        <span className="table-subtext">
-                          {order.tableNumber ? `Table ${order.tableNumber}` : getOrderTypeLabel(order.orderType)}
-                        </span>
-                      </td>
-                      <td>
-                        <strong>{order.restaurantName || 'Unknown restaurant'}</strong>
-                        <span className="table-subtext">{order.customerName || order.customerEmail || 'Guest / unknown'}</span>
-                      </td>
-                      <td>
-                        <OrderStatusBadge status={order.status} />
-                        <span className="table-subtext">{getOrderTypeLabel(order.orderType)}</span>
-                      </td>
-                      <td>
-                        <PaymentStatusBadge status={order.paymentStatus} />
-                        <span className="table-subtext">
-                          {order.paymentMethod === 'PayAtCounter'
-                            ? 'Pay at counter'
-                            : order.paymentAttempts > 0
-                            ? `${order.paymentAttempts} payment attempt${order.paymentAttempts === 1 ? '' : 's'}`
-                            : 'No payment attempts yet'}
-                        </span>
-                      </td>
-                      <td>
-                        <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
-                      </td>
-                      <td>
-                        <strong>
-                          {order.latestPayment
-                            ? getPaymentStatusLabel(order.latestPayment.status)
-                            : 'No payment yet'}
-                        </strong>
-                        <span className="table-subtext">
-                          {order.latestPayment?.providerCheckoutSessionId || 'No checkout session yet'}
-                        </span>
-                      </td>
-                      <td>{formatDate(order.createdAt)}</td>
-                      <td className="payment-action-cell">
-                        {payable ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            className="payment-checkout-button"
-                            onClick={() => handleCheckout(order)}
-                            disabled={loading || submittingOrderId !== null}
-                          >
-                            <ExternalLink size={16} />
-                            {submitting ? 'Opening' : 'Checkout'}
-                          </Button>
-                        ) : (
-                          <span className="muted-action">
-                            {order.paymentStatus === 'Paid' ? 'Already paid' : 'Not payable'}
+                    <Fragment key={order.id}>
+                      <tr
+                        className="expandable-table-row"
+                        aria-expanded={isExpanded}
+                        onClick={() => setExpandedOrderId((current) => (current === order.id ? null : order.id))}
+                      >
+                        <td>
+                          <span className="table-name">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="row-expand-button"
+                              aria-label={isExpanded ? 'Collapse order payment details' : 'Expand order payment details'}
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                setExpandedOrderId((current) => (current === order.id ? null : order.id))
+                              }}
+                            >
+                              {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                            </Button>
+                            <ReceiptText size={16} />
+                            {order.orderNumber}
                           </span>
-                        )}
-                      </td>
-                    </tr>
+                          <span className="table-subtext">
+                            {order.tableNumber ? `Table ${order.tableNumber}` : getOrderTypeLabel(order.orderType)}
+                            {' - '}
+                            {order.items.length} item{order.items.length === 1 ? '' : 's'}
+                          </span>
+                        </td>
+                        <td>
+                          <strong>{order.restaurantName || 'Unknown restaurant'}</strong>
+                          <span className="table-subtext">{order.customerName || order.customerEmail || 'Guest / unknown'}</span>
+                        </td>
+                        <td>
+                          <OrderStatusBadge status={order.status} />
+                          <span className="table-subtext">{getOrderTypeLabel(order.orderType)}</span>
+                        </td>
+                        <td>
+                          <PaymentStatusBadge status={order.paymentStatus} />
+                          <span className="table-subtext">
+                            {order.paymentMethod === 'PayAtCounter'
+                              ? 'Pay at counter'
+                              : order.paymentAttempts > 0
+                              ? `${order.paymentAttempts} payment attempt${order.paymentAttempts === 1 ? '' : 's'}`
+                              : 'No payment attempts yet'}
+                          </span>
+                        </td>
+                        <td>
+                          <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
+                        </td>
+                        <td>
+                          <strong>
+                            {order.latestPayment
+                              ? getPaymentStatusLabel(order.latestPayment.status)
+                              : 'No payment yet'}
+                          </strong>
+                          <span className="table-subtext">
+                            {order.latestPayment?.providerCheckoutSessionId || 'No checkout session yet'}
+                          </span>
+                        </td>
+                        <td>{formatDate(order.createdAt)}</td>
+                        <td className="payment-action-cell">
+                          {payable ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              className="payment-checkout-button"
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                void handleCheckout(order)
+                              }}
+                              disabled={loading || submittingOrderId !== null}
+                            >
+                              <ExternalLink size={16} />
+                              {submitting ? 'Opening' : 'Checkout'}
+                            </Button>
+                          ) : (
+                            <span className="muted-action">
+                              {order.paymentStatus === 'Paid' ? 'Already paid' : 'Not payable'}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr className="order-detail-row">
+                          <td colSpan={8}>
+                            <div className="order-detail-panel payment-order-detail-panel" aria-live="polite">
+                              <section className="order-detail-section order-detail-section-wide">
+                                <div className="order-detail-heading">
+                                  <ReceiptText size={16} />
+                                  <strong>Order items</strong>
+                                </div>
+                                <div className="order-item-list">
+                                  {order.items.map((item) => (
+                                    <div key={item.id} className="order-item-line">
+                                      <div className="order-item-line-copy">
+                                        <strong>{item.itemNameSnapshot || 'Menu item'}</strong>
+                                        <span>
+                                          {item.quantity} x {formatMoney(item.unitPrice, order.currency)}
+                                        </span>
+                                        <OrderItemOptionBadges options={item.selectedOptions} currency={order.currency} />
+                                        {item.note && <small>{item.note}</small>}
+                                      </div>
+                                      <strong>{formatMoney(item.totalPrice, order.currency)}</strong>
+                                    </div>
+                                  ))}
+                                </div>
+                                {order.customerNote && (
+                                  <div className="order-note">
+                                    <strong>Order note</strong>
+                                    <span>{order.customerNote}</span>
+                                  </div>
+                                )}
+                              </section>
+
+                              <section className="order-detail-section">
+                                <div className="order-detail-heading">
+                                  <CreditCard size={16} />
+                                  <strong>Payment context</strong>
+                                </div>
+                                <div className="order-payment-grid">
+                                  <span>Status</span>
+                                  <strong>{getPaymentStatusLabel(order.paymentStatus)}</strong>
+                                  <span>Method</span>
+                                  <strong>{order.paymentMethod === 'PayAtCounter' ? 'Pay at counter' : 'Online'}</strong>
+                                  <span>Order amount</span>
+                                  <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
+                                  <span>Latest session</span>
+                                  <strong>{order.latestPayment?.providerCheckoutSessionId || 'No checkout session yet'}</strong>
+                                  <span>Created</span>
+                                  <strong>{formatDate(order.createdAt)}</strong>
+                                </div>
+                              </section>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   )
                 })}
                 {filteredOrders.length === 0 && (
@@ -502,7 +587,7 @@ export function AdminPaymentsPage() {
                 )}
               </tbody>
             </table>
-          </div>
+          </HorizontalTableScroll>
           <div className="pagination-bar">
             <span>{pageStart}-{pageEnd} of {totalItems}</span>
             <div className="pagination-actions">

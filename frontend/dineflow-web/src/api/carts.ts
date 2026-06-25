@@ -13,10 +13,19 @@ export type CartItem = {
   unitPrice: number
   lineTotal: number
   note: string | null
+  selectedOptions: CartItemOption[]
   isAvailable: boolean
   isSoldOut: boolean
   createdAt: string
   updatedAt: string | null
+}
+
+export type CartItemOption = {
+  menuItemOptionId: string | null
+  groupNameSnapshot: string
+  optionNameSnapshot: string
+  priceAdjustmentSnapshot: number
+  quantity: number
 }
 
 export type Cart = {
@@ -44,6 +53,7 @@ export type SubmittedOrderItem = {
   unitPrice: number
   totalPrice: number
   note: string | null
+  selectedOptions: CartItemOption[]
   createdAt: string
   updatedAt: string | null
 }
@@ -55,6 +65,7 @@ export type SubmittedOrder = {
   tableNumber: string | null
   customerId: string | null
   orderNumber: string
+  currency: string
   orderType: number
   status: number
   paymentStatus: string
@@ -86,6 +97,7 @@ export type AddCartItemRequest = {
   menuItemId: string
   quantity: number
   note?: string
+  selectedOptionIds?: string[]
 }
 
 export type UpdateCartItemRequest = {
