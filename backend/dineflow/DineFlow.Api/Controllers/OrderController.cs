@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Order;
+using DineFlow.Api.Services;
 using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Payments;
@@ -17,11 +18,16 @@ public class OrderController : ControllerBase
 {
     private const int MaximumGuestOrderLookupCount = 50;
     private readonly AppDbContext _dbContext;
+    private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
     private readonly ILogger<OrderController> _logger;
 
-    public OrderController(AppDbContext dbContext, ILogger<OrderController> logger)
+    public OrderController(
+        AppDbContext dbContext,
+        OrderRealtimeNotifier orderRealtimeNotifier,
+        ILogger<OrderController> logger)
     {
         _dbContext = dbContext;
+        _orderRealtimeNotifier = orderRealtimeNotifier;
         _logger = logger;
     }
 
@@ -164,7 +170,7 @@ public class OrderController : ControllerBase
             Status = OrderStatus.Pending,
             PaymentStatus = PaymentStatus.Unpaid,
             PaymentMethod = paymentMethod,
-            TotalAmount = buildResult.OrderItems.Sum(item => item.Quantity * item.UnitPrice),
+            TotalAmount = PricingCalculator.CalculateTotal(buildResult.OrderItems.Select(item => (item.Quantity, item.UnitPrice))),
             CustomerNote = request.CustomerNote,
             ScheduledTime = request.ScheduledTime,
             CreatedAt = now
@@ -187,6 +193,7 @@ public class OrderController : ControllerBase
         }
 
         _logger.LogInformation("Order {OrderNumber} created for restaurant {RestaurantId}", orderNumber, request.RestaurantId);
+        await _orderRealtimeNotifier.OrderCreatedAsync(order, cancellationToken);
 
         return CreatedAtAction(nameof(GetOrder), new { id = order.Id }, MapToResponse(order));
     }
@@ -258,7 +265,7 @@ public class OrderController : ControllerBase
             : request.OrderNumber.Trim();
         existingOrder.OrderType = (OrderType)request.OrderType;
         existingOrder.PaymentMethod = paymentMethod;
-        existingOrder.TotalAmount = buildResult.OrderItems.Sum(item => item.Quantity * item.UnitPrice);
+        existingOrder.TotalAmount = PricingCalculator.CalculateTotal(buildResult.OrderItems.Select(item => (item.Quantity, item.UnitPrice)));
         existingOrder.CustomerNote = request.CustomerNote;
         existingOrder.ScheduledTime = request.ScheduledTime;
         existingOrder.UpdatedAt = DateTime.UtcNow;
@@ -270,6 +277,7 @@ public class OrderController : ControllerBase
         }
 
         await _dbContext.SaveChangesAsync(cancellationToken);
+        await _orderRealtimeNotifier.OrderUpdatedAsync(existingOrder, cancellationToken);
 
         return NoContent();
     }
@@ -309,6 +317,7 @@ public class OrderController : ControllerBase
 
         _dbContext.OrderStatusHistories.Add(history);
         await _dbContext.SaveChangesAsync(cancellationToken);
+        await _orderRealtimeNotifier.OrderUpdatedAsync(order, cancellationToken);
 
         return NoContent();
     }
@@ -329,6 +338,7 @@ public class OrderController : ControllerBase
         _dbContext.OrderItems.RemoveRange(order.OrderItems);
         _dbContext.Orders.Remove(order);
         await _dbContext.SaveChangesAsync(cancellationToken);
+        await _orderRealtimeNotifier.OrderDeletedAsync(order, cancellationToken);
 
         return NoContent();
     }
@@ -430,19 +440,9 @@ public class OrderController : ControllerBase
                 continue;
             }
 
-            var unitPrice = menuItem.Price;
-
-            foreach (var selection in selectedOptions)
-            {
-                var option = selection.Option;
-                unitPrice = option.AdjustmentType switch
-                {
-                    OptionAdjustmentType.Add => unitPrice + option.PriceAdjustment * selection.Quantity,
-                    OptionAdjustmentType.Remove => unitPrice + option.PriceAdjustment * selection.Quantity,
-                    OptionAdjustmentType.Replace => option.PriceAdjustment,
-                    _ => unitPrice
-                };
-            }
+            var unitPrice = PricingCalculator.CalculateUnitPrice(
+                menuItem.Price,
+                selectedOptions.Select(selection => new MenuOptionPriceSelection(selection.Option, selection.Quantity)));
 
             var orderItem = new OrderItem
             {

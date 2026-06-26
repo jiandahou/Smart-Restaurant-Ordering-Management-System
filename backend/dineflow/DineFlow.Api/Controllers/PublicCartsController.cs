@@ -31,6 +31,7 @@ public class PublicCartsController(
     AppDbContext dbContext,
     CartAccessService cartAccessService,
     CartRealtimeNotifier cartRealtimeNotifier,
+    OrderRealtimeNotifier orderRealtimeNotifier,
     IStripeClient stripeClient,
     IOptions<StripeOptions> stripeOptions,
     ILogger<PublicCartsController> logger) : ControllerBase
@@ -389,6 +390,36 @@ public class PublicCartsController(
         return await ReturnUpdatedCartAsync(cartId, "item-removed", cancellationToken);
     }
 
+    [HttpDelete("{cartId:guid}/items")]
+    public async Task<IActionResult> ClearItems(
+        Guid cartId,
+        [FromHeader(Name = ParticipantTokenHeader)] string? participantToken,
+        CancellationToken cancellationToken)
+    {
+        var access = await AuthorizeMutableCartAsync(cartId, participantToken, cancellationToken);
+
+        if (access.ErrorResult is not null)
+        {
+            return access.ErrorResult;
+        }
+
+        var items = await dbContext.CartItems
+            .Where(cartItem => cartItem.CartId == cartId)
+            .ToListAsync(cancellationToken);
+
+        if (items.Count == 0)
+        {
+            return await ReturnUpdatedCartAsync(cartId, "items-cleared", cancellationToken);
+        }
+
+        dbContext.CartItems.RemoveRange(items);
+        access.Cart!.UpdatedAt = DateTime.UtcNow;
+        access.Participant!.LastSeenAt = DateTime.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return await ReturnUpdatedCartAsync(cartId, "items-cleared", cancellationToken);
+    }
+
     [HttpPut("{cartId:guid}/note")]
     public async Task<IActionResult> UpdateNote(
         Guid cartId,
@@ -593,7 +624,7 @@ public class PublicCartsController(
             order.OrderItems.Add(orderItem);
         }
 
-        order.TotalAmount = order.OrderItems.Sum(item => item.Quantity * item.UnitPrice);
+        order.TotalAmount = PricingCalculator.CalculateTotal(order.OrderItems.Select(item => (item.Quantity, item.UnitPrice)));
         cart.Status = CartStatus.Submitted;
         cart.OrderId = order.Id;
         cart.UpdatedAt = now;
@@ -606,6 +637,8 @@ public class PublicCartsController(
         var submittedOrder = await LoadOrderAsync(order.Id, cancellationToken);
         var cartSnapshot = await cartAccessService.LoadSnapshotAsync(cartId, cancellationToken);
         var orderResponse = MapOrder(submittedOrder!);
+
+        await orderRealtimeNotifier.OrderCreatedAsync(submittedOrder!, cancellationToken);
 
         if (cartSnapshot is not null)
         {
@@ -685,6 +718,7 @@ public class PublicCartsController(
         order.PaymentStatus = PaymentStatus.Unpaid;
         order.UpdatedAt = DateTime.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
+        await orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 
         return Ok(new CheckoutCartResponse
         {
@@ -997,28 +1031,11 @@ public class PublicCartsController(
             }
         }
 
-        var unitPrice = CalculateUnitPrice(menuItem.Price, selectedOptions);
+        var unitPrice = PricingCalculator.CalculateUnitPrice(
+            menuItem.Price,
+            selectedOptions.Select(selection => new MenuOptionPriceSelection(selection.Option, selection.Quantity)));
 
         return new CartOptionSelectionResult(unitPrice, selectedOptions, errors);
-    }
-
-    private static decimal CalculateUnitPrice(decimal basePrice, IEnumerable<SelectedMenuOption> selectedOptions)
-    {
-        var unitPrice = basePrice;
-
-        foreach (var selection in selectedOptions)
-        {
-            var option = selection.Option;
-            unitPrice = option.AdjustmentType switch
-            {
-                OptionAdjustmentType.Add => unitPrice + option.PriceAdjustment * selection.Quantity,
-                OptionAdjustmentType.Remove => unitPrice + option.PriceAdjustment * selection.Quantity,
-                OptionAdjustmentType.Replace => option.PriceAdjustment,
-                _ => unitPrice
-            };
-        }
-
-        return unitPrice;
     }
 
     [HttpPost("{cartId:guid}/payment-session")]
@@ -1052,6 +1069,7 @@ public class PublicCartsController(
         var order = await dbContext.Orders
             .Include(o => o.OrderItems)
             .Include(o => o.Restaurant)
+            .Include(o => o.Table)
             .FirstOrDefaultAsync(o => o.Id == cart.OrderId.Value, cancellationToken);
 
         if (order is null)
@@ -1079,7 +1097,7 @@ public class PublicCartsController(
         {
             OrderId = order.Id,
             Provider = PaymentProviders.Stripe,
-            AmountCents = ConvertToCents(order.TotalAmount),
+            AmountCents = PricingCalculator.ToMinorCurrencyUnits(order.TotalAmount),
             Currency = currency,
             Status = PaymentStatus.Pending
         };
@@ -1090,8 +1108,8 @@ public class PublicCartsController(
         var sessionOptions = new SessionCreateOptions
         {
             Mode = "payment",
-            SuccessUrl = AppendSessionId(stripeOptions.Value.SuccessUrl),
-            CancelUrl = stripeOptions.Value.CancelUrl,
+            SuccessUrl = AppendSessionId(AddReturnTo(stripeOptions.Value.SuccessUrl, BuildMenuReturnPath(order))),
+            CancelUrl = AddReturnTo(stripeOptions.Value.CancelUrl, BuildMenuReturnPath(order)),
             LineItems = order.OrderItems
                 .OrderBy(item => item.CreatedAt)
                 .ThenBy(item => item.Id)
@@ -1101,7 +1119,7 @@ public class PublicCartsController(
                     PriceData = new SessionLineItemPriceDataOptions
                     {
                         Currency = currency,
-                        UnitAmount = ConvertToCents(item.UnitPrice),
+                        UnitAmount = PricingCalculator.ToMinorCurrencyUnits(item.UnitPrice),
                         ProductData = new SessionLineItemPriceDataProductDataOptions
                         {
                             Name = string.IsNullOrWhiteSpace(item.MenuItemNameSnapshot)
@@ -1139,6 +1157,7 @@ public class PublicCartsController(
             order.PaymentStatus = PaymentStatus.Pending;
             order.UpdatedAt = DateTime.UtcNow;
             await dbContext.SaveChangesAsync(cancellationToken);
+            await orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 
             return Ok(new CreateCheckoutSessionResponse
             {
@@ -1160,6 +1179,7 @@ public class PublicCartsController(
             order.PaymentStatus = PaymentStatus.Failed;
             order.UpdatedAt = DateTime.UtcNow;
             await dbContext.SaveChangesAsync(cancellationToken);
+            await orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 
             return BadRequest(new
             {
@@ -1172,8 +1192,27 @@ public class PublicCartsController(
     private static string NormalizeStripeCurrency(string? currency) =>
         string.IsNullOrWhiteSpace(currency) ? "aud" : currency.Trim().ToLowerInvariant();
 
-    private static long ConvertToCents(decimal amount) =>
-        Convert.ToInt64(Math.Round(amount * 100m, MidpointRounding.AwayFromZero));
+    private static string BuildMenuReturnPath(Order order)
+    {
+        if (!string.IsNullOrWhiteSpace(order.Table?.QrToken))
+        {
+            return $"/table/{Uri.EscapeDataString(order.Table.QrToken)}";
+        }
+
+        return order.RestaurantId.HasValue
+            ? $"/r/{Uri.EscapeDataString(order.RestaurantId.Value.ToString())}/menu"
+            : "/";
+    }
+
+    private static string AddReturnTo(string url, string returnPath)
+    {
+        if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(returnPath))
+        {
+            return url;
+        }
+
+        return QueryHelpers.AddQueryString(url, "returnTo", returnPath);
+    }
 
     private static string AppendSessionId(string url)
     {

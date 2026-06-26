@@ -27,10 +27,12 @@ import { toast } from 'sonner'
 import {
   addCartItem,
   checkoutCart,
+  clearCartItems,
   deleteCartItem,
   getCart,
   joinCart,
   updateCartItem,
+  updateCartNote,
   type Cart,
   type CartItem,
 } from '@/api/carts'
@@ -50,6 +52,17 @@ import {
   type PublicOrderingContext,
 } from '@/api/publicMenu'
 import { createCartRealtimeClient, type CartRealtimeClient } from '@/realtime/cartConnection'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -123,6 +136,50 @@ const cartActivityBannerLaneCount = 4
 
 const cartSessionPrefix = 'dineflow.customer-cart'
 const itemNoteMaxLength = 180
+const orderNoteMaxLength = 4_000
+
+type NotePresetGroup = {
+  label: string
+  items: string[]
+}
+
+const itemNotePresetGroups: NotePresetGroup[] = [
+  {
+    label: 'Special requests',
+    items: ['Less spicy', 'No onion', 'No coriander', 'Sauce on the side', 'Cut in half'],
+  },
+  {
+    label: 'Allergies',
+    items: ['Peanut allergy', 'Tree nut allergy', 'Dairy allergy', 'Gluten-free / coeliac', 'Shellfish allergy'],
+  },
+]
+
+const orderNotePresetGroups: NotePresetGroup[] = [
+  {
+    label: 'Order requests',
+    items: ['Extra cutlery', 'Keep spicy dishes mild', 'Sauces on the side', 'Call when ready'],
+  },
+  {
+    label: 'Allergies',
+    items: ['Peanut allergy', 'Tree nut allergy', 'Dairy allergy', 'Egg allergy', 'Gluten-free / coeliac', 'Shellfish allergy', 'Sesame allergy'],
+  },
+]
+
+function isNotePresetApplied(note: string, preset: string) {
+  return note.trim().toLowerCase().includes(preset.trim().toLowerCase())
+}
+
+function appendNotePreset(note: string, preset: string, maxLength: number) {
+  const normalizedNote = note.trim()
+  const normalizedPreset = preset.trim()
+
+  if (!normalizedPreset || isNotePresetApplied(normalizedNote, normalizedPreset)) {
+    return note
+  }
+
+  const nextNote = normalizedNote ? `${normalizedNote}; ${normalizedPreset}` : normalizedPreset
+  return nextNote.length > maxLength ? nextNote.slice(0, maxLength) : nextNote
+}
 
 export function CustomerMenuPage() {
   const { restaurantId, qrToken } = useParams()
@@ -134,6 +191,8 @@ export function CustomerMenuPage() {
   const [addingItemId, setAddingItemId] = useState<string | null>(null)
   const [cartOpen, setCartOpen] = useState(false)
   const [cartActionItemId, setCartActionItemId] = useState<string | null>(null)
+  const [clearingCart, setClearingCart] = useState(false)
+  const [savingCartNote, setSavingCartNote] = useState(false)
   const [checkingOut, setCheckingOut] = useState(false)
   const [selectingOrderType, setSelectingOrderType] = useState(false)
   const [selectedItem, setSelectedItem] = useState<PublicMenuItem | null>(null)
@@ -636,7 +695,7 @@ export function CustomerMenuPage() {
   }
 
   const updateCartLineQuantity = async (item: CartItem, nextQuantity: number) => {
-    if (cart.status !== 'Active' || cartActionItemId) {
+    if (cart.status !== 'Active' || cartActionItemId || clearingCart) {
       return
     }
 
@@ -664,7 +723,7 @@ export function CustomerMenuPage() {
   }
 
   const removeCartLine = async (item: CartItem) => {
-    if (cart.status !== 'Active' || cartActionItemId) {
+    if (cart.status !== 'Active' || cartActionItemId || clearingCart) {
       return
     }
 
@@ -685,12 +744,61 @@ export function CustomerMenuPage() {
     }
   }
 
+  const clearCart = async () => {
+    if (cart.status !== 'Active' || cartActionItemId || clearingCart || cart.items.length === 0) {
+      return
+    }
+
+    setClearingCart(true)
+
+    try {
+      const updatedCart = await clearCartItems(cart.id, participantToken)
+
+      latestCartRef.current = updatedCart
+      setState((current) =>
+        current.status === 'ready' ? { ...current, cart: updatedCart } : current,
+      )
+      toast.success('Cart cleared')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not clear cart')
+    } finally {
+      setClearingCart(false)
+    }
+  }
+
+  const saveCartNote = async (note: string) => {
+    if (cart.status !== 'Active' || cartActionItemId || clearingCart || savingCartNote) {
+      return
+    }
+
+    setSavingCartNote(true)
+
+    try {
+      const updatedCart = await updateCartNote(cart.id, participantToken, note)
+
+      latestCartRef.current = updatedCart
+      setState((current) =>
+        current.status === 'ready' ? { ...current, cart: updatedCart } : current,
+      )
+      toast.success(note.trim() ? 'Order note saved' : 'Order note removed')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not save order note')
+      throw error
+    } finally {
+      setSavingCartNote(false)
+    }
+  }
+
   const handleCheckout = async () => {
-    if (checkingOut) return
+    if (checkingOut || clearingCart) return
     setCheckingOut(true)
     try {
       const result = await checkoutCart(cart.id, participantToken)
       rememberGuestOrder(result.order.id)
+      const returnPath = qrToken
+        ? `/table/${encodeURIComponent(qrToken)}`
+        : `/r/${encodeURIComponent(context.restaurant.id)}/menu`
+
       navigate('/checkout', {
         state: {
           order: result.order,
@@ -700,6 +808,7 @@ export function CustomerMenuPage() {
           restaurantName: context.restaurant.name,
           tableNumber: context.table?.tableNumber ?? null,
           paymentPolicy: context.restaurant.paymentPolicy,
+          returnPath,
         } satisfies CheckoutNavigationState,
       })
     } catch (error) {
@@ -824,10 +933,14 @@ export function CustomerMenuPage() {
         currencyFormatter={currencyFormatter}
         open={cartOpen}
         updatingItemId={cartActionItemId}
+        isClearingCart={clearingCart}
+        isSavingNote={savingCartNote}
         isCheckingOut={checkingOut}
         onOpenChange={setCartOpen}
         onQuantityChange={updateCartLineQuantity}
         onRemoveItem={removeCartLine}
+        onClearCart={clearCart}
+        onOrderNoteSave={saveCartNote}
         onCheckout={() => void handleCheckout()}
       />
 
@@ -1366,8 +1479,8 @@ function ItemDetailOverlay({
   if (isMobile) {
     return (
       <Drawer open onOpenChange={handleOpenChange}>
-        <DrawerContent className="max-h-[88svh]">
-          <DrawerHeader className="text-left">
+        <DrawerContent className="max-h-[88svh] overflow-hidden">
+          <DrawerHeader className="shrink-0 text-left">
             <DrawerTitle className="text-xl leading-tight">{item.name}</DrawerTitle>
             <DrawerDescription>{description}</DrawerDescription>
           </DrawerHeader>
@@ -1383,7 +1496,8 @@ function ItemDetailOverlay({
             onToggleOption={onToggleOption}
             onOptionQuantityChange={onOptionQuantityChange}
             onAddToCart={onAddToCart}
-            className="min-h-0 overflow-y-auto px-4 pb-4"
+            className="min-h-0 flex-1"
+            bodyClassName="px-4 pb-4"
           />
         </DrawerContent>
       </Drawer>
@@ -1392,8 +1506,8 @@ function ItemDetailOverlay({
 
   return (
     <Dialog open onOpenChange={handleOpenChange}>
-      <DialogContent className="max-h-[90svh] overflow-hidden p-0 sm:max-w-2xl">
-        <DialogHeader className="px-5 pt-5 pr-12">
+      <DialogContent className="flex max-h-[90svh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
+        <DialogHeader className="shrink-0 px-5 pt-5 pr-12 pb-4">
           <DialogTitle className="text-xl leading-tight">{item.name}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
@@ -1409,7 +1523,8 @@ function ItemDetailOverlay({
           onToggleOption={onToggleOption}
           onOptionQuantityChange={onOptionQuantityChange}
           onAddToCart={onAddToCart}
-          className="max-h-[calc(90svh-5.5rem)] overflow-y-auto px-5 pb-5"
+          className="min-h-0 flex-1"
+          bodyClassName="px-5 pb-5"
         />
       </DialogContent>
     </Dialog>
@@ -1429,6 +1544,7 @@ function ItemDetailContent({
   onOptionQuantityChange,
   onAddToCart,
   className,
+  bodyClassName,
 }: {
   item: PublicMenuItem
   quantity: number
@@ -1442,6 +1558,7 @@ function ItemDetailContent({
   onOptionQuantityChange: (group: PublicMenuOptionGroup, option: PublicMenuOption, quantity: number) => void
   onAddToCart: () => Promise<void> | void
   className?: string
+  bodyClassName?: string
 }) {
   const disabled = item.isSoldOut || !item.isAvailable
   const imageUrl = resolvePublicAssetUrl(item.imageUrl)
@@ -1452,9 +1569,10 @@ function ItemDetailContent({
   const lineTotal = unitPrice * quantity
 
   return (
-    <div className={cn('space-y-5', className)}>
-      <div className="grid gap-4 sm:grid-cols-[220px_minmax(0,1fr)]">
-        <div className="relative aspect-[4/3] overflow-hidden rounded-lg border bg-muted sm:aspect-square">
+    <div className={cn('flex min-h-0 flex-1 flex-col', className)}>
+      <div className={cn('min-h-0 flex-1 overflow-y-auto', bodyClassName)}>
+        <div className="grid gap-4 sm:grid-cols-[220px_minmax(0,1fr)]">
+          <div className="relative aspect-[4/3] overflow-hidden rounded-lg border bg-muted sm:aspect-square">
           {imageUrl ? (
             <img
               src={imageUrl}
@@ -1664,11 +1782,19 @@ function ItemDetailContent({
               disabled={isAdding || disabled}
               onChange={(event) => onNoteChange(event.target.value)}
             />
+            <QuickNotePresetGroups
+              groups={itemNotePresetGroups}
+              note={note}
+              maxLength={itemNoteMaxLength}
+              disabled={isAdding || disabled}
+              onNoteChange={onNoteChange}
+            />
           </div>
         </div>
       </div>
+      </div>
 
-      <div className="sticky bottom-0 -mx-4 border-t bg-popover/95 px-4 pb-1 pt-4 backdrop-blur sm:static sm:mx-0 sm:bg-transparent sm:px-0 sm:pb-0">
+      <div className="shrink-0 border-t bg-popover/95 px-4 py-3 backdrop-blur sm:px-5">
         <Button
           type="button"
           className="h-12 w-full rounded-lg text-base"
@@ -1689,29 +1815,104 @@ function ItemDetailContent({
   )
 }
 
+function QuickNotePresetGroups({
+  groups,
+  note,
+  maxLength,
+  disabled,
+  onNoteChange,
+}: {
+  groups: NotePresetGroup[]
+  note: string
+  maxLength: number
+  disabled: boolean
+  onNoteChange: (note: string) => void
+}) {
+  const noteIsFull = note.trim().length >= maxLength
+
+  return (
+    <div className="space-y-2 rounded-lg border bg-background/70 p-2.5">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs font-semibold text-muted-foreground">Quick notes</p>
+        <p className="text-[11px] text-muted-foreground">Tap to append</p>
+      </div>
+      {groups.map((group) => (
+        <div key={group.label} className="space-y-2">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            {group.label}
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {group.items.map((preset) => {
+              const applied = isNotePresetApplied(note, preset)
+
+              return (
+                <Button
+                  key={preset}
+                  type="button"
+                  variant={applied ? 'secondary' : 'outline'}
+                  size="sm"
+                  aria-pressed={applied}
+                  className={cn(
+                    'h-auto min-h-7 rounded-full px-2.5 py-1 text-xs',
+                    applied ? 'border-primary/20 bg-primary/10 text-primary' : '',
+                  )}
+                  disabled={disabled || noteIsFull}
+                  onClick={() => onNoteChange(appendNotePreset(note, preset, maxLength))}
+                >
+                  {applied ? <Check className="size-3" /> : <Plus className="size-3" />}
+                  {preset}
+                </Button>
+              )
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function CartSummaryBar({
   cart,
   currencyFormatter,
   open,
   updatingItemId,
+  isClearingCart,
+  isSavingNote,
   isCheckingOut,
   onOpenChange,
   onQuantityChange,
   onRemoveItem,
+  onClearCart,
+  onOrderNoteSave,
   onCheckout,
 }: {
   cart: Cart
   currencyFormatter: Intl.NumberFormat
   open: boolean
   updatingItemId: string | null
+  isClearingCart: boolean
+  isSavingNote: boolean
   isCheckingOut: boolean
   onOpenChange: (open: boolean) => void
   onQuantityChange: (item: CartItem, nextQuantity: number) => Promise<void> | void
   onRemoveItem: (item: CartItem) => Promise<void> | void
+  onClearCart: () => Promise<void> | void
+  onOrderNoteSave: (note: string) => Promise<void> | void
   onCheckout: () => void
 }) {
   const hasItems = cart.items.length > 0
   const isReadOnly = cart.status !== 'Active'
+  const [orderNoteHasUnsavedChanges, setOrderNoteHasUnsavedChanges] = useState(false)
+  const [unsavedNoteDialogOpen, setUnsavedNoteDialogOpen] = useState(false)
+
+  const requestCheckout = () => {
+    if (orderNoteHasUnsavedChanges) {
+      setUnsavedNoteDialogOpen(true)
+      return
+    }
+
+    onCheckout()
+  }
 
   return (
     <div className="fixed inset-x-0 bottom-0 z-20 border-t bg-background/95 p-3 backdrop-blur">
@@ -1734,16 +1935,59 @@ function CartSummaryBar({
                   </div>
                 </div>
 
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label="Collapse cart"
-                  className="size-9 shrink-0"
-                  onClick={() => onOpenChange(false)}
-                >
-                  <ChevronDown className="size-4" />
-                </Button>
+                <div className="flex shrink-0 items-center gap-2">
+                  {hasItems && !isReadOnly ? (
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          disabled={isClearingCart || isCheckingOut}
+                        >
+                          {isClearingCart ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="size-4" />
+                          )}
+                          Clear
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent size="sm">
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Clear cart?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            This removes every item from this cart. You can add dishes again before checkout.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel disabled={isClearingCart}>
+                            Keep cart
+                          </AlertDialogCancel>
+                          <AlertDialogAction
+                            variant="destructive"
+                            disabled={isClearingCart}
+                            onClick={() => void onClearCart()}
+                          >
+                            Clear cart
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  ) : null}
+
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Collapse cart"
+                    className="size-9 shrink-0"
+                    onClick={() => onOpenChange(false)}
+                  >
+                    <ChevronDown className="size-4" />
+                  </Button>
+                </div>
               </div>
 
               <div className="max-h-[52svh] overflow-y-auto p-4">
@@ -1775,6 +2019,14 @@ function CartSummaryBar({
               </div>
 
               <div className="space-y-3 border-t p-4">
+                <CartOrderNoteEditor
+                  note={cart.customerNote ?? ''}
+                  isReadOnly={isReadOnly}
+                  isSaving={isSavingNote}
+                  onSave={onOrderNoteSave}
+                  onDirtyChange={setOrderNoteHasUnsavedChanges}
+                />
+
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-sm text-muted-foreground">Total</span>
                   <span className="text-xl font-semibold">
@@ -1791,8 +2043,8 @@ function CartSummaryBar({
                 <Button
                   type="button"
                   className="h-11 w-full rounded-lg"
-                  disabled={!hasItems || isReadOnly || isCheckingOut}
-                  onClick={onCheckout}
+                  disabled={!hasItems || isReadOnly || isCheckingOut || isClearingCart || isSavingNote}
+                  onClick={requestCheckout}
                 >
                   {isCheckingOut ? (
                     <Loader2 className="size-4 animate-spin" />
@@ -1801,6 +2053,25 @@ function CartSummaryBar({
                   )}
                   {isCheckingOut ? 'Starting checkout…' : 'Go to checkout'}
                 </Button>
+
+                <AlertDialog open={unsavedNoteDialogOpen} onOpenChange={setUnsavedNoteDialogOpen}>
+                  <AlertDialogContent size="sm">
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Continue without saving note?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        Your order note has unsaved changes. Save it first if the kitchen should see it.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter className="flex flex-col-reverse gap-2 sm:flex-col-reverse sm:justify-stretch group-data-[size=sm]/alert-dialog-content:flex group-data-[size=sm]/alert-dialog-content:flex-col-reverse">
+                      <AlertDialogCancel className="h-auto min-h-10 w-full whitespace-normal text-center leading-snug">
+                        Go back and save
+                      </AlertDialogCancel>
+                      <AlertDialogAction className="h-auto min-h-10 w-full whitespace-normal text-center leading-snug" onClick={onCheckout}>
+                        Checkout anyway
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
               </div>
             </CardContent>
           </Card>
@@ -1826,6 +2097,159 @@ function CartSummaryBar({
           </span>
         </Button>
       </div>
+    </div>
+  )
+}
+
+function CartOrderNoteEditor({
+  note,
+  isReadOnly,
+  isSaving,
+  onSave,
+  onDirtyChange,
+}: {
+  note: string
+  isReadOnly: boolean
+  isSaving: boolean
+  onSave: (note: string) => Promise<void> | void
+  onDirtyChange?: (hasUnsavedChanges: boolean) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState(note)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const normalizedNote = note.trim()
+  const normalizedDraft = draft.trim()
+  const hasChanges = normalizedDraft !== normalizedNote
+
+  useEffect(() => {
+    setDraft(note)
+    setSaveError(null)
+  }, [note])
+
+  useEffect(() => {
+    onDirtyChange?.(open && hasChanges)
+  }, [hasChanges, onDirtyChange, open])
+
+  const handleCancel = () => {
+    setDraft(note)
+    setSaveError(null)
+    setOpen(false)
+  }
+
+  const handleSave = async () => {
+    setSaveError(null)
+
+    try {
+      await onSave(draft)
+      setOpen(false)
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Could not save order note')
+    }
+  }
+
+  if (isReadOnly && !normalizedNote) {
+    return null
+  }
+
+  return (
+    <div className="rounded-lg border bg-muted/25 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 space-y-1">
+          <p className="flex items-center gap-2 text-sm font-semibold">
+            <ClipboardList className="size-4" />
+            Order note
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Add instructions for the whole order, like cutlery, allergies, or delivery timing.
+          </p>
+        </div>
+
+        {!open && !isReadOnly ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={() => {
+              setSaveError(null)
+              setOpen(true)
+            }}
+          >
+            <Plus className="size-4" />
+            {normalizedNote ? 'Edit note' : 'Add note'}
+          </Button>
+        ) : null}
+      </div>
+
+      {open ? (
+        <div className="mt-3 space-y-2">
+          <Textarea
+            value={draft}
+            maxLength={orderNoteMaxLength}
+            rows={3}
+            placeholder="Please bring extra cutlery, keep all spicy dishes mild, allergy notes..."
+            disabled={isReadOnly || isSaving}
+            onChange={(event) => {
+              setDraft(event.target.value)
+              setSaveError(null)
+            }}
+          />
+          <QuickNotePresetGroups
+            groups={orderNotePresetGroups}
+            note={draft}
+            maxLength={orderNoteMaxLength}
+            disabled={isReadOnly || isSaving}
+            onNoteChange={(nextNote) => {
+              setDraft(nextNote)
+              setSaveError(null)
+            }}
+          />
+          {hasChanges ? (
+            <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-950">
+              <AlertCircle className="mt-0.5 size-4 shrink-0" />
+              <span>This order note is not saved yet.</span>
+            </div>
+          ) : null}
+          {saveError ? (
+            <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm font-semibold text-destructive">
+              <AlertCircle className="mt-0.5 size-4 shrink-0" />
+              <span>{saveError}</span>
+            </div>
+          ) : null}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs text-muted-foreground">
+              {draft.length}/{orderNoteMaxLength}
+            </span>
+            {!isReadOnly ? (
+              <span className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={isSaving}
+                  onClick={handleCancel}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="min-w-28"
+                  disabled={isSaving || !hasChanges}
+                  onClick={() => void handleSave()}
+                >
+                  {isSaving ? <Loader2 className="size-4 animate-spin" /> : null}
+                  Save note
+                </Button>
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : normalizedNote ? (
+        <p className="mt-3 rounded-md bg-background/80 px-3 py-2 text-sm text-muted-foreground">
+          {normalizedNote}
+        </p>
+      ) : null}
     </div>
   )
 }

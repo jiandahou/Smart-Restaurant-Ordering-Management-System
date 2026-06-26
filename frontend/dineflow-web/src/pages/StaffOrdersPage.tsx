@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertCircle, Clock3, CreditCard, RefreshCw, ShoppingBag, Utensils } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AlertCircle, Clock3, CreditCard, RefreshCw, Search, ShoppingBag, Utensils, X } from 'lucide-react'
 import { motion } from 'motion/react'
 import { toast } from 'sonner'
 import {
@@ -19,6 +19,7 @@ import { PaymentStatusBadge } from '@/components/orders/PaymentStatusBadge'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
 import {
   Dialog,
   DialogContent,
@@ -29,13 +30,16 @@ import {
 } from '@/components/ui/dialog'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { createOrderRealtimeClient, type OrderRealtimeUpdate } from '@/realtime/orderConnection'
+import { cn } from '@/lib/utils'
 
 type Queue = 'active' | 'new' | 'kitchen' | 'ready' | 'closed'
-type SortOption = 'newest' | 'oldest' | 'recentlyUpdated' | 'amountHigh' | 'amountLow' | 'orderNumber'
+type SortOption = 'oldest' | 'newest' | 'recentlyUpdated' | 'amountHigh' | 'amountLow' | 'orderNumber'
+type OrderSignalTone = 'new' | 'ready' | 'kitchen' | 'blocked' | 'closed' | 'neutral'
 
 const sortRequests: Record<SortOption, { sortBy: string; sortDirection: 'asc' | 'desc' }> = {
-  newest: { sortBy: 'createdAt', sortDirection: 'desc' },
   oldest: { sortBy: 'createdAt', sortDirection: 'asc' },
+  newest: { sortBy: 'createdAt', sortDirection: 'desc' },
   recentlyUpdated: { sortBy: 'updatedAt', sortDirection: 'desc' },
   amountHigh: { sortBy: 'totalAmount', sortDirection: 'desc' },
   amountLow: { sortBy: 'totalAmount', sortDirection: 'asc' },
@@ -79,6 +83,68 @@ function groupSelectedOptions(item: AdminOrder['items'][number]) {
   return Array.from(grouped, ([groupName, options]) => ({ groupName, options }))
 }
 
+function isClosedOrder(order: AdminOrder) {
+  return queueStatuses.closed.has(order.status)
+}
+
+function isOnlinePaymentBlocked(order: AdminOrder) {
+  return order.paymentMethod === 'Online' && order.paymentStatus !== 'Paid'
+}
+
+function needsCounterPayment(order: AdminOrder) {
+  return order.paymentMethod === 'PayAtCounter' && order.paymentStatus !== 'Paid'
+}
+
+function getOrderAgeMinutes(order: AdminOrder, now: Date) {
+  const createdAt = new Date(order.createdAt).getTime()
+  return Math.max(0, Math.floor((now.getTime() - createdAt) / 60_000))
+}
+
+function formatElapsedTime(order: AdminOrder, now: Date) {
+  const minutes = getOrderAgeMinutes(order, now)
+
+  if (minutes < 1) return '<1 min'
+  if (minutes < 60) return `${minutes} min`
+
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`
+}
+
+function getOrderSignal(order: AdminOrder, now: Date): {
+  label: string
+  tone: OrderSignalTone
+  isLate: boolean
+} {
+  const isLate = getOrderAgeMinutes(order, now) >= 20 && !isClosedOrder(order) && !isOnlinePaymentBlocked(order)
+
+  if (isClosedOrder(order)) {
+    return { label: 'Closed', tone: 'closed', isLate: false }
+  }
+
+  if (isOnlinePaymentBlocked(order)) {
+    return { label: 'Waiting payment', tone: 'blocked', isLate: false }
+  }
+
+  if (order.status === 'Ready') {
+    return { label: 'Ready now', tone: 'ready', isLate }
+  }
+
+  if (order.status === 'Pending') {
+    return { label: isLate ? 'Needs accept now' : 'Needs accept', tone: 'new', isLate }
+  }
+
+  if (order.status === 'Accepted') {
+    return { label: 'Start cooking', tone: 'kitchen', isLate }
+  }
+
+  if (order.status === 'Preparing') {
+    return { label: 'In kitchen', tone: 'kitchen', isLate }
+  }
+
+  return { label: 'Review order', tone: 'neutral', isLate }
+}
+
 export function StaffOrdersPage() {
   const { user } = useAuth()
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
@@ -86,6 +152,8 @@ export function StaffOrdersPage() {
   const [restaurants, setRestaurants] = useState<Restaurant[]>([])
   const [restaurantFilter, setRestaurantFilter] = useState('all')
   const [sortOption, setSortOption] = useState<SortOption>('newest')
+  const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [queue, setQueue] = useState<Queue>('active')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -96,14 +164,20 @@ export function StaffOrdersPage() {
     action: OrderTransitionAction
   } | null>(null)
   const [reason, setReason] = useState('')
+  const loadOrdersRef = useRef<() => Promise<void>>(() => Promise.resolve())
+  const restaurantFilterRef = useRef(restaurantFilter)
+  const isPlatformOwnerRef = useRef(isPlatformOwner)
+  const realtimeRefreshTimerRef = useRef<number | null>(null)
 
   const loadOrders = useCallback(async (showToast = false) => {
     try {
       setError(null)
       const sort = sortRequests[sortOption]
+      const normalizedSearch = debouncedSearch.trim()
       const request = {
         page: 1,
         pageSize: 100,
+        search: normalizedSearch || undefined,
         sortBy: sort.sortBy,
         sortDirection: sort.sortDirection,
         restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
@@ -121,7 +195,44 @@ export function StaffOrdersPage() {
     } finally {
       setLoading(false)
     }
-  }, [isPlatformOwner, restaurantFilter, sortOption])
+  }, [debouncedSearch, isPlatformOwner, restaurantFilter, sortOption])
+
+  useEffect(() => {
+    loadOrdersRef.current = () => loadOrders()
+  }, [loadOrders])
+
+  useEffect(() => {
+    restaurantFilterRef.current = restaurantFilter
+    isPlatformOwnerRef.current = isPlatformOwner
+  }, [isPlatformOwner, restaurantFilter])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(search.trim())
+    }, 250)
+
+    return () => window.clearTimeout(timer)
+  }, [search])
+
+  const shouldHandleRealtimeUpdate = useCallback((update: OrderRealtimeUpdate) => {
+    if (!isPlatformOwnerRef.current) {
+      return true
+    }
+
+    const activeRestaurantFilter = restaurantFilterRef.current
+    return activeRestaurantFilter === 'all' || update.restaurantId === activeRestaurantFilter
+  }, [])
+
+  const scheduleRealtimeRefresh = useCallback(() => {
+    if (realtimeRefreshTimerRef.current !== null) {
+      window.clearTimeout(realtimeRefreshTimerRef.current)
+    }
+
+    realtimeRefreshTimerRef.current = window.setTimeout(() => {
+      realtimeRefreshTimerRef.current = null
+      void loadOrdersRef.current()
+    }, 300)
+  }, [])
 
   useEffect(() => {
     if (!isPlatformOwner) return
@@ -141,6 +252,55 @@ export function StaffOrdersPage() {
     return () => window.clearInterval(refreshTimer)
   }, [loadOrders])
 
+  useEffect(() => {
+    if (!user) return
+
+    const client = createOrderRealtimeClient({
+      onOrderCreated: (update) => {
+        if (!shouldHandleRealtimeUpdate(update)) {
+          return
+        }
+
+        setQueue('active')
+        toast('New order received', {
+          description: `${update.orderNumber} is waiting in the staff queue.`,
+        })
+        scheduleRealtimeRefresh()
+      },
+      onOrderUpdated: (update) => {
+        if (shouldHandleRealtimeUpdate(update)) {
+          scheduleRealtimeRefresh()
+        }
+      },
+      onOrderPaymentUpdated: (update) => {
+        if (shouldHandleRealtimeUpdate(update)) {
+          scheduleRealtimeRefresh()
+        }
+      },
+      onOrderDeleted: (update) => {
+        if (shouldHandleRealtimeUpdate(update)) {
+          scheduleRealtimeRefresh()
+        }
+      },
+      onReconnected: () => {
+        void loadOrdersRef.current()
+      },
+    })
+
+    void client.start().catch((realtimeError) => {
+      console.warn('[SignalR] Staff order realtime connection failed.', realtimeError)
+    })
+
+    return () => {
+      if (realtimeRefreshTimerRef.current !== null) {
+        window.clearTimeout(realtimeRefreshTimerRef.current)
+        realtimeRefreshTimerRef.current = null
+      }
+
+      void client.stop()
+    }
+  }, [scheduleRealtimeRefresh, shouldHandleRealtimeUpdate, user])
+
   const visibleOrders = useMemo(
     () => orders.filter((order) => queueStatuses[queue].has(order.status)),
     [orders, queue],
@@ -153,6 +313,21 @@ export function StaffOrdersPage() {
     ready: orders.filter((order) => queueStatuses.ready.has(order.status)).length,
     closed: orders.filter((order) => queueStatuses.closed.has(order.status)).length,
   }), [orders])
+
+  const priorityCounts = useMemo(() => {
+    const now = lastUpdated ?? new Date()
+    const activeOrders = orders.filter((order) => queueStatuses.active.has(order.status))
+
+    return {
+      needsAction: activeOrders.filter((order) => {
+        const signal = getOrderSignal(order, now)
+        return signal.tone !== 'blocked' && signal.tone !== 'closed'
+      }).length,
+      ready: activeOrders.filter((order) => order.status === 'Ready').length,
+      late: activeOrders.filter((order) => getOrderSignal(order, now).isLate).length,
+      waitingPayment: activeOrders.filter(isOnlinePaymentBlocked).length,
+    }
+  }, [lastUpdated, orders])
 
   const selectedRestaurant = restaurants.find((restaurant) => restaurant.id === restaurantFilter)
   const restaurantName = isPlatformOwner
@@ -237,9 +412,28 @@ export function StaffOrdersPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-5">
-          <div className="flex flex-wrap gap-4">
+          <div className="staff-orders-priority-strip" aria-label="Staff order priority summary">
+            <div className="staff-orders-priority-pill is-action">
+              <strong>{priorityCounts.needsAction}</strong>
+              <span>Need action</span>
+            </div>
+            <div className="staff-orders-priority-pill is-ready">
+              <strong>{priorityCounts.ready}</strong>
+              <span>Ready now</span>
+            </div>
+            <div className="staff-orders-priority-pill is-late">
+              <strong>{priorityCounts.late}</strong>
+              <span>Over 20 min</span>
+            </div>
+            <div className="staff-orders-priority-pill is-blocked">
+              <strong>{priorityCounts.waitingPayment}</strong>
+              <span>Waiting payment</span>
+            </div>
+          </div>
+
+          <div className="staff-orders-toolbar">
             {isPlatformOwner ? (
-              <div className="w-full max-w-sm space-y-1.5">
+              <div className="staff-orders-filter space-y-1.5">
                 <span className="text-sm font-medium">Restaurant</span>
                 <Select value={restaurantFilter} onValueChange={setRestaurantFilter}>
                   <SelectTrigger aria-label="Filter staff orders by restaurant">
@@ -255,7 +449,33 @@ export function StaffOrdersPage() {
               </div>
             ) : null}
 
-            <div className="w-full max-w-xs space-y-1.5">
+            <div className="staff-orders-search space-y-1.5">
+              <span className="text-sm font-medium">Search orders</span>
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={search}
+                  className="h-10 pl-9 pr-9"
+                  placeholder="Order, table, or item"
+                  aria-label="Search staff orders"
+                  onChange={(event) => setSearch(event.target.value)}
+                />
+                {search.trim() ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="Clear order search"
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2"
+                    onClick={() => setSearch('')}
+                  >
+                    <X className="size-3.5" />
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="staff-orders-sort space-y-1.5">
               <span className="text-sm font-medium">Sort orders</span>
               <Select value={sortOption} onValueChange={(value) => setSortOption(value as SortOption)}>
                 <SelectTrigger aria-label="Sort staff orders">
@@ -300,11 +520,16 @@ export function StaffOrdersPage() {
           {loading && orders.length === 0 ? (
             <div className="dashboard-empty-state">Loading restaurant orders...</div>
           ) : visibleOrders.length === 0 ? (
-            <div className="dashboard-empty-state">No orders in this queue.</div>
+            <div className="dashboard-empty-state">
+              {debouncedSearch ? `No orders match "${debouncedSearch}" in this queue.` : 'No orders in this queue.'}
+            </div>
           ) : (
-            <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+            <div className="staff-orders-grid">
               {visibleOrders.map((order, index) => {
-                const onlinePaymentBlocked = order.paymentMethod === 'Online' && order.paymentStatus !== 'Paid'
+                const now = lastUpdated ?? new Date()
+                const signal = getOrderSignal(order, now)
+                const onlinePaymentBlocked = isOnlinePaymentBlocked(order)
+                const counterPaymentNeeded = needsCounterPayment(order)
                 const isBusy = busyOrderId === order.id
 
                 return (
@@ -314,8 +539,24 @@ export function StaffOrdersPage() {
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.18, delay: Math.min(index * 0.025, 0.15) }}
                   >
-                    <Card className="h-full">
+                    <Card className={cn(
+                      'staff-order-card',
+                      `staff-order-card-${signal.tone}`,
+                      signal.isLate && 'staff-order-card-late',
+                    )}>
                       <CardHeader className="space-y-3 pb-3">
+                        <div className="staff-order-signal-row">
+                          <Badge
+                            variant="outline"
+                            className={cn('staff-order-signal-badge', `is-${signal.tone}`)}
+                          >
+                            {signal.label}
+                          </Badge>
+                          <span className={cn('staff-order-wait-time', signal.isLate && 'is-late')}>
+                            <Clock3 size={13} />
+                            Waiting {formatElapsedTime(order, now)}
+                          </span>
+                        </div>
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <CardTitle className="text-base">{order.orderNumber}</CardTitle>
@@ -333,6 +574,11 @@ export function StaffOrdersPage() {
                           <OrderStatusBadge status={order.status} />
                           <PaymentStatusBadge status={order.paymentStatus} />
                           <Badge variant="secondary">{order.restaurantName ?? 'Assigned restaurant'}</Badge>
+                          {counterPaymentNeeded ? (
+                            <Badge variant="outline" className="staff-order-counter-badge">
+                              Counter payment due
+                            </Badge>
+                          ) : null}
                           <Badge variant="outline">
                             <CreditCard size={12} />
                             {order.paymentMethod === 'PayAtCounter' ? 'Counter' : 'Online'}
@@ -398,7 +644,7 @@ export function StaffOrdersPage() {
                           </div>
                         ) : null}
 
-                        <div className="flex flex-wrap gap-2 border-t pt-4">
+                        <div className="staff-order-action-row">
                           {order.paymentMethod === 'PayAtCounter' && order.paymentStatus !== 'Paid' ? (
                             <Button type="button" variant="outline" size="sm" disabled={isBusy} onClick={() => void markCounterPayment(order)}>
                               Mark paid
@@ -410,6 +656,7 @@ export function StaffOrdersPage() {
                               type="button"
                               size="sm"
                               variant={action === 'Reject' || action === 'Cancel' ? 'destructive' : 'default'}
+                              className={cn(action !== 'Reject' && action !== 'Cancel' && 'staff-order-primary-action')}
                               disabled={isBusy}
                               onClick={() => beginTransition(order, action)}
                             >

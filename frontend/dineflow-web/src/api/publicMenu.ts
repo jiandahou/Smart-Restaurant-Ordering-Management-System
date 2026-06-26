@@ -85,9 +85,18 @@ export function getPublicTableOrderingContext(qrToken: string) {
   )
 }
 
-export function getPublicRestaurantMenu(restaurantId: string) {
+export function getPublicRestaurantMenu(restaurantId: string, search?: string) {
+  const params = new URLSearchParams()
+  const normalizedSearch = search?.trim()
+
+  if (normalizedSearch) {
+    params.set('search', normalizedSearch)
+  }
+
+  const query = params.toString()
+
   return publicRequest<PublicMenu>(
-    `/api/public/menu/restaurants/${encodeURIComponent(restaurantId)}`,
+    `/api/public/menu/restaurants/${encodeURIComponent(restaurantId)}${query ? `?${query}` : ''}`,
   )
 }
 

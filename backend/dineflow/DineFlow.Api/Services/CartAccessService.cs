@@ -128,7 +128,9 @@ public sealed class CartAccessService(AppDbContext dbContext)
             .Select(item =>
             {
                 var selectedOptions = GetSelectedOptions(item);
-                var unitPrice = CalculateUnitPrice(item.MenuItem?.Price ?? 0, selectedOptions);
+                var unitPrice = PricingCalculator.CalculateUnitPrice(
+                    item.MenuItem?.Price ?? 0,
+                    selectedOptions.Select(option => new MenuOptionPriceSelection(option.Option, option.Quantity)));
 
                 return new CartItemResponse
                 {
@@ -138,7 +140,7 @@ public sealed class CartAccessService(AppDbContext dbContext)
                     ImageUrl = item.MenuItem?.ImageUrl,
                     Quantity = item.Quantity,
                     UnitPrice = unitPrice,
-                    LineTotal = item.Quantity * unitPrice,
+                    LineTotal = PricingCalculator.CalculateLineTotal(item.Quantity, unitPrice),
                     Note = item.Note,
                     SelectedOptions = selectedOptions.Select(option => new CartItemOptionResponse
                     {
@@ -168,7 +170,7 @@ public sealed class CartAccessService(AppDbContext dbContext)
             ExpiresAt = cart.ExpiresAt,
             CreatedAt = cart.CreatedAt,
             UpdatedAt = cart.UpdatedAt,
-            Total = items.Sum(item => item.LineTotal),
+            Total = PricingCalculator.CalculateTotal(items.Select(item => (item.Quantity, item.UnitPrice))),
             ItemCount = items.Sum(item => item.Quantity),
             Items = items
         };
@@ -195,25 +197,6 @@ public sealed class CartAccessService(AppDbContext dbContext)
                 .Where(option => selectedOptionCounts.ContainsKey(option.Id))
                 .Select(option => new CartSelectedOption(group, option, selectedOptionCounts[option.Id])))
             .ToList();
-    }
-
-    private static decimal CalculateUnitPrice(decimal basePrice, IEnumerable<CartSelectedOption> selectedOptions)
-    {
-        var unitPrice = basePrice;
-
-        foreach (var selectedOption in selectedOptions)
-        {
-            var option = selectedOption.Option;
-            unitPrice = option.AdjustmentType switch
-            {
-                OptionAdjustmentType.Add => unitPrice + option.PriceAdjustment * selectedOption.Quantity,
-                OptionAdjustmentType.Remove => unitPrice + option.PriceAdjustment * selectedOption.Quantity,
-                OptionAdjustmentType.Replace => option.PriceAdjustment,
-                _ => unitPrice
-            };
-        }
-
-        return unitPrice;
     }
 
     private sealed record CartSelectedOption(MenuItemOptionGroup Group, MenuItemOption Option, int Quantity);

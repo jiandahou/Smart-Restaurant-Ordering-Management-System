@@ -1,5 +1,5 @@
-import { CircleCheck, CircleX, ClipboardList } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { CircleCheck, CircleX, ClipboardList, Utensils } from 'lucide-react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 
@@ -8,8 +8,10 @@ type PaymentResultPageProps = {
 }
 
 export function PaymentResultPage({ result }: PaymentResultPageProps) {
+  const [searchParams] = useSearchParams()
   const isSuccess = result === 'success'
   const Icon = isSuccess ? CircleCheck : CircleX
+  const menuReturnPath = getSafeMenuReturnPath(searchParams.get('returnTo'))
 
   return (
     <main className="login-screen">
@@ -39,8 +41,38 @@ export function PaymentResultPage({ result }: PaymentResultPageProps) {
               View my orders
             </Link>
           </Button>
+          {menuReturnPath ? (
+            <Button variant="outline" asChild>
+              <Link to={menuReturnPath}>
+                <Utensils size={18} />
+                Back to menu
+              </Link>
+            </Button>
+          ) : null}
         </CardContent>
       </Card>
     </main>
   )
+}
+
+function getSafeMenuReturnPath(returnTo: string | null) {
+  if (!returnTo) {
+    return null
+  }
+
+  const candidate = returnTo.trim()
+  if (
+    !candidate.startsWith('/') ||
+    candidate.startsWith('//') ||
+    candidate.includes('://')
+  ) {
+    return null
+  }
+
+  const path = candidate.split(/[?#]/, 1)[0]
+  if (path.startsWith('/table/') || (path.startsWith('/r/') && path.endsWith('/menu'))) {
+    return candidate
+  }
+
+  return null
 }

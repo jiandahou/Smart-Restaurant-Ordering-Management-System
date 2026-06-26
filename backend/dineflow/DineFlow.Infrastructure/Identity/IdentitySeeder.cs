@@ -1,3 +1,5 @@
+using Amazon.S3;
+using Amazon.S3.Model;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Orders;
@@ -8,6 +10,8 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using RestaurantEntity = DineFlow.Infrastructure.Restaurant.Restaurant;
 
 namespace DineFlow.Infrastructure.Identity;
@@ -33,6 +37,7 @@ public static class IdentitySeeder
             ["Gulab Jamun"] = "/seed-menu/gulab-jamun.svg",
             ["Chocolate Lava Cake"] = "/seed-menu/chocolate-lava-cake.svg"
         };
+    private static IReadOnlyDictionary<string, string> ResolvedSeedMenuImageUrls = SeedMenuImageUrls;
     private static readonly string[] DemoOrderItemNames =
     [
         "Butter Chicken", "Mango Lassi", "Grilled Salmon", "Veg Fried Rice",
@@ -53,6 +58,7 @@ public static class IdentitySeeder
         var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
         var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
         var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        ResolvedSeedMenuImageUrls = await ResolveSeedMenuImageUrlsAsync(scope.ServiceProvider, configuration);
 
         // ── Roles ────────────────────────────────────────────────────────────
         foreach (var role in ApplicationRoles.All)
@@ -1221,17 +1227,23 @@ public static class IdentitySeeder
 
     private static string? GetSeedMenuImageUrl(string itemName)
     {
-        return SeedMenuImageUrls.TryGetValue(itemName, out var imageUrl) ? imageUrl : null;
+        return ResolvedSeedMenuImageUrls.TryGetValue(itemName, out var imageUrl) ? imageUrl : null;
     }
 
     private static async Task BackfillSeedMenuImagesAsync(AppDbContext dbContext)
     {
         var seedItemNames = SeedMenuImageUrls.Keys.ToArray();
+        var seedImageUrlMap = SeedMenuImageUrls
+            .Where(seed => ResolvedSeedMenuImageUrls.ContainsKey(seed.Key))
+            .ToDictionary(
+                seed => seed.Value,
+                seed => ResolvedSeedMenuImageUrls[seed.Key],
+                StringComparer.OrdinalIgnoreCase);
+        var localSeedImageUrls = seedImageUrlMap.Keys.ToArray();
         var existingSeedItems = await dbContext.MenuItems
             .Where(item =>
-                item.RestaurantId == RestaurantOneId &&
-                seedItemNames.Contains(item.Name) &&
-                (item.ImageUrl == null || item.ImageUrl == string.Empty))
+                seedItemNames.Contains(item.Name) ||
+                (item.ImageUrl != null && localSeedImageUrls.Contains(item.ImageUrl)))
             .ToListAsync();
 
         if (existingSeedItems.Count == 0)
@@ -1241,11 +1253,139 @@ public static class IdentitySeeder
 
         foreach (var item in existingSeedItems)
         {
-            item.ImageUrl = GetSeedMenuImageUrl(item.Name);
-            item.UpdatedAt = DateTime.UtcNow;
+            var imageUrl = GetSeedMenuImageUrl(item.Name);
+
+            if (imageUrl is null &&
+                item.ImageUrl is not null &&
+                seedImageUrlMap.TryGetValue(item.ImageUrl, out var migratedImageUrl))
+            {
+                imageUrl = migratedImageUrl;
+            }
+
+            if (imageUrl is not null &&
+                !string.Equals(item.ImageUrl, imageUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                item.ImageUrl = imageUrl;
+                item.UpdatedAt = DateTime.UtcNow;
+            }
         }
 
         await dbContext.SaveChangesAsync();
+    }
+
+    private static async Task<IReadOnlyDictionary<string, string>> ResolveSeedMenuImageUrlsAsync(
+        IServiceProvider serviceProvider,
+        IConfiguration configuration)
+    {
+        if (!IsS3StorageEnabled(configuration))
+        {
+            return SeedMenuImageUrls;
+        }
+
+        var logger = serviceProvider
+            .GetService<ILoggerFactory>()?
+            .CreateLogger("DineFlow.Infrastructure.Identity.IdentitySeeder");
+        var s3Client = serviceProvider.GetService<IAmazonS3>();
+
+        if (s3Client is null)
+        {
+            logger?.LogWarning("S3 seed menu image upload skipped because IAmazonS3 is not registered.");
+            return SeedMenuImageUrls;
+        }
+
+        var hostEnvironment = serviceProvider.GetService<IHostEnvironment>();
+        var seedMenuDirectory = ResolveSeedMenuDirectory(hostEnvironment?.ContentRootPath);
+
+        if (!Directory.Exists(seedMenuDirectory))
+        {
+            logger?.LogWarning("S3 seed menu image upload skipped because {SeedMenuDirectory} was not found.", seedMenuDirectory);
+            return SeedMenuImageUrls;
+        }
+
+        var bucket = configuration["AvatarStorage:Bucket"]?.Trim() ?? string.Empty;
+        var resolvedUrls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var seedImage in SeedMenuImageUrls)
+        {
+            var objectKey = seedImage.Value.TrimStart('/').Replace('\\', '/');
+            var filePath = Path.Combine(seedMenuDirectory, Path.GetFileName(objectKey));
+
+            if (!File.Exists(filePath))
+            {
+                logger?.LogWarning("Seed menu image {FilePath} was not found; keeping local URL {ImageUrl}.", filePath, seedImage.Value);
+                resolvedUrls[seedImage.Key] = seedImage.Value;
+                continue;
+            }
+
+            await EnsureSeedMenuImageObjectAsync(s3Client, bucket, objectKey, filePath);
+            resolvedUrls[seedImage.Key] = BuildSeedMenuImagePublicUrl(configuration, objectKey);
+        }
+
+        return resolvedUrls;
+    }
+
+    private static bool IsS3StorageEnabled(IConfiguration configuration)
+    {
+        return string.Equals(configuration["AvatarStorage:Provider"], "S3", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(configuration["AvatarStorage:Bucket"]);
+    }
+
+    private static string ResolveSeedMenuDirectory(string? contentRootPath)
+    {
+        var candidateRoots = new[]
+        {
+            contentRootPath,
+            Directory.GetCurrentDirectory(),
+            AppContext.BaseDirectory
+        };
+
+        foreach (var root in candidateRoots.Where(root => !string.IsNullOrWhiteSpace(root)))
+        {
+            var seedMenuDirectory = Path.Combine(root!, "wwwroot", "seed-menu");
+
+            if (Directory.Exists(seedMenuDirectory))
+            {
+                return seedMenuDirectory;
+            }
+        }
+
+        return Path.Combine(contentRootPath ?? Directory.GetCurrentDirectory(), "wwwroot", "seed-menu");
+    }
+
+    private static async Task EnsureSeedMenuImageObjectAsync(
+        IAmazonS3 s3Client,
+        string bucket,
+        string objectKey,
+        string filePath)
+    {
+        await using var fileStream = File.OpenRead(filePath);
+        await s3Client.PutObjectAsync(new PutObjectRequest
+        {
+            BucketName = bucket,
+            Key = objectKey,
+            InputStream = fileStream,
+            ContentType = "image/svg+xml"
+        });
+    }
+
+    private static string BuildSeedMenuImagePublicUrl(IConfiguration configuration, string objectKey)
+    {
+        var publicBaseUrl = configuration["AvatarStorage:PublicBaseUrl"];
+
+        if (!string.IsNullOrWhiteSpace(publicBaseUrl))
+        {
+            return $"{publicBaseUrl.TrimEnd('/')}/{objectKey}";
+        }
+
+        var bucket = configuration["AvatarStorage:Bucket"]?.Trim() ?? string.Empty;
+        var region = configuration["AvatarStorage:Region"]?.Trim();
+
+        if (string.IsNullOrWhiteSpace(region))
+        {
+            region = "ap-southeast-2";
+        }
+
+        return $"https://{bucket}.s3.{region}.amazonaws.com/{objectKey}";
     }
 
     private static async Task BackfillSeedOrderItemNameSnapshotsAsync(AppDbContext dbContext)

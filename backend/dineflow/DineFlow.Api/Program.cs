@@ -65,6 +65,7 @@ builder.Services.Configure<DataProtectionTokenProviderOptions>(options =>
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
 builder.Services.AddScoped<CartAccessService>();
 builder.Services.AddScoped<CartRealtimeNotifier>();
+builder.Services.AddScoped<OrderRealtimeNotifier>();
 builder.Services.AddSingleton<IOAuthLoginCodeStore, MemoryOAuthLoginCodeStore>();
 builder.Services.AddSingleton<IMfaLoginChallengeStore, MemoryMfaLoginChallengeStore>();
 builder.Services.AddSingleton<IMfaEmailSetupCodeStore, MemoryMfaEmailSetupCodeStore>();
@@ -214,6 +215,22 @@ var authenticationBuilder = builder.Services
             ValidAudience = jwtOptions.Audience,
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtOptions.SecretKey)),
             ClockSkew = TimeSpan.Zero
+        };
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                var path = context.HttpContext.Request.Path;
+
+                if (!string.IsNullOrWhiteSpace(accessToken) &&
+                    path.StartsWithSegments("/api/hubs/orders"))
+                {
+                    context.Token = accessToken;
+                }
+
+                return Task.CompletedTask;
+            }
         };
     });
 
@@ -401,6 +418,7 @@ app.MapGet("/health/ready", async (AppDbContext dbContext) =>
 Console.WriteLine("Health check endpoint registered at /health");
 app.MapControllers();
 app.MapHub<CartHub>("/api/hubs/carts");
+app.MapHub<OrderHub>("/api/hubs/orders");
 Console.WriteLine("Applying database migrations...");
 using (var scope = app.Services.CreateScope())
 {
