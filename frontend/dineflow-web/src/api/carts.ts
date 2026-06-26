@@ -153,6 +153,14 @@ export async function deleteCartItem(
   )
 }
 
+export async function clearCartItems(cartId: string, participantToken: string) {
+  return cartRequest<Cart>(
+    `/api/public/carts/${cartId}/items`,
+    { method: 'DELETE' },
+    participantToken,
+  )
+}
+
 export async function updateCartNote(
   cartId: string,
   participantToken: string,

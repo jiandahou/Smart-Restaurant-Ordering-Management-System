@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Navigate, useLocation } from 'react-router-dom'
-import { AlertCircle, Banknote, CheckCircle, CreditCard, Loader2, Receipt, ShoppingBag, Utensils } from 'lucide-react'
+import { Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { AlertCircle, ArrowLeft, Banknote, CheckCircle, CreditCard, Loader2, Receipt, ShoppingBag, Utensils } from 'lucide-react'
 import { toast } from 'sonner'
 import { createPublicPaymentSession, selectOrderPaymentMethod, type SubmittedOrder } from '@/api/carts'
 import { Badge } from '@/components/ui/badge'
@@ -17,6 +17,7 @@ export type CheckoutNavigationState = {
   restaurantName: string
   tableNumber: string | null
   paymentPolicy: 'PrepayRequired' | 'PayAtCounterAllowed'
+  returnPath?: string
 }
 
 type PageState =
@@ -27,6 +28,7 @@ type PageState =
 
 export function CheckoutPage() {
   const location = useLocation()
+  const navigate = useNavigate()
   const routerState = location.state as CheckoutNavigationState | null
   const [pageState, setPageState] = useState<PageState>({ status: 'ready' })
 
@@ -39,6 +41,7 @@ export function CheckoutPage() {
   }
 
   const { order, cartId, participantToken, currency, restaurantName, tableNumber, paymentPolicy } = routerState
+  const returnPath = routerState.returnPath ?? (order.restaurantId ? `/r/${encodeURIComponent(order.restaurantId)}/menu` : '/')
   const isDineIn = order.orderType === 0
   const displayedTableNumber = order.tableNumber ?? tableNumber
   const orderScope = displayedTableNumber
@@ -74,10 +77,15 @@ export function CheckoutPage() {
     }
   }
 
+  const handleBack = () => {
+    navigate(returnPath)
+  }
+
   if (pageState.status === 'pay_offline') {
     return (
       <main className="flex min-h-svh flex-col items-center justify-start bg-background px-4 pt-8 pb-16">
         <div className="w-full max-w-lg space-y-5">
+          <CheckoutBackButton onClick={handleBack} />
           <OrderContextHeader restaurantName={restaurantName} tableNumber={displayedTableNumber} isDineIn={isDineIn} />
           <Card>
             <CardContent className="flex flex-col items-center gap-4 p-8 text-center">
@@ -108,6 +116,7 @@ export function CheckoutPage() {
   return (
     <main className="flex min-h-svh flex-col items-center justify-start bg-background px-4 pt-8 pb-16">
       <div className="w-full max-w-lg space-y-5">
+        <CheckoutBackButton onClick={handleBack} />
         <OrderContextHeader restaurantName={restaurantName} tableNumber={displayedTableNumber} isDineIn={isDineIn} />
 
         <Card>
@@ -222,6 +231,21 @@ export function CheckoutPage() {
         </p>
       </div>
     </main>
+  )
+}
+
+function CheckoutBackButton({ onClick }: { onClick: () => void }) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      className="-ml-2 h-9 w-fit gap-2 rounded-full px-2 text-muted-foreground hover:text-foreground"
+      onClick={onClick}
+    >
+      <ArrowLeft className="size-4" />
+      Back to menu
+    </Button>
   )
 }
 

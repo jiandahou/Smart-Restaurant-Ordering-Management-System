@@ -612,6 +612,7 @@ export type AdminOrderSummary = {
 
 export type CreateOrderCheckoutSessionRequest = {
   orderId: string
+  returnTo?: string
 }
 
 export type CreateCheckoutSessionResponse = {

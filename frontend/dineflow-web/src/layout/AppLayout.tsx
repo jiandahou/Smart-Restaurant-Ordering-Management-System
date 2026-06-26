@@ -18,6 +18,7 @@ import { motion } from 'motion/react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useAuth } from '../auth/AuthContext'
+import { DemoIdentitySwitcher } from '../components/DemoIdentitySwitcher'
 import { Avatar, AvatarFallback, AvatarImage } from '../components/ui/avatar'
 import { Button } from '../components/ui/button'
 
@@ -56,6 +57,7 @@ export function AppLayout() {
   const canUseAdminTools = hasAnyRole(adminRoles)
   const canUseStaffOrders = hasAnyRole(restaurantStaffRoles)
   const isAdminArea = location.pathname.startsWith('/admin')
+  const isStaffOrdersArea = location.pathname.startsWith('/staff/orders')
   const isBackendPulseActive = backendStatus === 'checking' || backendStatus === 'ok'
 
   const handleLogout = () => {
@@ -86,7 +88,7 @@ export function AppLayout() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${isStaffOrdersArea ? ' staff-orders-shell' : ''}`}>
       <header className="topbar">
         <div>
           <p className="eyebrow">DineFlow</p>
@@ -104,6 +106,7 @@ export function AppLayout() {
               <span>{user?.email || 'Browser order tracking'}</span>
             </div>
           </div>
+          <DemoIdentitySwitcher />
           <NavLink to="/my-orders" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
             <ShoppingBag size={18} />
             My Orders

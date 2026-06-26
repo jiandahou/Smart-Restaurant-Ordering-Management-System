@@ -4,14 +4,17 @@ using DineFlow.Api.Contracts.Common;
 using DineFlow.Api.Contracts.Payments;
 using DineFlow.Api.Extensions;
 using DineFlow.Api.Options;
+using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
+using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Stripe;
@@ -32,6 +35,7 @@ public class PaymentsController : ControllerBase
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly IStripeClient _stripeClient;
     private readonly StripeOptions _stripeOptions;
+    private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
     private readonly ILogger<PaymentsController> _logger;
 
     public PaymentsController(
@@ -39,12 +43,14 @@ public class PaymentsController : ControllerBase
         UserManager<ApplicationUser> userManager,
         IStripeClient stripeClient,
         IOptions<StripeOptions> stripeOptions,
+        OrderRealtimeNotifier orderRealtimeNotifier,
         ILogger<PaymentsController> logger)
     {
         _dbContext = dbContext;
         _userManager = userManager;
         _stripeClient = stripeClient;
         _stripeOptions = stripeOptions.Value;
+        _orderRealtimeNotifier = orderRealtimeNotifier;
         _logger = logger;
     }
 
@@ -139,7 +145,7 @@ public class PaymentsController : ControllerBase
         });
     }
 
-    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    [AllowAnonymous]
     [HttpPost("checkout-session/order")]
     public async Task<ActionResult<CreateCheckoutSessionResponse>> CreateOrderCheckoutSession(
         CreateOrderCheckoutSessionRequest request,
@@ -164,6 +170,7 @@ public class PaymentsController : ControllerBase
         var order = await _dbContext.Orders
             .Include(currentOrder => currentOrder.OrderItems)
             .Include(currentOrder => currentOrder.Restaurant)
+            .Include(currentOrder => currentOrder.Table)
             .FirstOrDefaultAsync(currentOrder => currentOrder.Id == request.OrderId, cancellationToken);
 
         if (order is null)
@@ -171,8 +178,13 @@ public class PaymentsController : ControllerBase
             return NotFound(new { message = "Order not found." });
         }
 
-        if (!await CanAccessRestaurantAsync(order.RestaurantId))
+        if (!await CanStartCheckoutSessionForOrderAsync(order))
         {
+            if (User.Identity?.IsAuthenticated != true)
+            {
+                return Unauthorized(new { message = "Sign in to continue payment for this order." });
+            }
+
             return Forbid();
         }
 
@@ -181,9 +193,12 @@ public class PaymentsController : ControllerBase
             return BadRequest(new { message = "Order has no items to pay for." });
         }
 
-        if (order.PaymentStatus == PaymentStatus.Paid)
+        if (order.PaymentStatus is PaymentStatus.Paid
+            or PaymentStatus.Refunded
+            or PaymentStatus.PartiallyRefunded
+            or PaymentStatus.NotRequired)
         {
-            return Conflict(new { message = "This order has already been paid." });
+            return Conflict(new { message = "This order cannot be paid online." });
         }
 
         if (order.PaymentMethod != PaymentMethod.Online)
@@ -220,7 +235,7 @@ public class PaymentsController : ControllerBase
         {
             OrderId = order.Id,
             Provider = PaymentProviders.Stripe,
-            AmountCents = ConvertAmountToCents(order.TotalAmount),
+            AmountCents = PricingCalculator.ToMinorCurrencyUnits(order.TotalAmount),
             Currency = currency,
             Status = PaymentStatus.Pending
         };
@@ -228,11 +243,12 @@ public class PaymentsController : ControllerBase
         _dbContext.Payments.Add(payment);
         await _dbContext.SaveChangesAsync(cancellationToken);
 
+        var returnTo = NormalizeMenuReturnPath(request.ReturnTo);
         var sessionOptions = new SessionCreateOptions
         {
             Mode = "payment",
-            SuccessUrl = AddCheckoutSessionId(_stripeOptions.SuccessUrl),
-            CancelUrl = _stripeOptions.CancelUrl,
+            SuccessUrl = AddCheckoutSessionId(AddReturnToUrl(_stripeOptions.SuccessUrl, returnTo)),
+            CancelUrl = AddReturnToUrl(_stripeOptions.CancelUrl, returnTo),
             CustomerEmail = string.IsNullOrWhiteSpace(email) ? null : email,
             LineItems = order.OrderItems
                 .OrderBy(item => item.CreatedAt)
@@ -243,7 +259,7 @@ public class PaymentsController : ControllerBase
                     PriceData = new SessionLineItemPriceDataOptions
                     {
                         Currency = currency,
-                        UnitAmount = ConvertAmountToCents(item.UnitPrice),
+                        UnitAmount = PricingCalculator.ToMinorCurrencyUnits(item.UnitPrice),
                         ProductData = new SessionLineItemPriceDataProductDataOptions
                         {
                             Name = ResolveStripeProductName(item, menuItemNamesById)
@@ -281,6 +297,7 @@ public class PaymentsController : ControllerBase
             order.PaymentStatus = PaymentStatus.Pending;
             order.UpdatedAt = DateTime.UtcNow;
             await _dbContext.SaveChangesAsync(cancellationToken);
+            await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 
             return Ok(new CreateCheckoutSessionResponse
             {
@@ -302,6 +319,7 @@ public class PaymentsController : ControllerBase
             order.PaymentStatus = PaymentStatus.Failed;
             order.UpdatedAt = DateTime.UtcNow;
             await _dbContext.SaveChangesAsync(cancellationToken);
+            await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 
             return BadRequest(new
             {
@@ -450,11 +468,6 @@ public class PaymentsController : ControllerBase
         return false;
     }
 
-    private static long ConvertAmountToCents(decimal amount)
-    {
-        return Convert.ToInt64(Math.Round(amount * 100m, MidpointRounding.AwayFromZero));
-    }
-
     private static string ResolveStripeProductName(
         OrderItem item,
         IReadOnlyDictionary<Guid, string> menuItemNamesById)
@@ -486,6 +499,44 @@ public class PaymentsController : ControllerBase
         return url.Contains("{CHECKOUT_SESSION_ID}", StringComparison.Ordinal)
             ? url
             : $"{url}{separator}session_id={{CHECKOUT_SESSION_ID}}";
+    }
+
+    private static string AddReturnToUrl(string url, string? returnTo)
+    {
+        if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(returnTo))
+        {
+            return url;
+        }
+
+        return QueryHelpers.AddQueryString(url, "returnTo", returnTo);
+    }
+
+    private static string? NormalizeMenuReturnPath(string? returnTo)
+    {
+        if (string.IsNullOrWhiteSpace(returnTo))
+        {
+            return null;
+        }
+
+        var candidate = returnTo.Trim();
+        if (!candidate.StartsWith("/", StringComparison.Ordinal) ||
+            candidate.StartsWith("//", StringComparison.Ordinal) ||
+            candidate.Contains("://", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var queryIndex = candidate.IndexOfAny(['?', '#']);
+        var path = queryIndex >= 0 ? candidate[..queryIndex] : candidate;
+
+        if (path.StartsWith("/table/", StringComparison.OrdinalIgnoreCase) ||
+            (path.StartsWith("/r/", StringComparison.OrdinalIgnoreCase) &&
+                path.EndsWith("/menu", StringComparison.OrdinalIgnoreCase)))
+        {
+            return candidate;
+        }
+
+        return null;
     }
 
     private async Task UpdatePaymentFromCheckoutSessionAsync(
@@ -526,6 +577,11 @@ public class PaymentsController : ControllerBase
         }
 
         await _dbContext.SaveChangesAsync(cancellationToken);
+        if (payment.Order is not null)
+        {
+            await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(payment.Order, cancellationToken);
+        }
+
         _logger.LogInformation(
             "Updated payment {PaymentId} to {Status} from Stripe checkout session {SessionId}.",
             payment.Id,
@@ -565,6 +621,11 @@ public class PaymentsController : ControllerBase
         }
 
         await _dbContext.SaveChangesAsync(cancellationToken);
+        if (payment.Order is not null)
+        {
+            await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(payment.Order, cancellationToken);
+        }
+
         _logger.LogInformation(
             "Updated payment {PaymentId} to {Status} from Stripe payment intent {PaymentIntentId}.",
             payment.Id,
@@ -633,6 +694,23 @@ public class PaymentsController : ControllerBase
 
         var currentUser = await _userManager.FindByIdAsync(currentUserId);
         return currentUser?.RestaurantId;
+    }
+
+    private async Task<bool> CanStartCheckoutSessionForOrderAsync(Order order)
+    {
+        if (await CanAccessRestaurantAsync(order.RestaurantId))
+        {
+            return true;
+        }
+
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        if (!string.IsNullOrWhiteSpace(order.CustomerId))
+        {
+            return string.Equals(order.CustomerId, currentUserId, StringComparison.Ordinal);
+        }
+
+        return true;
     }
 
     private async Task<bool> CanAccessRestaurantAsync(Guid? restaurantId)

@@ -7,14 +7,13 @@ import {
   CreditCard,
   ExternalLink,
   LayoutDashboard,
-  LogIn,
   QrCode,
   RefreshCw,
   Store,
   Utensils,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
   getAdminOrders,
@@ -45,32 +44,6 @@ import {
 import { buildTablePublicUrl, buildTakeawayPublicUrl } from '../lib/publicUrls'
 
 type DashboardRestaurant = Pick<Restaurant, 'id' | 'name' | 'isActive' | 'currency'>
-
-const demoLoginEnabled = import.meta.env.VITE_ENABLE_DEMO_LOGIN === 'true'
-const demoSeedPassword = import.meta.env.VITE_DEMO_SEED_PASSWORD || 'DineFlow123!'
-
-const demoIdentities = [
-  {
-    label: 'Restaurant owner',
-    email: 'owner.one@dineflow.test',
-    role: 'RestaurantOwner',
-  },
-  {
-    label: 'Admin',
-    email: 'admin.one.a@dineflow.test',
-    role: 'Admin',
-  },
-  {
-    label: 'Staff',
-    email: 'staff.one.a@dineflow.test',
-    role: 'Staff',
-  },
-  {
-    label: 'Customer',
-    email: 'customer.one@dineflow.test',
-    role: 'Customer',
-  },
-]
 
 function formatMoney(amount: number, currencyCode?: string | null) {
   return new Intl.NumberFormat(undefined, {
@@ -280,59 +253,6 @@ function MetricCard({ label, value, detail }: { label: string; value: string | n
   )
 }
 
-function DemoIdentitySwitcher() {
-  const { loginUser } = useAuth()
-  const navigate = useNavigate()
-  const [switchingEmail, setSwitchingEmail] = useState<string | null>(null)
-
-  const switchIdentity = async (email: string, role: string) => {
-    setSwitchingEmail(email)
-
-    try {
-      await loginUser(email, demoSeedPassword)
-      toast.success(`Switched to ${role}`)
-      navigate(role === 'Customer' ? '/me' : '/admin')
-    } catch (error) {
-      toast.error('Could not switch identity', {
-        description: error instanceof Error ? error.message : 'Seed login failed.',
-      })
-    } finally {
-      setSwitchingEmail(null)
-    }
-  }
-
-  return (
-    <Card>
-      <CardHeader>
-        <div className="admin-page-title">
-          <LogIn size={22} />
-          <div>
-            <CardTitle>Demo identity switcher</CardTitle>
-            <CardDescription>Quickly check the seeded roles without leaving the console.</CardDescription>
-          </div>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <div className="dashboard-identity-grid">
-          {demoIdentities.map((identity) => (
-            <button
-              key={identity.email}
-              type="button"
-              className="dashboard-identity-card"
-              onClick={() => void switchIdentity(identity.email, identity.role)}
-              disabled={switchingEmail !== null}
-            >
-              <span>{identity.label}</span>
-              <strong>{identity.email}</strong>
-              <small>{switchingEmail === identity.email ? 'Signing in...' : identity.role}</small>
-            </button>
-          ))}
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
 export function AdminDashboardPage() {
   const { user } = useAuth()
   const [orders, setOrders] = useState<AdminOrder[]>([])
@@ -522,8 +442,6 @@ export function AdminDashboardPage() {
           </CardContent>
         </Card>
       </div>
-
-      {isPlatformOwner && demoLoginEnabled && <DemoIdentitySwitcher />}
     </main>
   )
 }

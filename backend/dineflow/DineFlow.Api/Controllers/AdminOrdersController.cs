@@ -3,8 +3,10 @@ using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Common;
 using DineFlow.Api.Contracts.Order;
 using DineFlow.Api.Extensions;
+using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
+using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
@@ -29,13 +31,16 @@ public class AdminOrdersController : ControllerBase
 
     private readonly AppDbContext _dbContext;
     private readonly UserManager<ApplicationUser> _userManager;
+    private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
 
     public AdminOrdersController(
         AppDbContext dbContext,
-        UserManager<ApplicationUser> userManager)
+        UserManager<ApplicationUser> userManager,
+        OrderRealtimeNotifier orderRealtimeNotifier)
     {
         _dbContext = dbContext;
         _userManager = userManager;
+        _orderRealtimeNotifier = orderRealtimeNotifier;
     }
 
     [HttpGet]
@@ -246,7 +251,7 @@ public class AdminOrdersController : ControllerBase
             OrderId = order.Id,
             Order = order,
             Provider = PaymentProviders.Counter,
-            AmountCents = Convert.ToInt64(Math.Round(order.TotalAmount * 100m, MidpointRounding.AwayFromZero)),
+            AmountCents = PricingCalculator.ToMinorCurrencyUnits(order.TotalAmount),
             Currency = string.IsNullOrWhiteSpace(order.Restaurant?.Currency)
                 ? "aud"
                 : order.Restaurant.Currency.ToLowerInvariant(),
@@ -259,6 +264,7 @@ public class AdminOrdersController : ControllerBase
         _dbContext.Payments.Add(counterPayment);
 
         await _dbContext.SaveChangesAsync(cancellationToken);
+        await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
         return Ok(MapToAdminResponse(order));
     }
 
@@ -353,6 +359,7 @@ public class AdminOrdersController : ControllerBase
         _dbContext.OrderStatusHistories.Add(statusHistory);
 
         await _dbContext.SaveChangesAsync(cancellationToken);
+        await _orderRealtimeNotifier.OrderUpdatedAsync(order, cancellationToken);
         return Ok(MapToAdminResponse(order));
     }
 
@@ -521,7 +528,7 @@ public class AdminOrdersController : ControllerBase
                     ItemNameSnapshot = ResolveItemNameSnapshot(order.OrderNumber, item.MenuItemNameSnapshot, index),
                     Quantity = item.Quantity,
                     UnitPrice = item.UnitPrice,
-                    TotalPrice = item.Quantity * item.UnitPrice,
+                    TotalPrice = PricingCalculator.CalculateLineTotal(item.Quantity, item.UnitPrice),
                     Note = item.ItemInstructions,
                     SelectedOptions = item.SelectedOptions
                         .OrderBy(option => option.GroupNameSnapshot)

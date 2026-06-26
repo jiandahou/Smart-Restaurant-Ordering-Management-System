@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
@@ -106,6 +106,8 @@ export function AdminPaymentsPage() {
   const [totalItems, setTotalItems] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null)
+  const tableWrapRef = useRef<HTMLDivElement | null>(null)
+  const [tableViewportWidth, setTableViewportWidth] = useState<number | null>(null)
   const [sort, setSort] = useState<{ key: SortKey; direction: 'asc' | 'desc' }>({
     key: 'createdAt',
     direction: 'desc',
@@ -176,6 +178,29 @@ export function AdminPaymentsPage() {
   useEffect(() => {
     void Promise.resolve().then(() => loadOrders())
   }, [loadOrders])
+
+  useEffect(() => {
+    const element = tableWrapRef.current
+
+    if (!element) {
+      return undefined
+    }
+
+    const updateWidth = () => {
+      setTableViewportWidth(element.clientWidth)
+    }
+
+    updateWidth()
+
+    const resizeObserver = new ResizeObserver(updateWidth)
+    resizeObserver.observe(element)
+    window.addEventListener('resize', updateWidth)
+
+    return () => {
+      resizeObserver.disconnect()
+      window.removeEventListener('resize', updateWidth)
+    }
+  }, [])
 
   const updateSort = (key: SortKey) => {
     setPage(1)
@@ -360,7 +385,7 @@ export function AdminPaymentsPage() {
             </div>
           </div>
 
-          <HorizontalTableScroll topScrollLabel="Scroll payment orders table horizontally">
+          <HorizontalTableScroll ref={tableWrapRef} topScrollLabel="Scroll payment orders table horizontally">
             <table className="data-table payment-orders-table admin-payments-table">
               <colgroup>
                 <col className="payment-col-order" />
@@ -520,7 +545,11 @@ export function AdminPaymentsPage() {
                       {isExpanded && (
                         <tr className="order-detail-row">
                           <td colSpan={8}>
-                            <div className="order-detail-panel payment-order-detail-panel" aria-live="polite">
+                            <div
+                              className="order-detail-panel"
+                              style={tableViewportWidth ? { width: `${tableViewportWidth}px` } : undefined}
+                              aria-live="polite"
+                            >
                               <section className="order-detail-section order-detail-section-wide">
                                 <div className="order-detail-heading">
                                   <ReceiptText size={16} />

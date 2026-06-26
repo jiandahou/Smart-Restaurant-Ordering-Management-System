@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ClipboardList, RefreshCw, ShoppingBag, Utensils } from 'lucide-react'
+import { Clock3, ClipboardList, CreditCard, Loader2, ReceiptText, RefreshCw, ShoppingBag, Utensils } from 'lucide-react'
 import { toast } from 'sonner'
-import { getGuestOrders, getMyOrders, type CustomerOrder } from '../api/auth'
+import { createOrderCheckoutSession, getGuestOrders, getMyOrders, type CustomerOrder } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
 import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
@@ -10,12 +10,18 @@ import { PaymentStatusBadge } from '../components/orders/PaymentStatusBadge'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
-import { getGuestOrderIds } from '../lib/guestOrders'
+import { getGuestOrderIds, rememberGuestOrder } from '../lib/guestOrders'
 
 const orderTypeLabels = ['Dine in', 'Takeaway', 'Scheduled']
+const payablePaymentStatuses = new Set(['Unpaid', 'Pending', 'Failed', 'Expired'])
+const closedOrderStatuses = new Set([5, 6])
 
 function getOrderScope(order: CustomerOrder) {
   return order.tableNumber ? `Table ${order.tableNumber}` : orderTypeLabels[order.orderType] ?? 'Order'
+}
+
+function getOrderMenuPath(order: CustomerOrder) {
+  return order.restaurantId ? `/r/${encodeURIComponent(order.restaurantId)}/menu` : null
 }
 
 function formatMoney(amount: number, currencyCode?: string | null) {
@@ -29,11 +35,34 @@ function formatDate(value: string) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
 }
 
+function getItemCount(order: CustomerOrder) {
+  return order.orderItems.reduce((count, item) => count + item.quantity, 0)
+}
+
+function canContinuePayment(order: CustomerOrder) {
+  return order.paymentMethod === 'Online'
+    && payablePaymentStatuses.has(order.paymentStatus)
+    && !closedOrderStatuses.has(order.status)
+}
+
+function getContinuePaymentLabel(order: CustomerOrder) {
+  if (order.paymentStatus === 'Failed' || order.paymentStatus === 'Expired') {
+    return 'Retry payment'
+  }
+
+  if (order.paymentStatus === 'Unpaid') {
+    return 'Pay now'
+  }
+
+  return 'Continue payment'
+}
+
 export function MyOrdersPage() {
   const { token, loading: authLoading } = useAuth()
   const [orders, setOrders] = useState<CustomerOrder[]>([])
   const [loading, setLoading] = useState(true)
   const [guestOrderCount, setGuestOrderCount] = useState(0)
+  const [payingOrderId, setPayingOrderId] = useState<string | null>(null)
   const isGuestView = !token
 
   const sourceDescription = useMemo(() => {
@@ -76,6 +105,26 @@ export function MyOrdersPage() {
   useEffect(() => {
     void loadOrders()
   }, [loadOrders])
+
+  const handleContinuePayment = async (order: CustomerOrder) => {
+    setPayingOrderId(order.id)
+
+    try {
+      const returnTo = getOrderMenuPath(order)
+      const result = await createOrderCheckoutSession({
+        orderId: order.id,
+        ...(returnTo ? { returnTo } : {}),
+      })
+      rememberGuestOrder(result.orderId)
+      window.location.assign(result.checkoutUrl)
+    } catch (error) {
+      toast.error('Could not continue payment', {
+        description: error instanceof Error ? error.message : 'The payment session could not be created.',
+      })
+    } finally {
+      setPayingOrderId(null)
+    }
+  }
 
   return (
     <main className="content-grid">
@@ -126,23 +175,54 @@ export function MyOrdersPage() {
               {orders.map((order) => {
                 const isDineIn = order.orderType === 0
                 const OrderIcon = isDineIn ? Utensils : ShoppingBag
+                const itemCount = getItemCount(order)
+                const showContinuePayment = canContinuePayment(order)
+                const isPaying = payingOrderId === order.id
 
                 return (
                   <article key={order.id} className="my-order-card">
                     <div className="my-order-card-header">
                       <div className="my-order-title">
-                        <OrderIcon size={18} />
+                        <span className="my-order-icon">
+                          <OrderIcon size={18} />
+                        </span>
                         <div>
+                          <span className="my-order-kicker">{getOrderScope(order)}</span>
                           <strong>{order.orderNumber}</strong>
-                          <span>{formatDate(order.createdAt)} - {getOrderScope(order)}</span>
+                          <span className="my-order-date">
+                            <Clock3 size={13} />
+                            {formatDate(order.createdAt)}
+                          </span>
                         </div>
                       </div>
+                      <div className="my-order-amount">
+                        <span>Total</span>
+                        <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
+                      </div>
+                    </div>
+
+                    <div className="my-order-status-row">
                       <div className="my-order-status">
-                        <OrderStatusBadge status={order.status} />
-                        <PaymentStatusBadge status={order.paymentStatus} />
-                        <Badge variant="outline">
+                        <OrderStatusBadge status={order.status} className="my-order-status-badge" />
+                        <PaymentStatusBadge status={order.paymentStatus} className="my-order-status-badge" />
+                      </div>
+                      <div className="my-order-payment-actions">
+                        <Badge variant="outline" className="my-order-method-badge">
+                          <CreditCard size={12} />
                           {order.paymentMethod === 'PayAtCounter' ? 'Pay at counter' : 'Online'}
                         </Badge>
+                        {showContinuePayment ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            className="my-order-continue-payment"
+                            disabled={isPaying}
+                            onClick={() => void handleContinuePayment(order)}
+                          >
+                            {isPaying ? <Loader2 className="animate-spin" /> : <CreditCard />}
+                            {isPaying ? 'Opening checkout...' : getContinuePaymentLabel(order)}
+                          </Button>
+                        ) : null}
                       </div>
                     </div>
 
@@ -151,11 +231,11 @@ export function MyOrdersPage() {
                         <div key={item.id} className="my-order-item">
                           <div className="order-item-line-copy">
                             <strong>{item.itemNameSnapshot || 'Menu item'}</strong>
-                            <span>
+                            <span className="my-order-item-meta">
                               {item.quantity} x {formatMoney(item.unitPrice, order.currency)}
                             </span>
                             <OrderItemOptionBadges options={item.selectedOptions} currency={order.currency} />
-                            {item.note ? <small>{item.note}</small> : null}
+                            {item.note ? <small className="my-order-item-note">Item note: {item.note}</small> : null}
                           </div>
                           <strong>{formatMoney(item.totalPrice, order.currency)}</strong>
                         </div>
@@ -170,7 +250,10 @@ export function MyOrdersPage() {
                     ) : null}
 
                     <div className="my-order-total">
-                      <span>Total</span>
+                      <span>
+                        <ReceiptText size={14} />
+                        {itemCount} item{itemCount === 1 ? '' : 's'}
+                      </span>
                       <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
                     </div>
                   </article>
