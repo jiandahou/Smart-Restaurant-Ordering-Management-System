@@ -1317,8 +1317,30 @@ public static class IdentitySeeder
                 continue;
             }
 
-            await EnsureSeedMenuImageObjectAsync(s3Client, bucket, objectKey, filePath);
-            resolvedUrls[seedImage.Key] = BuildSeedMenuImagePublicUrl(configuration, objectKey);
+            try
+            {
+                await EnsureSeedMenuImageObjectAsync(s3Client, bucket, objectKey, filePath);
+                resolvedUrls[seedImage.Key] = BuildSeedMenuImagePublicUrl(configuration, objectKey);
+            }
+            catch (AmazonS3Exception ex)
+            {
+                logger?.LogWarning(
+                    ex,
+                    "Seed menu image upload skipped for {ObjectKey} in bucket {Bucket}; keeping local URL {ImageUrl}.",
+                    objectKey,
+                    bucket,
+                    seedImage.Value);
+                resolvedUrls[seedImage.Key] = seedImage.Value;
+            }
+            catch (Exception ex)
+            {
+                logger?.LogWarning(
+                    ex,
+                    "Seed menu image upload failed for {ObjectKey}; keeping local URL {ImageUrl}.",
+                    objectKey,
+                    seedImage.Value);
+                resolvedUrls[seedImage.Key] = seedImage.Value;
+            }
         }
 
         return resolvedUrls;
