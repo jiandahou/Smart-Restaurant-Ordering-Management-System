@@ -21,22 +21,13 @@ public static class IdentitySeeder
     private static readonly Guid RestaurantOneId = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid RestaurantTwoId = Guid.Parse("22222222-2222-2222-2222-222222222222");
     private static readonly Guid RestaurantThreeId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+    private const string SeedMenuAssetPathPrefix = "/api/assets/seed-menu/";
+    private const string LegacySeedMenuAssetPathPrefix = "/seed-menu/";
+    private const string SeedMenuObjectKeyPrefix = "seed-menu/";
     private static readonly IReadOnlyDictionary<string, string> SeedMenuImageUrls =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["Veg Spring Rolls"] = "/seed-menu/veg-spring-rolls.svg",
-            ["Chicken Wings"] = "/seed-menu/chicken-wings.svg",
-            ["Garlic Bread"] = "/seed-menu/garlic-bread.svg",
-            ["Butter Chicken"] = "/seed-menu/butter-chicken.svg",
-            ["Veg Fried Rice"] = "/seed-menu/veg-fried-rice.svg",
-            ["Grilled Salmon"] = "/seed-menu/grilled-salmon.svg",
-            ["Mushroom Pasta"] = "/seed-menu/mushroom-pasta.svg",
-            ["Mango Lassi"] = "/seed-menu/mango-lassi.svg",
-            ["Masala Chai"] = "/seed-menu/masala-chai.svg",
-            ["Fresh Lime Soda"] = "/seed-menu/fresh-lime-soda.svg",
-            ["Gulab Jamun"] = "/seed-menu/gulab-jamun.svg",
-            ["Chocolate Lava Cake"] = "/seed-menu/chocolate-lava-cake.svg"
-        };
+        BuildSeedMenuImageUrls(SeedMenuAssetPathPrefix);
+    private static readonly IReadOnlyDictionary<string, string> LegacySeedMenuImageUrls =
+        BuildSeedMenuImageUrls(LegacySeedMenuAssetPathPrefix);
     private static IReadOnlyDictionary<string, string> ResolvedSeedMenuImageUrls = SeedMenuImageUrls;
     private static readonly string[] DemoOrderItemNames =
     [
@@ -49,6 +40,23 @@ public static class IdentitySeeder
         24.50m, 8.50m, 32.00m, 18.00m, 16.50m, 22.00m,
         17.50m, 7.00m, 9.50m, 12.00m, 27.50m, 6.50m
     ];
+
+    private static IReadOnlyDictionary<string, string> BuildSeedMenuImageUrls(string pathPrefix) =>
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Veg Spring Rolls"] = $"{pathPrefix}veg-spring-rolls.svg",
+            ["Chicken Wings"] = $"{pathPrefix}chicken-wings.svg",
+            ["Garlic Bread"] = $"{pathPrefix}garlic-bread.svg",
+            ["Butter Chicken"] = $"{pathPrefix}butter-chicken.svg",
+            ["Veg Fried Rice"] = $"{pathPrefix}veg-fried-rice.svg",
+            ["Grilled Salmon"] = $"{pathPrefix}grilled-salmon.svg",
+            ["Mushroom Pasta"] = $"{pathPrefix}mushroom-pasta.svg",
+            ["Mango Lassi"] = $"{pathPrefix}mango-lassi.svg",
+            ["Masala Chai"] = $"{pathPrefix}masala-chai.svg",
+            ["Fresh Lime Soda"] = $"{pathPrefix}fresh-lime-soda.svg",
+            ["Gulab Jamun"] = $"{pathPrefix}gulab-jamun.svg",
+            ["Chocolate Lava Cake"] = $"{pathPrefix}chocolate-lava-cake.svg"
+        };
 
     public static async Task SeedAsync(IServiceProvider serviceProvider)
     {
@@ -1233,12 +1241,24 @@ public static class IdentitySeeder
     private static async Task BackfillSeedMenuImagesAsync(AppDbContext dbContext)
     {
         var seedItemNames = SeedMenuImageUrls.Keys.ToArray();
-        var seedImageUrlMap = SeedMenuImageUrls
-            .Where(seed => ResolvedSeedMenuImageUrls.ContainsKey(seed.Key))
-            .ToDictionary(
-                seed => seed.Value,
-                seed => ResolvedSeedMenuImageUrls[seed.Key],
-                StringComparer.OrdinalIgnoreCase);
+        var seedImageUrlMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var seed in SeedMenuImageUrls)
+        {
+            if (ResolvedSeedMenuImageUrls.TryGetValue(seed.Key, out var resolvedUrl))
+            {
+                seedImageUrlMap[seed.Value] = resolvedUrl;
+            }
+        }
+
+        foreach (var seed in LegacySeedMenuImageUrls)
+        {
+            if (ResolvedSeedMenuImageUrls.TryGetValue(seed.Key, out var resolvedUrl))
+            {
+                seedImageUrlMap[seed.Value] = resolvedUrl;
+            }
+        }
+
         var localSeedImageUrls = seedImageUrlMap.Keys.ToArray();
         var existingSeedItems = await dbContext.MenuItems
             .Where(item =>
@@ -1307,7 +1327,8 @@ public static class IdentitySeeder
 
         foreach (var seedImage in SeedMenuImageUrls)
         {
-            var objectKey = seedImage.Value.TrimStart('/').Replace('\\', '/');
+            var fileName = Path.GetFileName(seedImage.Value);
+            var objectKey = $"{SeedMenuObjectKeyPrefix}{fileName}";
             var filePath = Path.Combine(seedMenuDirectory, Path.GetFileName(objectKey));
 
             if (!File.Exists(filePath))
@@ -1320,7 +1341,7 @@ public static class IdentitySeeder
             try
             {
                 await EnsureSeedMenuImageObjectAsync(s3Client, bucket, objectKey, filePath);
-                resolvedUrls[seedImage.Key] = BuildSeedMenuImagePublicUrl(configuration, objectKey);
+                resolvedUrls[seedImage.Key] = seedImage.Value;
             }
             catch (AmazonS3Exception ex)
             {
@@ -1388,26 +1409,6 @@ public static class IdentitySeeder
             InputStream = fileStream,
             ContentType = "image/svg+xml"
         });
-    }
-
-    private static string BuildSeedMenuImagePublicUrl(IConfiguration configuration, string objectKey)
-    {
-        var publicBaseUrl = configuration["AvatarStorage:PublicBaseUrl"];
-
-        if (!string.IsNullOrWhiteSpace(publicBaseUrl))
-        {
-            return $"{publicBaseUrl.TrimEnd('/')}/{objectKey}";
-        }
-
-        var bucket = configuration["AvatarStorage:Bucket"]?.Trim() ?? string.Empty;
-        var region = configuration["AvatarStorage:Region"]?.Trim();
-
-        if (string.IsNullOrWhiteSpace(region))
-        {
-            region = "ap-southeast-2";
-        }
-
-        return $"https://{bucket}.s3.{region}.amazonaws.com/{objectKey}";
     }
 
     private static async Task BackfillSeedOrderItemNameSnapshotsAsync(AppDbContext dbContext)
