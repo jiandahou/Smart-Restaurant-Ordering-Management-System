@@ -30,6 +30,7 @@ public sealed class MfaController : ControllerBase
     private readonly IJwtTokenService _jwtTokenService;
     private readonly IMfaLoginChallengeStore _loginChallengeStore;
     private readonly UserManager<ApplicationUser> _userManager;
+    private readonly ReportLogWriter _reportLogWriter;
 
     public MfaController(
         AppDbContext dbContext,
@@ -37,7 +38,8 @@ public sealed class MfaController : ControllerBase
         IMfaEmailSetupCodeStore emailSetupCodeStore,
         IJwtTokenService jwtTokenService,
         IMfaLoginChallengeStore loginChallengeStore,
-        UserManager<ApplicationUser> userManager)
+        UserManager<ApplicationUser> userManager,
+        ReportLogWriter reportLogWriter)
     {
         _dbContext = dbContext;
         _emailSender = emailSender;
@@ -45,6 +47,7 @@ public sealed class MfaController : ControllerBase
         _jwtTokenService = jwtTokenService;
         _loginChallengeStore = loginChallengeStore;
         _userManager = userManager;
+        _reportLogWriter = reportLogWriter;
     }
 
     [HttpGet("settings")]
@@ -82,12 +85,21 @@ public sealed class MfaController : ControllerBase
         }
 
         var settings = await GetOrCreateSettingsAsync(user.Id, cancellationToken);
+        var beforeSettings = SnapshotSettings(settings);
 
         settings.RequireForLogin = request.RequireForLogin;
         settings.RequireForPayment = request.RequireForPayment;
         settings.RequireForSensitiveActions = request.RequireForSensitiveActions;
         settings.UpdatedAt = DateTime.UtcNow;
 
+        _reportLogWriter.AddAudit(
+            "Auth.MfaSettingsUpdated",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            $"MFA settings updated for {user.Email}.",
+            beforeSettings,
+            SnapshotSettings(settings));
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
@@ -150,6 +162,13 @@ public sealed class MfaController : ControllerBase
         settings.TotpSecret = secret;
         settings.UpdatedAt = DateTime.UtcNow;
 
+        _reportLogWriter.AddAudit(
+            "Auth.MfaTotpSetupStarted",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            $"TOTP MFA setup started for {user.Email}.",
+            after: SnapshotSettings(settings));
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
@@ -195,6 +214,8 @@ public sealed class MfaController : ControllerBase
             });
         }
 
+        var beforeSettings = SnapshotSettings(settings);
+
         settings.TotpEnabled = true;
         settings.PreferredMethod = MfaMethods.Totp;
 
@@ -218,6 +239,16 @@ public sealed class MfaController : ControllerBase
                 errors = updateResult.Errors
             });
         }
+
+        _reportLogWriter.AddAudit(
+            "Auth.MfaTotpEnabled",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            $"TOTP MFA enabled for {user.Email}.",
+            beforeSettings,
+            SnapshotSettings(settings));
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
         {
@@ -283,6 +314,7 @@ public sealed class MfaController : ControllerBase
         }
 
         var settings = await GetOrCreateSettingsAsync(user.Id, cancellationToken);
+        var beforeSettings = SnapshotSettings(settings);
 
         settings.EmailEnabled = true;
 
@@ -312,6 +344,16 @@ public sealed class MfaController : ControllerBase
             });
         }
 
+        _reportLogWriter.AddAudit(
+            "Auth.MfaEmailEnabled",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            $"Email MFA enabled for {user.Email}.",
+            beforeSettings,
+            SnapshotSettings(settings));
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
         return Ok(new
         {
             message = "Email MFA enabled.",
@@ -336,6 +378,7 @@ public sealed class MfaController : ControllerBase
 
         var settings = await GetOrCreateSettingsAsync(user.Id, cancellationToken);
         var method = request.Method.Trim().ToLowerInvariant();
+        var beforeSettings = SnapshotSettings(settings);
 
         if ((settings.TotpEnabled || settings.EmailEnabled) &&
             !ValidateMfaVerification(settings, user.Id, request.Verification))
@@ -401,6 +444,16 @@ public sealed class MfaController : ControllerBase
                 errors = updateResult.Errors
             });
         }
+
+        _reportLogWriter.AddAudit(
+            "Auth.MfaDisabled",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            method == "all" ? $"MFA disabled for {user.Email}." : $"{method.ToUpperInvariant()} MFA disabled for {user.Email}.",
+            beforeSettings,
+            SnapshotSettings(settings));
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
         {
@@ -653,6 +706,20 @@ public sealed class MfaController : ControllerBase
             user.UserName,
             roles);
 
+        _reportLogWriter.AddAudit(
+            "Auth.MfaLoginSucceeded",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            message,
+            after: new
+            {
+                user.Email,
+                user.RestaurantId,
+                Roles = roles.OrderBy(role => role, StringComparer.OrdinalIgnoreCase).ToArray()
+            });
+        await _dbContext.SaveChangesAsync();
+
         return Ok(new
         {
             message,
@@ -668,6 +735,18 @@ public sealed class MfaController : ControllerBase
             }
         });
     }
+
+    private static object SnapshotSettings(UserMfaSettings settings) => new
+    {
+        settings.UserId,
+        settings.TotpEnabled,
+        TotpSetupStarted = !string.IsNullOrWhiteSpace(settings.TotpSecret),
+        settings.EmailEnabled,
+        settings.PreferredMethod,
+        settings.RequireForLogin,
+        settings.RequireForPayment,
+        settings.RequireForSensitiveActions
+    };
 
     private static string GenerateSixDigitCode()
     {

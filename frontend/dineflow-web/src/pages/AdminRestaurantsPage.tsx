@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type HTMLAttributes } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
 import {
   ArrowDownAZ,
@@ -6,9 +6,11 @@ import {
   Building2,
   ChevronLeft,
   ChevronRight,
+  ChevronsUpDown,
   Copy,
   Eye,
   ExternalLink,
+  ImageIcon,
   Link2,
   MapPin,
   Pencil,
@@ -20,6 +22,12 @@ import {
   X,
 } from 'lucide-react'
 import { useForm } from 'react-hook-form'
+import {
+  getCountryCallingCode,
+  isSupportedCountry,
+  parsePhoneNumberFromString,
+  type CountryCode,
+} from 'libphonenumber-js'
 import { motion } from 'motion/react'
 import { QRCodeSVG } from 'qrcode.react'
 import { toast } from 'sonner'
@@ -35,7 +43,20 @@ import {
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { RestaurantTablesPanel } from '../components/admin/RestaurantTablesPanel'
+import {
+  countryOptions,
+  currencyOptions,
+  getCountryDefaults,
+  getCountryOption,
+  getTimezoneOptions,
+  inferCountryCode,
+  normalizeCountryCode,
+  timezoneBelongsToCountry,
+  type CurrencyOption,
+  type TimezoneOption,
+} from '../lib/localeOptions'
 import { buildTakeawayPublicUrl } from '../lib/publicUrls'
+import { resolvePublicAssetUrl } from '../api/publicMenu'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -51,6 +72,14 @@ import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '../components/ui/command'
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -61,6 +90,7 @@ import {
 } from '../components/ui/dialog'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '../components/ui/form'
 import { Input } from '../components/ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Switch } from '../components/ui/switch'
 import { Textarea } from '../components/ui/textarea'
@@ -68,14 +98,24 @@ import { Textarea } from '../components/ui/textarea'
 const restaurantSchema = z.object({
   name: z.string().trim().min(2, 'Restaurant name must be at least 2 characters.').max(120),
   address: z.string().trim().min(5, 'Enter the restaurant address.').max(300),
-  phone: z
+  phoneCountryCode: z.string().length(2, 'Select a dialing country.'),
+  phoneNationalNumber: z
     .string()
     .trim()
     .min(6, 'Enter a valid phone number.')
-    .max(30)
-    .regex(/^[+()\-\s\d]+$/, 'Use digits and standard phone symbols only.'),
+    .max(24)
+    .regex(/^[()\-\s\d]+$/, 'Use digits and standard phone symbols only.'),
+  countryCode: z.string().length(2, 'Select a country.'),
   timezone: z.string().min(1, 'Select a timezone.'),
   currency: z.string().length(3, 'Select a currency.'),
+  imageUrl: z
+    .string()
+    .trim()
+    .max(2048, 'Image URL must be 2048 characters or fewer.')
+    .refine(
+      (value) => value === '' || value.startsWith('/') || /^https?:\/\//i.test(value),
+      'Use an http(s) URL or an app-relative path starting with /.',
+    ),
   paymentPolicy: z.enum(['PrepayRequired', 'PayAtCounterAllowed']),
   isActive: z.boolean(),
 })
@@ -85,25 +125,15 @@ type SortKey = 'name' | 'status' | 'currency' | 'created'
 type SortDirection = 'asc' | 'desc'
 type StatusFilter = 'all' | 'active' | 'inactive'
 
-const timezoneOptions = [
-  'Australia/Adelaide',
-  'Australia/Brisbane',
-  'Australia/Darwin',
-  'Australia/Hobart',
-  'Australia/Melbourne',
-  'Australia/Perth',
-  'Australia/Sydney',
-  'Pacific/Auckland',
-  'UTC',
-]
-
-const currencyOptions = ['AUD', 'NZD', 'USD', 'EUR', 'GBP', 'CAD']
 const emptyRestaurant: RestaurantFormValues = {
   name: '',
   address: '',
-  phone: '',
+  phoneCountryCode: 'AU',
+  phoneNationalNumber: '',
+  countryCode: 'AU',
   timezone: 'Australia/Adelaide',
   currency: 'AUD',
+  imageUrl: '',
   paymentPolicy: 'PayAtCounterAllowed',
   isActive: true,
 }
@@ -112,9 +142,11 @@ function toPayload(values: RestaurantFormValues): RestaurantRequest {
   return {
     name: values.name.trim(),
     address: values.address.trim(),
-    phone: values.phone.trim(),
+    phone: formatPhoneForPayload(values.phoneCountryCode, values.phoneNationalNumber),
+    countryCode: normalizeCountryCode(values.countryCode),
     timezone: values.timezone,
     currency: values.currency,
+    imageUrl: values.imageUrl.trim() || null,
     paymentPolicy: values.paymentPolicy,
     isActive: values.isActive,
   }
@@ -201,33 +233,397 @@ type RestaurantFormDialogProps = {
   onSaved: () => Promise<void> | void
 }
 
+type LocaleOption = {
+  value: string
+  label: string
+  description?: string
+  flagCountryCode?: string
+  meta?: string
+  searchValue: string
+}
+
+type LocaleComboboxProps = {
+  value: string
+  options: LocaleOption[]
+  placeholder: string
+  searchPlaceholder: string
+  emptyMessage: string
+  onChange: (value: string) => void
+}
+
+function CountryFlag({ countryCode }: { countryCode: string }) {
+  return <span className={`country-flag fi fi-${countryCode.toLowerCase()}`} aria-hidden="true" />
+}
+
+type PhoneCountryOption = {
+  code: CountryCode
+  name: string
+  dialCode: string
+  searchValue: string
+}
+
+const defaultPhoneCountryCode: CountryCode = 'AU'
+
+function getSupportedPhoneCountryCode(countryCode: string | null | undefined): CountryCode {
+  const normalizedCountryCode = normalizeCountryCode(countryCode)
+  return isSupportedCountry(normalizedCountryCode as CountryCode)
+    ? (normalizedCountryCode as CountryCode)
+    : defaultPhoneCountryCode
+}
+
+function getPhoneCallingCode(countryCode: string | null | undefined) {
+  return getCountryCallingCode(getSupportedPhoneCountryCode(countryCode))
+}
+
+function cleanNationalPhoneInput(value: string) {
+  return value.replace(/[^\d()\-\s]/g, '')
+}
+
+function splitPhoneForForm(phone: string | null | undefined, fallbackCountryCode: string | null | undefined) {
+  const fallbackPhoneCountryCode = getSupportedPhoneCountryCode(fallbackCountryCode)
+  const trimmedPhone = phone?.trim() ?? ''
+
+  if (!trimmedPhone) {
+    return {
+      phoneCountryCode: fallbackPhoneCountryCode,
+      phoneNationalNumber: '',
+    }
+  }
+
+  const parsedPhone = parsePhoneNumberFromString(trimmedPhone, fallbackPhoneCountryCode)
+  if (parsedPhone?.country) {
+    return {
+      phoneCountryCode: parsedPhone.country,
+      phoneNationalNumber: parsedPhone.formatNational(),
+    }
+  }
+
+  const fallbackCallingCode = getPhoneCallingCode(fallbackPhoneCountryCode)
+
+  return {
+    phoneCountryCode: fallbackPhoneCountryCode,
+    phoneNationalNumber: cleanNationalPhoneInput(
+      trimmedPhone
+        .replace(new RegExp(`^\\+?${fallbackCallingCode}\\s*`), '')
+        .replace(/^\+/, ''),
+    ).trim(),
+  }
+}
+
+function formatPhoneForPayload(countryCode: string, nationalNumber: string) {
+  const phoneCountryCode = getSupportedPhoneCountryCode(countryCode)
+  const cleanedNationalNumber = cleanNationalPhoneInput(nationalNumber).trim()
+  const parsedNationalPhone = parsePhoneNumberFromString(cleanedNationalNumber, phoneCountryCode)
+
+  if (parsedNationalPhone?.isPossible()) {
+    return parsedNationalPhone.formatInternational()
+  }
+
+  const rawInternationalNumber = `+${getPhoneCallingCode(phoneCountryCode)} ${cleanedNationalNumber}`
+  const parsedPhone = parsePhoneNumberFromString(rawInternationalNumber, phoneCountryCode)
+
+  return parsedPhone?.isPossible() ? parsedPhone.formatInternational() : rawInternationalNumber
+}
+
+function LocaleCombobox({
+  value,
+  options,
+  placeholder,
+  searchPlaceholder,
+  emptyMessage,
+  onChange,
+}: LocaleComboboxProps) {
+  const [open, setOpen] = useState(false)
+  const selectedOption = options.find((option) => option.value === value)
+
+  return (
+    <Popover open={open} onOpenChange={setOpen} modal>
+      <PopoverTrigger asChild>
+        <FormControl>
+          <Button
+            type="button"
+            variant="outline"
+            role="combobox"
+            aria-expanded={open}
+            className="locale-combobox-trigger"
+          >
+            <span className="locale-combobox-selection">
+              {selectedOption?.flagCountryCode ? <CountryFlag countryCode={selectedOption.flagCountryCode} /> : null}
+              {selectedOption ? (
+                <span className="locale-combobox-selected-copy">
+                  <strong>{selectedOption.label}</strong>
+                  {selectedOption.meta ? <small>{selectedOption.meta}</small> : null}
+                </span>
+              ) : (
+                <strong>{placeholder}</strong>
+              )}
+            </span>
+            <ChevronsUpDown size={16} />
+          </Button>
+        </FormControl>
+      </PopoverTrigger>
+      <PopoverContent className="locale-combobox-content" align="start" side="bottom" sideOffset={6}>
+        <Command className="locale-combobox-command">
+          <CommandInput placeholder={searchPlaceholder} />
+          <CommandList className="locale-combobox-list">
+            <CommandEmpty>{emptyMessage}</CommandEmpty>
+            <CommandGroup>
+              {options.map((option) => (
+                <CommandItem
+                  key={option.value}
+                  value={option.searchValue}
+                  data-checked={option.value === value}
+                  onSelect={() => {
+                    onChange(option.value)
+                    setOpen(false)
+                  }}
+                >
+                  <div className="locale-combobox-option-row">
+                    {option.flagCountryCode ? <CountryFlag countryCode={option.flagCountryCode} /> : null}
+                    <div className="locale-combobox-option">
+                      <strong>{option.label}</strong>
+                      {option.description ? <span>{option.description}</span> : null}
+                      {option.meta ? <code>{option.meta}</code> : null}
+                    </div>
+                  </div>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+function PhoneCountryCombobox({
+  value,
+  options,
+  onChange,
+}: {
+  value: string
+  options: PhoneCountryOption[]
+  onChange: (countryCode: CountryCode) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const selectedOption = options.find((option) => option.code === value) ?? options[0]
+
+  return (
+    <Popover open={open} onOpenChange={setOpen} modal>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          className="phone-country-trigger"
+        >
+          <span>
+            <CountryFlag countryCode={selectedOption.code} />
+            <strong>+{selectedOption.dialCode}</strong>
+          </span>
+          <ChevronsUpDown size={15} />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="phone-country-content" align="start" side="bottom" sideOffset={6}>
+        <Command className="locale-combobox-command">
+          <CommandInput placeholder="Search country or dial code..." />
+          <CommandList className="phone-country-list">
+            <CommandEmpty>No dialing countries found.</CommandEmpty>
+            <CommandGroup>
+              {options.map((option) => (
+                <CommandItem
+                  key={option.code}
+                  value={option.searchValue}
+                  data-checked={option.code === selectedOption.code}
+                  onSelect={() => {
+                    onChange(option.code)
+                    setOpen(false)
+                  }}
+                >
+                  <div className="phone-country-option">
+                    <CountryFlag countryCode={option.code} />
+                    <div>
+                      <strong>{option.name}</strong>
+                      <span>{option.code} - +{option.dialCode}</span>
+                    </div>
+                  </div>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+function InternationalPhoneInput({
+  countryCode,
+  nationalNumber,
+  options,
+  onCountryChange,
+  onNationalNumberChange,
+  onBlur,
+  className,
+  id,
+  'aria-describedby': ariaDescribedBy,
+  'aria-invalid': ariaInvalid,
+  ...containerProps
+}: {
+  countryCode: string
+  nationalNumber: string
+  options: PhoneCountryOption[]
+  onCountryChange: (countryCode: CountryCode) => void
+  onNationalNumberChange: (value: string) => void
+  onBlur?: () => void
+} & HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div
+      {...containerProps}
+      className={['international-phone-input', className].filter(Boolean).join(' ')}
+    >
+      <PhoneCountryCombobox value={countryCode} options={options} onChange={onCountryChange} />
+      <Input
+        id={id}
+        type="tel"
+        inputMode="tel"
+        value={nationalNumber}
+        placeholder="412 345 678"
+        aria-describedby={ariaDescribedBy}
+        aria-invalid={ariaInvalid}
+        onBlur={onBlur}
+        onChange={(event) => onNationalNumberChange(cleanNationalPhoneInput(event.target.value))}
+      />
+    </div>
+  )
+}
+
 function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps) {
   const [open, setOpen] = useState(false)
   const editing = Boolean(restaurant)
+  const timezoneOptions = useMemo(() => getTimezoneOptions(), [])
   const form = useForm<RestaurantFormValues>({
     resolver: zodResolver(restaurantSchema),
     defaultValues: emptyRestaurant,
   })
+  const selectedCountryCode = form.watch('countryCode')
+  const selectedPhoneCountryCode = form.watch('phoneCountryCode')
 
   useEffect(() => {
     if (!open) {
       return
     }
 
+    const restaurantCountryCode = restaurant?.countryCode || inferCountryCode(restaurant?.currency, restaurant?.timezone)
+    const restaurantPhone = splitPhoneForForm(restaurant?.phone, restaurantCountryCode)
+
     form.reset(
       restaurant
         ? {
             name: restaurant.name,
             address: restaurant.address,
-            phone: restaurant.phone,
+            phoneCountryCode: restaurantPhone.phoneCountryCode,
+            phoneNationalNumber: restaurantPhone.phoneNationalNumber,
+            countryCode: restaurantCountryCode,
             timezone: restaurant.timezone,
             currency: restaurant.currency,
+            imageUrl: restaurant.imageUrl ?? '',
             paymentPolicy: restaurant.paymentPolicy,
             isActive: restaurant.isActive,
           }
         : emptyRestaurant,
     )
   }, [form, open, restaurant])
+
+  const countryComboboxOptions = useMemo<LocaleOption[]>(
+    () =>
+      countryOptions.map((country) => ({
+        value: country.code,
+        label: `${country.name} (${country.code})`,
+        description: `${country.defaultCurrency} - ${country.defaultTimezone}`,
+        flagCountryCode: country.code,
+        searchValue: `${country.name} ${country.code} ${country.defaultCurrency} ${country.defaultTimezone}`,
+      })),
+    [],
+  )
+
+  const phoneCountryOptions = useMemo<PhoneCountryOption[]>(
+    () =>
+      countryOptions
+        .filter((country) => isSupportedCountry(country.code as CountryCode))
+        .map((country) => ({
+          code: country.code as CountryCode,
+          name: country.name,
+          dialCode: getCountryCallingCode(country.code as CountryCode),
+          searchValue: `${country.name} ${country.code} +${getCountryCallingCode(country.code as CountryCode)}`,
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name)),
+    [],
+  )
+
+  const currencyComboboxOptions = useMemo<LocaleOption[]>(
+    () =>
+      currencyOptions.map((currency: CurrencyOption) => ({
+        value: currency.code,
+        label: `${currency.code} - ${currency.name}`,
+        searchValue: `${currency.code} ${currency.name}`,
+      })),
+    [],
+  )
+
+  const timezoneComboboxOptions = useMemo<LocaleOption[]>(() => {
+    const normalizedCountryCode = normalizeCountryCode(selectedCountryCode)
+
+    return [...timezoneOptions]
+      .sort((left, right) => {
+        const leftRecommended = timezoneBelongsToCountry(left, normalizedCountryCode) ? 0 : 1
+        const rightRecommended = timezoneBelongsToCountry(right, normalizedCountryCode) ? 0 : 1
+
+        return leftRecommended - rightRecommended || left.value.localeCompare(right.value)
+      })
+      .map((timezone: TimezoneOption) => {
+        const countryCodes = timezone.countryCodes?.join(', ') ?? timezone.countryCode
+
+        return {
+          value: timezone.value,
+          label: timezone.label,
+          description: timezoneBelongsToCountry(timezone, normalizedCountryCode) ? 'Recommended for selected country' : undefined,
+          meta: countryCodes,
+          searchValue: `${timezone.value} ${countryCodes ?? ''}`,
+        }
+      })
+  }, [selectedCountryCode, timezoneOptions])
+
+  const applyCountryDefaults = (countryCode: string, force = false) => {
+    const nextDefaults = getCountryDefaults(countryCode)
+
+    if (force || !form.getValues('currency')) {
+      form.setValue('currency', nextDefaults.defaultCurrency, { shouldDirty: true, shouldValidate: true })
+    }
+
+    if (force || !form.getValues('timezone')) {
+      form.setValue('timezone', nextDefaults.defaultTimezone, { shouldDirty: true, shouldValidate: true })
+    }
+  }
+
+  const handleCountryChange = (nextCountryCode: string) => {
+    const previousCountryCode = form.getValues('countryCode')
+    const previousDefaults = getCountryDefaults(previousCountryCode)
+    const currentCurrency = form.getValues('currency')
+    const currentTimezone = form.getValues('timezone')
+    const nextDefaults = getCountryDefaults(nextCountryCode)
+
+    form.setValue('countryCode', nextCountryCode, { shouldDirty: true, shouldValidate: true })
+
+    if (!currentCurrency || currentCurrency === previousDefaults.defaultCurrency) {
+      form.setValue('currency', nextDefaults.defaultCurrency, { shouldDirty: true, shouldValidate: true })
+    }
+
+    if (!currentTimezone || currentTimezone === previousDefaults.defaultTimezone) {
+      form.setValue('timezone', nextDefaults.defaultTimezone, { shouldDirty: true, shouldValidate: true })
+    }
+  }
 
   const handleSubmit = async (values: RestaurantFormValues) => {
     try {
@@ -287,13 +683,68 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
               />
               <FormField
                 control={form.control}
-                name="phone"
+                name="imageUrl"
                 render={({ field }) => (
-                  <FormItem>
+                  <FormItem className="restaurant-form-wide">
+                    <FormLabel className="inline-flex items-center gap-2">
+                      <ImageIcon size={14} />
+                      Restaurant image URL
+                    </FormLabel>
+                    <FormControl>
+                      <Input placeholder="/seed-menu/veg-spring-rolls.svg or https://..." {...field} />
+                    </FormControl>
+                    <p className="text-xs text-muted-foreground">
+                      Used as the public ordering hero image. Leave blank to use the default gradient card.
+                    </p>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="phoneNationalNumber"
+                render={({ field }) => (
+                  <FormItem className="restaurant-form-stack-top">
                     <FormLabel>Phone</FormLabel>
                     <FormControl>
-                      <Input type="tel" placeholder="+61 8 1234 5678" {...field} />
+                      <InternationalPhoneInput
+                        countryCode={selectedPhoneCountryCode}
+                        nationalNumber={field.value}
+                        options={phoneCountryOptions}
+                        onCountryChange={(countryCode) => {
+                          form.setValue('phoneCountryCode', countryCode, { shouldDirty: true, shouldValidate: true })
+                        }}
+                        onNationalNumberChange={field.onChange}
+                        onBlur={field.onBlur}
+                      />
                     </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="countryCode"
+                render={({ field }) => (
+                  <FormItem className="restaurant-form-stack-top">
+                    <FormLabel>Country</FormLabel>
+                    <LocaleCombobox
+                      value={field.value}
+                      options={countryComboboxOptions}
+                      placeholder="Select country"
+                      searchPlaceholder="Search countries..."
+                      emptyMessage="No countries found."
+                      onChange={handleCountryChange}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="locale-defaults-button"
+                      onClick={() => applyCountryDefaults(form.getValues('countryCode'), true)}
+                    >
+                      Apply country defaults
+                    </Button>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -304,14 +755,14 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Currency</FormLabel>
-                    <Select value={field.value} onValueChange={field.onChange}>
-                      <FormControl>
-                        <SelectTrigger><SelectValue placeholder="Select currency" /></SelectTrigger>
-                      </FormControl>
-                      <SelectContent position="popper">
-                        {currencyOptions.map((currency) => <SelectItem key={currency} value={currency}>{currency}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
+                    <LocaleCombobox
+                      value={field.value}
+                      options={currencyComboboxOptions}
+                      placeholder="Select currency"
+                      searchPlaceholder="Search currencies..."
+                      emptyMessage="No currencies found."
+                      onChange={field.onChange}
+                    />
                     <FormMessage />
                   </FormItem>
                 )}
@@ -322,14 +773,14 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
                 render={({ field }) => (
                   <FormItem className="restaurant-form-wide">
                     <FormLabel>Timezone</FormLabel>
-                    <Select value={field.value} onValueChange={field.onChange}>
-                      <FormControl>
-                        <SelectTrigger><SelectValue placeholder="Select timezone" /></SelectTrigger>
-                      </FormControl>
-                      <SelectContent position="popper">
-                        {timezoneOptions.map((timezone) => <SelectItem key={timezone} value={timezone}>{timezone}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
+                    <LocaleCombobox
+                      value={field.value}
+                      options={timezoneComboboxOptions}
+                      placeholder="Select timezone"
+                      searchPlaceholder="Search timezones..."
+                      emptyMessage="No timezones found."
+                      onChange={field.onChange}
+                    />
                     <FormMessage />
                   </FormItem>
                 )}
@@ -400,6 +851,8 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
 
 function RestaurantDetailsDialog({ restaurant }: { restaurant: Restaurant }) {
   const takeawayUrl = buildTakeawayPublicUrl(restaurant.id)
+  const country = getCountryOption(restaurant.countryCode)
+  const restaurantImageUrl = resolvePublicAssetUrl(restaurant.imageUrl)
 
   return (
     <Dialog>
@@ -414,7 +867,24 @@ function RestaurantDetailsDialog({ restaurant }: { restaurant: Restaurant }) {
           <DialogDescription>Restaurant profile and operating configuration.</DialogDescription>
         </DialogHeader>
         <div className="restaurant-details-grid">
+          {restaurantImageUrl ? (
+            <div className="restaurant-detail-wide overflow-hidden rounded-2xl border bg-muted">
+              <img
+                src={restaurantImageUrl}
+                alt={`${restaurant.name} restaurant image`}
+                className="h-44 w-full object-cover"
+              />
+            </div>
+          ) : null}
           <div><span>Status</span><Badge variant={restaurant.isActive ? 'secondary' : 'destructive'}>{restaurant.isActive ? 'Active' : 'Inactive'}</Badge></div>
+          <div><span>Image</span><strong>{restaurant.imageUrl ? 'Configured' : 'Default hero'}</strong></div>
+          <div>
+            <span>Country</span>
+            <strong className="restaurant-locale-inline">
+              <CountryFlag countryCode={restaurant.countryCode} />
+              {country ? `${country.name} (${country.code})` : restaurant.countryCode}
+            </strong>
+          </div>
           <div><span>Currency</span><strong>{restaurant.currency}</strong></div>
           <div><span>Payment</span><strong>{restaurant.paymentPolicy === 'PrepayRequired' ? 'Online payment required' : 'Online or counter'}</strong></div>
           <div className="restaurant-detail-wide"><span>Address</span><strong>{restaurant.address}</strong></div>
@@ -574,7 +1044,7 @@ export function AdminRestaurantsPage() {
               <div className="restaurant-directory-tools">
                 <div className="directory-search">
                   <Search size={16} />
-                  <Input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1) }} placeholder="Filter by name, address, phone, timezone, or currency" />
+                  <Input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1) }} placeholder="Filter by name, address, phone, country, timezone, or currency" />
                 </div>
                 <Select value={statusFilter} onValueChange={(value) => { setStatusFilter(value as StatusFilter); setPage(1) }}>
                   <SelectTrigger className="filter-select"><SelectValue placeholder="Status" /></SelectTrigger>
@@ -616,7 +1086,15 @@ export function AdminRestaurantsPage() {
                           <span className="table-subtext"><MapPin size={12} />{restaurant.address}</span>
                         </td>
                         <td><span className="restaurant-contact"><Phone size={14} />{restaurant.phone}</span></td>
-                        <td><strong>{restaurant.currency}</strong><span className="table-subtext">{restaurant.timezone}</span></td>
+                        <td>
+                          <div className="restaurant-locale-cell">
+                            <CountryFlag countryCode={restaurant.countryCode} />
+                            <div>
+                              <strong>{restaurant.countryCode} - {restaurant.currency}</strong>
+                              <span className="table-subtext">{restaurant.timezone}</span>
+                            </div>
+                          </div>
+                        </td>
                         <td><Badge variant={restaurant.isActive ? 'secondary' : 'destructive'}>{restaurant.isActive ? 'Active' : 'Inactive'}</Badge></td>
                         <td>{formatDate(restaurant.createdAt)}</td>
                         <td>

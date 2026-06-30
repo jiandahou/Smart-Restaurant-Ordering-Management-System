@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Clock3, ClipboardList, CreditCard, Loader2, ReceiptText, RefreshCw, ShoppingBag, Utensils } from 'lucide-react'
+import { Clock3, ClipboardList, CreditCard, Loader2, ReceiptText, RefreshCw, ShoppingBag, Undo2, Utensils } from 'lucide-react'
 import { toast } from 'sonner'
-import { createOrderCheckoutSession, getGuestOrders, getMyOrders, type CustomerOrder } from '../api/auth'
+import {
+  createOrderCheckoutSession,
+  getGuestOrders,
+  getMyOrders,
+  requestCustomerRefund,
+  type CustomerOrder,
+} from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
 import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
@@ -10,10 +16,20 @@ import { PaymentStatusBadge } from '../components/orders/PaymentStatusBadge'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../components/ui/dialog'
+import { Textarea } from '../components/ui/textarea'
 import { getGuestOrderIds, rememberGuestOrder } from '../lib/guestOrders'
 
 const orderTypeLabels = ['Dine in', 'Takeaway', 'Scheduled']
 const payablePaymentStatuses = new Set(['Unpaid', 'Pending', 'Failed', 'Expired'])
+const refundablePaymentStatuses = new Set(['Paid', 'PartiallyRefunded'])
 const closedOrderStatuses = new Set([5, 6])
 
 function getOrderScope(order: CustomerOrder) {
@@ -45,6 +61,12 @@ function canContinuePayment(order: CustomerOrder) {
     && !closedOrderStatuses.has(order.status)
 }
 
+function canRequestRefund(order: CustomerOrder) {
+  return order.paymentMethod === 'Online'
+    && refundablePaymentStatuses.has(order.paymentStatus)
+    && order.latestRefundRequest?.status !== 'Pending'
+}
+
 function getContinuePaymentLabel(order: CustomerOrder) {
   if (order.paymentStatus === 'Failed' || order.paymentStatus === 'Expired') {
     return 'Retry payment'
@@ -63,6 +85,9 @@ export function MyOrdersPage() {
   const [loading, setLoading] = useState(true)
   const [guestOrderCount, setGuestOrderCount] = useState(0)
   const [payingOrderId, setPayingOrderId] = useState<string | null>(null)
+  const [refundOrder, setRefundOrder] = useState<CustomerOrder | null>(null)
+  const [refundReason, setRefundReason] = useState('')
+  const [requestingRefundOrderId, setRequestingRefundOrderId] = useState<string | null>(null)
   const isGuestView = !token
 
   const sourceDescription = useMemo(() => {
@@ -126,6 +151,36 @@ export function MyOrdersPage() {
     }
   }
 
+  const submitRefundRequest = async () => {
+    if (!refundOrder) {
+      return
+    }
+
+    setRequestingRefundOrderId(refundOrder.id)
+
+    try {
+      const refundRequest = await requestCustomerRefund(refundOrder.id, {
+        reason: refundReason.trim() || undefined,
+      })
+      setOrders((current) => current.map((order) => (
+        order.id === refundOrder.id
+          ? { ...order, latestRefundRequest: refundRequest }
+          : order
+      )))
+      toast.success('Refund request sent', {
+        description: 'The restaurant team can now review this request.',
+      })
+      setRefundOrder(null)
+      setRefundReason('')
+    } catch (error) {
+      toast.error('Could not request refund', {
+        description: error instanceof Error ? error.message : 'The refund request could not be submitted.',
+      })
+    } finally {
+      setRequestingRefundOrderId(null)
+    }
+  }
+
   return (
     <main className="content-grid">
       <Card>
@@ -177,7 +232,9 @@ export function MyOrdersPage() {
                 const OrderIcon = isDineIn ? Utensils : ShoppingBag
                 const itemCount = getItemCount(order)
                 const showContinuePayment = canContinuePayment(order)
+                const showRequestRefund = canRequestRefund(order)
                 const isPaying = payingOrderId === order.id
+                const isRequestingRefund = requestingRefundOrderId === order.id
 
                 return (
                   <article key={order.id} className="my-order-card">
@@ -223,8 +280,40 @@ export function MyOrdersPage() {
                             {isPaying ? 'Opening checkout...' : getContinuePaymentLabel(order)}
                           </Button>
                         ) : null}
+                        {showRequestRefund ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="my-order-refund-button"
+                            disabled={isRequestingRefund}
+                            onClick={() => {
+                              setRefundReason('')
+                              setRefundOrder(order)
+                            }}
+                          >
+                            {isRequestingRefund ? <Loader2 className="animate-spin" /> : <Undo2 />}
+                            Request refund
+                          </Button>
+                        ) : null}
                       </div>
                     </div>
+
+                    {order.latestRefundRequest ? (
+                      <div className={`my-order-refund-state my-order-refund-state-${order.latestRefundRequest.status.toLowerCase()}`}>
+                        <div>
+                          <strong>Refund request {order.latestRefundRequest.status.toLowerCase()}</strong>
+                          <span>
+                            {formatMoney(order.latestRefundRequest.requestedAmountCents / 100, order.latestRefundRequest.currency)}
+                            {' requested on '}
+                            {formatDate(order.latestRefundRequest.createdAt)}
+                          </span>
+                        </div>
+                        {order.latestRefundRequest.adminNote ? (
+                          <small>{order.latestRefundRequest.adminNote}</small>
+                        ) : null}
+                      </div>
+                    ) : null}
 
                     <div className="my-order-item-list">
                       {order.orderItems.map((item) => (
@@ -263,6 +352,55 @@ export function MyOrdersPage() {
           )}
         </CardContent>
       </Card>
+
+      <Dialog
+        open={refundOrder !== null}
+        onOpenChange={(open) => {
+          if (!open && requestingRefundOrderId === null) {
+            setRefundOrder(null)
+            setRefundReason('')
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Request a refund</DialogTitle>
+            <DialogDescription>
+              {refundOrder
+                ? `${refundOrder.orderNumber}: tell the restaurant why you need a refund.`
+                : 'Tell the restaurant why you need a refund.'}
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea
+            value={refundReason}
+            onChange={(event) => setRefundReason(event.target.value)}
+            placeholder="Reason, issue, or anything the team should know"
+            rows={4}
+            maxLength={1000}
+          />
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setRefundOrder(null)
+                setRefundReason('')
+              }}
+              disabled={requestingRefundOrderId !== null}
+            >
+              Keep order
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void submitRefundRequest()}
+              disabled={requestingRefundOrderId !== null}
+            >
+              {requestingRefundOrderId !== null ? <Loader2 className="animate-spin" /> : <Undo2 />}
+              Send request
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </main>
   )
 }

@@ -172,6 +172,8 @@ export type Restaurant = {
   name: string
   address: string
   phone: string
+  imageUrl: string | null
+  countryCode: string
   timezone: string
   currency: string
   paymentPolicy: RestaurantPaymentPolicy
@@ -189,6 +191,7 @@ export type RestaurantListParams = {
   sortBy?: string
   sortDirection?: 'asc' | 'desc'
   isActive?: boolean
+  countryCode?: string
   currency?: string
 }
 
@@ -196,6 +199,8 @@ export type RestaurantRequest = {
   name: string
   address: string
   phone: string
+  imageUrl?: string | null
+  countryCode: string
   timezone: string
   currency: string
   paymentPolicy: RestaurantPaymentPolicy
@@ -440,6 +445,8 @@ export type AdminPaymentStatus =
 
 export type AdminOrderType = 'DineIn' | 'Takeaway' | 'Scheduled'
 
+export type AdminPaymentRefundStatus = 'Pending' | 'Succeeded' | 'Failed'
+
 export type OrderTransitionAction =
   | 'Accept'
   | 'StartPreparing'
@@ -478,9 +485,31 @@ export type AdminOrderPayment = {
   providerCheckoutSessionId: string | null
   providerPaymentIntentId: string | null
   failureReason: string | null
+  refundCount: number
+  refundedAmountCents: number
+  refundableAmountCents: number
+  hasPendingRefund: boolean
+  refunds: AdminPaymentRefund[]
   createdAt: string
   updatedAt: string | null
   paidAt: string | null
+  failedAt: string | null
+}
+
+export type AdminPaymentRefund = {
+  id: string
+  provider: string
+  providerRefundId: string | null
+  providerPaymentIntentId: string | null
+  amountCents: number
+  currency: string
+  status: AdminPaymentRefundStatus
+  reason: string | null
+  failureReason: string | null
+  requestedByUserId: string | null
+  createdAt: string
+  updatedAt: string | null
+  refundedAt: string | null
   failedAt: string | null
 }
 
@@ -551,7 +580,23 @@ export type CustomerOrder = {
   scheduledTime: string | null
   createdAt: string
   updatedAt: string | null
+  latestRefundRequest: CustomerRefundRequest | null
   orderItems: CustomerOrderItem[]
+}
+
+export type CustomerRefundRequestStatus = 'Pending' | 'Approved' | 'Rejected' | 'Cancelled'
+
+export type CustomerRefundRequest = {
+  id: string
+  orderId: string
+  status: CustomerRefundRequestStatus
+  requestedAmountCents: number
+  currency: string
+  reason: string | null
+  adminNote: string | null
+  createdAt: string
+  updatedAt: string | null
+  reviewedAt: string | null
 }
 
 export type PagedResponse<T> = {
@@ -562,6 +607,74 @@ export type PagedResponse<T> = {
   totalPages: number
   hasPreviousPage: boolean
   hasNextPage: boolean
+}
+
+export type ReportLogListParams = {
+  page?: number
+  pageSize?: number
+  search?: string
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
+  restaurantId?: string
+  action?: string
+  eventType?: string
+  entityType?: string
+  entityId?: string
+  orderId?: string
+  paymentId?: string
+  actorUserId?: string
+  createdFrom?: string
+  createdTo?: string
+}
+
+export type AuditLog = {
+  id: string
+  restaurantId: string | null
+  actorUserId: string | null
+  actorEmail: string | null
+  actorRoles: string | null
+  action: string
+  entityType: string
+  entityId: string | null
+  summary: string | null
+  beforeJson: string | null
+  afterJson: string | null
+  ipAddress: string | null
+  userAgent: string | null
+  createdAt: string
+}
+
+export type OrderEventLog = {
+  id: string
+  restaurantId: string | null
+  orderId: string
+  orderNumber: string
+  actorUserId: string | null
+  actorDisplayName: string | null
+  actorRoles: string | null
+  eventType: string
+  message: string
+  dataJson: string | null
+  createdAt: string
+}
+
+export type PaymentEventLog = {
+  id: string
+  restaurantId: string | null
+  orderId: string | null
+  orderNumber: string | null
+  paymentId: string | null
+  paymentRefundId: string | null
+  provider: string
+  eventType: string
+  providerEventId: string | null
+  status: string | null
+  message: string
+  dataJson: string | null
+  actorUserId: string | null
+  actorDisplayName: string | null
+  actorRoles: string | null
+  createdAt: string
 }
 
 export type AdminOrderListParams = {
@@ -589,6 +702,31 @@ export type AdminPaymentListParams = {
   restaurantId?: string
 }
 
+export type AdminRefundSummaryParams = {
+  restaurantId?: string
+  search?: string
+  status?: AdminPaymentRefundStatus
+}
+
+export type AdminRefundListParams = AdminRefundSummaryParams & {
+  page?: number
+  pageSize?: number
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
+}
+
+export type AdminRefundRequestStatus = 'Pending' | 'Approved' | 'Rejected' | 'Cancelled'
+
+export type AdminRefundRequestListParams = {
+  page?: number
+  pageSize?: number
+  search?: string
+  status?: AdminRefundRequestStatus
+  restaurantId?: string
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
+}
+
 export type AdminPayment = AdminOrderPayment & {
   orderId: string
   orderNumber: string
@@ -600,6 +738,38 @@ export type AdminPayment = AdminOrderPayment & {
   orderType: AdminOrderType
 }
 
+export type AdminRefund = AdminPaymentRefund & {
+  paymentId: string
+  orderId: string
+  orderNumber: string
+  restaurantId: string | null
+  restaurantName: string | null
+  customerName: string | null
+  customerEmail: string | null
+}
+
+export type AdminRefundRequest = {
+  id: string
+  orderId: string
+  paymentId: string
+  paymentRefundId: string | null
+  restaurantId: string | null
+  restaurantName: string | null
+  orderNumber: string
+  customerName: string | null
+  customerEmail: string | null
+  status: AdminRefundRequestStatus
+  requestedAmountCents: number
+  currency: string
+  reason: string | null
+  adminNote: string | null
+  requestedByUserId: string | null
+  reviewedByUserId: string | null
+  createdAt: string
+  updatedAt: string | null
+  reviewedAt: string | null
+}
+
 export type AdminOrderSummary = {
   total: number
   activeKitchen: number
@@ -608,6 +778,31 @@ export type AdminOrderSummary = {
   failedPayment: number
   payable: number
   revenue: number
+}
+
+export type AdminRefundCurrencySummary = {
+  currency: string
+  pendingAmountCents: number
+  succeededAmountCents: number
+  failedAmountCents: number
+}
+
+export type AdminRefundSummary = {
+  total: number
+  pending: number
+  succeeded: number
+  failed: number
+  amountsByCurrency: AdminRefundCurrencySummary[]
+}
+
+export type AdminOrderStatusHistory = {
+  id: string
+  previousStatus: AdminOrderStatus
+  newStatus: AdminOrderStatus
+  action: string | null
+  reason: string | null
+  changedByUserId: string | null
+  createdAt: string
 }
 
 export type CreateOrderCheckoutSessionRequest = {
@@ -621,6 +816,20 @@ export type CreateCheckoutSessionResponse = {
   checkoutUrl: string
   orderId: string
   paymentId: string
+}
+
+export type RefundOrderRequest = {
+  reason?: string
+}
+
+export type CreateCustomerRefundRequest = {
+  reason?: string
+  customerName?: string
+  customerEmail?: string
+}
+
+export type ReviewRefundRequestRequest = {
+  note?: string
 }
 
 type PublicKeyCredentialDescriptorJson = Omit<PublicKeyCredentialDescriptor, 'id'> & {
@@ -791,6 +1000,40 @@ async function request<T>(path: string, options: RequestInit = {}) {
 
   const responseText = await response.text()
   return responseText ? JSON.parse(responseText) as T : undefined as T
+}
+
+async function requestBlob(path: string, options: RequestInit = {}) {
+  const token = getStoredToken()
+  const headers = new Headers(options.headers)
+
+  headers.set('Accept', 'text/csv')
+
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+
+  const response = await fetch(path, {
+    ...options,
+    headers,
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '')
+    let message = `Request failed with HTTP ${response.status}`
+
+    if (errorText) {
+      try {
+        const errorBody = JSON.parse(errorText) as { message?: string; detail?: string }
+        message = [errorBody.message, errorBody.detail].filter(Boolean).join(' ') || message
+      } catch {
+        message = errorText
+      }
+    }
+
+    throw new Error(message)
+  }
+
+  return response.blob()
 }
 
 export function login(email: string, password: string) {
@@ -1222,9 +1465,27 @@ export function getAdminOrderSummary() {
   return request<AdminOrderSummary>('/api/admin/orders/summary')
 }
 
+export function getAdminOrderStatusHistory(orderId: string) {
+  return request<AdminOrderStatusHistory[]>(`/api/admin/orders/${orderId}/status-history`)
+}
+
 export function recordCounterPayment(orderId: string) {
   return request<AdminOrder>(`/api/admin/orders/${orderId}/counter-payment`, {
     method: 'POST',
+  })
+}
+
+export function refundAdminOrder(orderId: string, payload: RefundOrderRequest = {}) {
+  return request<AdminOrder>(`/api/admin/orders/${orderId}/refund`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function requestCustomerRefund(orderId: string, payload: CreateCustomerRefundRequest = {}) {
+  return request<CustomerRefundRequest>(`/api/order/${orderId}/refund-requests`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
   })
 }
 
@@ -1252,6 +1513,48 @@ export function getGuestOrders(orderIds: string[]) {
 
 export function getAdminPayments(params: AdminPaymentListParams = {}) {
   return request<PagedResponse<AdminPayment>>(`/api/payments${toQueryString(params)}`)
+}
+
+export function getAdminRefundSummary(params: AdminRefundSummaryParams = {}) {
+  return request<AdminRefundSummary>(`/api/payments/refunds/summary${toQueryString(params)}`)
+}
+
+export function getAdminRefunds(params: AdminRefundListParams = {}) {
+  return request<PagedResponse<AdminRefund>>(`/api/payments/refunds${toQueryString(params)}`)
+}
+
+export function getAdminRefundRequests(params: AdminRefundRequestListParams = {}) {
+  return request<PagedResponse<AdminRefundRequest>>(`/api/payments/refund-requests${toQueryString(params)}`)
+}
+
+export function getAuditLogs(params: ReportLogListParams = {}) {
+  return request<PagedResponse<AuditLog>>(`/api/admin/reports/audit${toQueryString(params)}`)
+}
+
+export function getOrderEventLogs(params: ReportLogListParams = {}) {
+  return request<PagedResponse<OrderEventLog>>(`/api/admin/reports/orders${toQueryString(params)}`)
+}
+
+export function getPaymentEventLogs(params: ReportLogListParams = {}) {
+  return request<PagedResponse<PaymentEventLog>>(`/api/admin/reports/payments${toQueryString(params)}`)
+}
+
+export function downloadReportLogsCsv(kind: 'audit' | 'orders' | 'payments', params: ReportLogListParams = {}) {
+  return requestBlob(`/api/admin/reports/${kind}/export${toQueryString(params)}`)
+}
+
+export function approveAdminRefundRequest(requestId: string, payload: ReviewRefundRequestRequest = {}) {
+  return request<AdminRefundRequest>(`/api/payments/refund-requests/${requestId}/approve`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function rejectAdminRefundRequest(requestId: string, payload: ReviewRefundRequestRequest = {}) {
+  return request<AdminRefundRequest>(`/api/payments/refund-requests/${requestId}/reject`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 }
 
 export function createOrderCheckoutSession(payload: CreateOrderCheckoutSessionRequest) {

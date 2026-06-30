@@ -23,6 +23,8 @@ public sealed class PublicOrderingRestaurantResponse
 
     public required string Phone { get; init; }
 
+    public string? ImageUrl { get; init; }
+
     public required string Timezone { get; init; }
 
     public required string Currency { get; init; }

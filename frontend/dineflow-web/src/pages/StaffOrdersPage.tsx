@@ -66,10 +66,26 @@ const queueStatuses: Record<Queue, Set<string>> = {
   closed: new Set(['Completed', 'Cancelled', 'Rejected']),
 }
 
+const orderTypeLabels: Record<AdminOrder['orderType'], string> = {
+  DineIn: 'Dine in',
+  Takeaway: 'Takeaway',
+  Scheduled: 'Scheduled',
+}
+
+function getOrderTypeLabel(orderType: AdminOrder['orderType']) {
+  return orderTypeLabels[orderType] ?? orderType
+}
+
 function getOrderScope(order: AdminOrder) {
-  if (order.tableNumber) return `Table ${order.tableNumber}`
-  if (order.orderType === 'DineIn') return 'Dine in'
-  return order.orderType
+  if (order.orderType === 'DineIn') {
+    return order.tableNumber ? `Dine in · Table ${order.tableNumber}` : 'Dine in'
+  }
+
+  if (order.orderType === 'Scheduled') {
+    return order.tableNumber ? `Scheduled · Table ${order.tableNumber}` : 'Scheduled'
+  }
+
+  return getOrderTypeLabel(order.orderType)
 }
 
 function groupSelectedOptions(item: AdminOrder['items'][number]) {
@@ -561,7 +577,7 @@ export function StaffOrdersPage() {
                           <div>
                             <CardTitle className="text-base">{order.orderNumber}</CardTitle>
                             <CardDescription className="mt-1 flex items-center gap-1.5">
-                              {order.tableNumber ? <Utensils size={14} /> : <ShoppingBag size={14} />}
+                              {order.orderType === 'DineIn' ? <Utensils size={14} /> : <ShoppingBag size={14} />}
                               {getOrderScope(order)}
                               <span>·</span>
                               <Clock3 size={14} />
@@ -571,6 +587,13 @@ export function StaffOrdersPage() {
                           <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
                         </div>
                         <div className="flex flex-wrap gap-2">
+                          <Badge variant="outline" className="staff-order-type-badge">
+                            {order.orderType === 'DineIn' ? <Utensils size={12} /> : <ShoppingBag size={12} />}
+                            {getOrderTypeLabel(order.orderType)}
+                          </Badge>
+                          {order.tableNumber ? (
+                            <Badge variant="secondary">Table {order.tableNumber}</Badge>
+                          ) : null}
                           <OrderStatusBadge status={order.status} />
                           <PaymentStatusBadge status={order.paymentStatus} />
                           <Badge variant="secondary">{order.restaurantName ?? 'Assigned restaurant'}</Badge>

@@ -76,6 +76,8 @@ public static class IdentitySeeder
                 Name = "The DineFlow Kitchen",
                 Address = "42 Flavor Street, Kathmandu 44600",
                 Phone = "+977-1-4567890",
+                ImageUrl = GetSeedMenuImageUrl("Butter Chicken"),
+                CountryCode = "NP",
                 Timezone = "Asia/Kathmandu",
                 Currency = "NPR",
                 IsActive = true,
@@ -88,6 +90,8 @@ public static class IdentitySeeder
                 Name = "Spice Garden",
                 Address = "88 MG Road, Bengaluru, Karnataka 560001",
                 Phone = "+91-80-23456789",
+                ImageUrl = GetSeedMenuImageUrl("Chicken Wings"),
+                CountryCode = "IN",
                 Timezone = "Asia/Kolkata",
                 Currency = "INR",
                 IsActive = true,
@@ -100,6 +104,8 @@ public static class IdentitySeeder
                 Name = "Harbour Test Kitchen",
                 Address = "12 Jetty Lane, Adelaide SA 5000",
                 Phone = "+61-8-8123-4567",
+                ImageUrl = GetSeedMenuImageUrl("Grilled Salmon"),
+                CountryCode = "AU",
                 Timezone = "Australia/Adelaide",
                 Currency = "AUD",
                 IsActive = false,
@@ -388,15 +394,15 @@ public static class IdentitySeeder
     {
         var restaurantSeeds = new[]
         {
-            new SeedRestaurant(Guid.Parse("44444444-4444-4444-4444-444444444444"), "Harbour & Hearth", "18 Marina Walk, Adelaide SA", "+61 8 7000 0401", true),
-            new SeedRestaurant(Guid.Parse("55555555-5555-5555-5555-555555555555"), "Laneway Noodles", "42 Peel Street, Adelaide SA", "+61 8 7000 0502", true),
-            new SeedRestaurant(Guid.Parse("66666666-6666-6666-6666-666666666666"), "North Terrace Cafe", "126 North Terrace, Adelaide SA", "+61 8 7000 0603", true),
-            new SeedRestaurant(Guid.Parse("77777777-7777-7777-7777-777777777777"), "Parkside Pizza Room", "77 Unley Road, Parkside SA", "+61 8 7000 0704", true),
-            new SeedRestaurant(Guid.Parse("88888888-8888-8888-8888-888888888888"), "Glenelg Sunset Grill", "9 Jetty Road, Glenelg SA", "+61 8 7000 0805", true),
-            new SeedRestaurant(Guid.Parse("99999999-9999-9999-9999-999999999999"), "Norwood Garden Kitchen", "151 The Parade, Norwood SA", "+61 8 7000 0906", true),
-            new SeedRestaurant(Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), "Central Market Table", "44 Gouger Street, Adelaide SA", "+61 8 7000 1007", true),
-            new SeedRestaurant(Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"), "West End Test Kitchen", "23 Hindley Street, Adelaide SA", "+61 8 7000 1108", false),
-            new SeedRestaurant(Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc"), "Hills Seasonal Dining", "6 Mount Barker Road, Stirling SA", "+61 8 7000 1209", true)
+            new SeedRestaurant(Guid.Parse("44444444-4444-4444-4444-444444444444"), "Harbour & Hearth", "18 Marina Walk, Adelaide SA", "+61 8 7000 0401", true, "Grilled Salmon"),
+            new SeedRestaurant(Guid.Parse("55555555-5555-5555-5555-555555555555"), "Laneway Noodles", "42 Peel Street, Adelaide SA", "+61 8 7000 0502", true, "Veg Fried Rice"),
+            new SeedRestaurant(Guid.Parse("66666666-6666-6666-6666-666666666666"), "North Terrace Cafe", "126 North Terrace, Adelaide SA", "+61 8 7000 0603", true, "Mango Lassi"),
+            new SeedRestaurant(Guid.Parse("77777777-7777-7777-7777-777777777777"), "Parkside Pizza Room", "77 Unley Road, Parkside SA", "+61 8 7000 0704", true, "Mushroom Pasta"),
+            new SeedRestaurant(Guid.Parse("88888888-8888-8888-8888-888888888888"), "Glenelg Sunset Grill", "9 Jetty Road, Glenelg SA", "+61 8 7000 0805", true, "Fresh Lime Soda"),
+            new SeedRestaurant(Guid.Parse("99999999-9999-9999-9999-999999999999"), "Norwood Garden Kitchen", "151 The Parade, Norwood SA", "+61 8 7000 0906", true, "Garlic Bread"),
+            new SeedRestaurant(Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), "Central Market Table", "44 Gouger Street, Adelaide SA", "+61 8 7000 1007", true, "https://images.unsplash.com/photo-1519708227418-c8fd9a32b7a2?auto=format&fit=crop&w=1600&q=80"),
+            new SeedRestaurant(Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"), "West End Test Kitchen", "23 Hindley Street, Adelaide SA", "+61 8 7000 1108", false, "Chocolate Lava Cake"),
+            new SeedRestaurant(Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc"), "Hills Seasonal Dining", "6 Mount Barker Road, Stirling SA", "+61 8 7000 1209", true, "Gulab Jamun")
         };
 
         var existingRestaurantIds = (await dbContext.Restaurants
@@ -413,6 +419,8 @@ public static class IdentitySeeder
                 Name = seed.Name,
                 Address = seed.Address,
                 Phone = seed.Phone,
+                ImageUrl = GetSeedRestaurantImageUrl(seed.CoverItemName),
+                CountryCode = "AU",
                 Timezone = "Australia/Adelaide",
                 Currency = "AUD",
                 IsActive = seed.IsActive,
@@ -423,6 +431,33 @@ public static class IdentitySeeder
         if (missingRestaurants.Count > 0)
         {
             await dbContext.Restaurants.AddRangeAsync(missingRestaurants);
+            await dbContext.SaveChangesAsync();
+        }
+
+        var seedImagesByRestaurantId = restaurantSeeds.ToDictionary(
+            seed => seed.Id,
+            seed => GetSeedRestaurantImageUrl(seed.CoverItemName));
+        var seedRestaurants = await dbContext.Restaurants
+            .Where(restaurant => seedImagesByRestaurantId.Keys.Contains(restaurant.Id))
+            .ToListAsync();
+
+        var updatedRestaurantImages = 0;
+        foreach (var restaurant in seedRestaurants)
+        {
+            var imageUrl = seedImagesByRestaurantId[restaurant.Id];
+
+            if (imageUrl is not null &&
+                !string.Equals(restaurant.ImageUrl, imageUrl, StringComparison.OrdinalIgnoreCase) &&
+                (string.IsNullOrWhiteSpace(restaurant.ImageUrl) || IsSeedRestaurantImageUrl(restaurant.ImageUrl)))
+            {
+                restaurant.ImageUrl = imageUrl;
+                restaurant.UpdatedAt = DateTime.UtcNow;
+                updatedRestaurantImages++;
+            }
+        }
+
+        if (updatedRestaurantImages > 0)
+        {
             await dbContext.SaveChangesAsync();
         }
 
@@ -584,6 +619,97 @@ public static class IdentitySeeder
         if (newOrders.Count > 0)
         {
             await dbContext.Orders.AddRangeAsync(newOrders);
+            await dbContext.SaveChangesAsync();
+        }
+
+        await SeedDemoRefundsAsync(dbContext);
+    }
+
+    private static async Task SeedDemoRefundsAsync(AppDbContext dbContext)
+    {
+        var seeds = new[]
+        {
+            new DemoRefundSeed(5, PaymentRefundStatus.Succeeded, 1.00m, "Customer cancelled before kitchen started", null, "full"),
+            new DemoRefundSeed(6, PaymentRefundStatus.Succeeded, 0.45m, "Partial refund for a missing item", null, "partial"),
+            new DemoRefundSeed(10, PaymentRefundStatus.Pending, 1.00m, "Refund submitted and waiting for Stripe confirmation", null, "pending"),
+            new DemoRefundSeed(18, PaymentRefundStatus.Failed, 1.00m, "Refund attempted after customer support review", "Seeded issuer refund failure", "failed"),
+            new DemoRefundSeed(22, PaymentRefundStatus.Succeeded, 0.30m, "Service recovery credit", null, "credit")
+        };
+        var paymentIds = seeds
+            .Select(seed => CreateSeedGuid(3, seed.OrderSequence))
+            .ToArray();
+        var payments = await dbContext.Payments
+            .Include(payment => payment.Refunds)
+            .Include(payment => payment.Order)
+            .Where(payment => paymentIds.Contains(payment.Id))
+            .ToDictionaryAsync(payment => payment.Id);
+        var changed = false;
+
+        foreach (var seed in seeds)
+        {
+            var paymentId = CreateSeedGuid(3, seed.OrderSequence);
+            if (!payments.TryGetValue(paymentId, out var payment) || payment.Order is null)
+            {
+                continue;
+            }
+
+            var providerRefundId = $"re_demo_{seed.Slug}_{seed.OrderSequence:0000}";
+            if (!payment.Refunds.Any(refund => refund.ProviderRefundId == providerRefundId))
+            {
+                var createdAt = payment.CreatedAt.AddMinutes(20 + seed.OrderSequence % 7);
+                var amountCents = Math.Max(1, Convert.ToInt64(Math.Round(payment.AmountCents * seed.AmountRatio, MidpointRounding.AwayFromZero)));
+                var refund = new PaymentRefund
+                {
+                    Id = CreateSeedGuid(8, seed.OrderSequence),
+                    PaymentId = payment.Id,
+                    OrderId = payment.OrderId,
+                    Provider = PaymentProviders.Stripe,
+                    ProviderRefundId = providerRefundId,
+                    ProviderPaymentIntentId = payment.ProviderPaymentIntentId,
+                    AmountCents = amountCents,
+                    Currency = payment.Currency,
+                    Status = seed.Status,
+                    Reason = seed.Reason,
+                    FailureReason = seed.FailureReason,
+                    RequestedByUserId = null,
+                    CreatedAt = createdAt,
+                    UpdatedAt = createdAt.AddMinutes(2),
+                    RefundedAt = seed.Status == PaymentRefundStatus.Succeeded ? createdAt.AddMinutes(2) : null,
+                    FailedAt = seed.Status == PaymentRefundStatus.Failed ? createdAt.AddMinutes(2) : null
+                };
+                payment.Refunds.Add(refund);
+                dbContext.PaymentRefunds.Add(refund);
+                changed = true;
+            }
+
+            var succeededAmountCents = payment.Refunds
+                .Where(refund => refund.Status == PaymentRefundStatus.Succeeded)
+                .Sum(refund => refund.AmountCents);
+            var expectedStatus = succeededAmountCents >= payment.AmountCents
+                ? PaymentStatus.Refunded
+                : succeededAmountCents > 0
+                    ? PaymentStatus.PartiallyRefunded
+                    : PaymentStatus.Paid;
+
+            if (payment.Status != expectedStatus)
+            {
+                payment.Status = expectedStatus;
+                changed = true;
+            }
+
+            if (payment.Order.PaymentStatus != expectedStatus)
+            {
+                payment.Order.PaymentStatus = expectedStatus;
+                changed = true;
+            }
+
+            payment.PaidAt ??= payment.CreatedAt.AddMinutes(2);
+            payment.UpdatedAt = payment.CreatedAt.AddMinutes(25);
+            payment.Order.UpdatedAt = payment.CreatedAt.AddMinutes(25);
+        }
+
+        if (changed)
+        {
             await dbContext.SaveChangesAsync();
         }
     }
@@ -1174,7 +1300,16 @@ public static class IdentitySeeder
         string Name,
         string Address,
         string Phone,
-        bool IsActive);
+        bool IsActive,
+        string CoverItemName);
+
+    private sealed record DemoRefundSeed(
+        int OrderSequence,
+        PaymentRefundStatus Status,
+        decimal AmountRatio,
+        string Reason,
+        string? FailureReason,
+        string Slug);
 
     private sealed record MenuOptionGroupSeed(
         string MenuItemName,
@@ -1228,6 +1363,27 @@ public static class IdentitySeeder
     private static string? GetSeedMenuImageUrl(string itemName)
     {
         return ResolvedSeedMenuImageUrls.TryGetValue(itemName, out var imageUrl) ? imageUrl : null;
+    }
+
+    private static string? GetSeedRestaurantImageUrl(string imageSource)
+    {
+        imageSource = imageSource.Trim();
+
+        if (imageSource.StartsWith("/", StringComparison.Ordinal) ||
+            imageSource.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+            imageSource.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return imageSource;
+        }
+
+        return GetSeedMenuImageUrl(imageSource);
+    }
+
+    private static bool IsSeedRestaurantImageUrl(string? imageUrl)
+    {
+        return !string.IsNullOrWhiteSpace(imageUrl) &&
+            (imageUrl.Contains("/seed-menu/", StringComparison.OrdinalIgnoreCase) ||
+                imageUrl.Contains("upload.wikimedia.org/wikipedia/commons/8/8a/Grilled_salmon.jpg", StringComparison.OrdinalIgnoreCase));
     }
 
     private static async Task BackfillSeedMenuImagesAsync(AppDbContext dbContext)

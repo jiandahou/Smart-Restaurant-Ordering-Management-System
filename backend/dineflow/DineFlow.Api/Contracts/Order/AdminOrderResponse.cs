@@ -1,3 +1,5 @@
+using DineFlow.Api.Contracts.Payments;
+
 namespace DineFlow.Api.Contracts.Order;
 
 public sealed class AdminOrderResponse
@@ -102,6 +104,16 @@ public sealed class AdminOrderPaymentResponse
     public string? ProviderPaymentIntentId { get; set; }
 
     public string? FailureReason { get; set; }
+
+    public int RefundCount { get; set; }
+
+    public long RefundedAmountCents { get; set; }
+
+    public long RefundableAmountCents { get; set; }
+
+    public bool HasPendingRefund { get; set; }
+
+    public List<AdminPaymentRefundResponse> Refunds { get; set; } = [];
 
     public DateTime CreatedAt { get; set; }
 

@@ -43,6 +43,8 @@ public class Order
 
     public ICollection<Payment> Payments { get; set; } = [];
 
+    public ICollection<PaymentRefundRequest> RefundRequests { get; set; } = [];
+
     public ApplicationUser? Customer { get; set; }
 
     public RestaurantTable? Table { get; set; }

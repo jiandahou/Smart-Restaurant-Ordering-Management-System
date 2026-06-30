@@ -128,8 +128,9 @@ public sealed class CartAccessService(AppDbContext dbContext)
             .Select(item =>
             {
                 var selectedOptions = GetSelectedOptions(item);
+                var basePrice = item.MenuItem?.Price ?? 0;
                 var unitPrice = PricingCalculator.CalculateUnitPrice(
-                    item.MenuItem?.Price ?? 0,
+                    basePrice,
                     selectedOptions.Select(option => new MenuOptionPriceSelection(option.Option, option.Quantity)));
 
                 return new CartItemResponse
@@ -139,6 +140,7 @@ public sealed class CartAccessService(AppDbContext dbContext)
                     Name = item.MenuItem?.Name ?? "Unavailable item",
                     ImageUrl = item.MenuItem?.ImageUrl,
                     Quantity = item.Quantity,
+                    BasePrice = basePrice,
                     UnitPrice = unitPrice,
                     LineTotal = PricingCalculator.CalculateLineTotal(item.Quantity, unitPrice),
                     Note = item.Note,

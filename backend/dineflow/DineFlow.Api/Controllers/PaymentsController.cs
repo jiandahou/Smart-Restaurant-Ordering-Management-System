@@ -30,12 +30,15 @@ public class PaymentsController : ControllerBase
 {
     private const string OrderIdMetadataKey = "orderId";
     private const string PaymentIdMetadataKey = "paymentId";
+    private const string RefundIdMetadataKey = "refundId";
 
     private readonly AppDbContext _dbContext;
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly IStripeClient _stripeClient;
     private readonly StripeOptions _stripeOptions;
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
+    private readonly OrderRefundProcessor _orderRefundProcessor;
+    private readonly ReportLogWriter _reportLogWriter;
     private readonly ILogger<PaymentsController> _logger;
 
     public PaymentsController(
@@ -44,6 +47,8 @@ public class PaymentsController : ControllerBase
         IStripeClient stripeClient,
         IOptions<StripeOptions> stripeOptions,
         OrderRealtimeNotifier orderRealtimeNotifier,
+        OrderRefundProcessor orderRefundProcessor,
+        ReportLogWriter reportLogWriter,
         ILogger<PaymentsController> logger)
     {
         _dbContext = dbContext;
@@ -51,6 +56,8 @@ public class PaymentsController : ControllerBase
         _stripeClient = stripeClient;
         _stripeOptions = stripeOptions.Value;
         _orderRealtimeNotifier = orderRealtimeNotifier;
+        _orderRefundProcessor = orderRefundProcessor;
+        _reportLogWriter = reportLogWriter;
         _logger = logger;
     }
 
@@ -72,6 +79,7 @@ public class PaymentsController : ControllerBase
 
         var query = _dbContext.Payments
             .AsNoTracking()
+            .Include(payment => payment.Refunds)
             .Include(payment => payment.Order)
                 .ThenInclude(order => order!.Restaurant)
             .Include(payment => payment.Order)
@@ -143,6 +151,343 @@ public class PaymentsController : ControllerBase
             PageSize = page.PageSize,
             TotalItems = page.TotalItems
         });
+    }
+
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    [HttpGet("refunds")]
+    public async Task<ActionResult<PagedResponse<AdminRefundResponse>>> GetRefunds(
+        [FromQuery] AdminRefundListRequest request,
+        CancellationToken cancellationToken)
+    {
+        var currentRestaurantId = await GetCurrentRestaurantIdAsync();
+
+        if (!User.IsInRole(ApplicationRoles.PlatformOwner) && currentRestaurantId is null)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                message = "Current user is not assigned to a restaurant."
+            });
+        }
+
+        var query = BuildRefundQuery(currentRestaurantId, request.RestaurantId);
+
+        if (!TryParseFilter<PaymentRefundStatus>(request.Status, nameof(request.Status), out var refundStatus, out var filterError))
+        {
+            return BadRequest(new { message = filterError });
+        }
+
+        if (refundStatus.HasValue)
+        {
+            query = query.Where(refund => refund.Status == refundStatus.Value);
+        }
+
+        query = ApplyRefundSearch(query, request.Search);
+
+        var sortedQuery = ApplyRefundSorting(query, request.SortBy, request.IsDescending);
+        if (sortedQuery is null)
+        {
+            return BadRequest(new
+            {
+                message = "Unsupported sortBy value.",
+                allowedValues = new[] { "createdAt", "updatedAt", "orderNumber", "restaurantName", "status", "amount" }
+            });
+        }
+
+        var page = await sortedQuery.ToPagedResponseAsync(request.Page, request.PageSize, cancellationToken);
+
+        return Ok(new PagedResponse<AdminRefundResponse>
+        {
+            Items = page.Items.Select(MapToAdminRefundResponse).ToList(),
+            Page = page.Page,
+            PageSize = page.PageSize,
+            TotalItems = page.TotalItems
+        });
+    }
+
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    [HttpGet("refunds/summary")]
+    public async Task<ActionResult<AdminRefundSummaryResponse>> GetRefundSummary(
+        [FromQuery] AdminRefundSummaryRequest request,
+        CancellationToken cancellationToken)
+    {
+        var currentRestaurantId = await GetCurrentRestaurantIdAsync();
+
+        if (!User.IsInRole(ApplicationRoles.PlatformOwner) && currentRestaurantId is null)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                message = "Current user is not assigned to a restaurant."
+            });
+        }
+
+        var query = BuildRefundQuery(currentRestaurantId, request.RestaurantId);
+
+        if (!TryParseFilter<PaymentRefundStatus>(request.Status, nameof(request.Status), out var refundStatus, out var filterError))
+        {
+            return BadRequest(new { message = filterError });
+        }
+
+        if (refundStatus.HasValue)
+        {
+            query = query.Where(refund => refund.Status == refundStatus.Value);
+        }
+
+        query = ApplyRefundSearch(query, request.Search);
+
+        var summary = await query
+            .GroupBy(_ => 1)
+            .Select(group => new AdminRefundSummaryResponse
+            {
+                Total = group.Count(),
+                Pending = group.Count(refund => refund.Status == PaymentRefundStatus.Pending),
+                Succeeded = group.Count(refund => refund.Status == PaymentRefundStatus.Succeeded),
+                Failed = group.Count(refund => refund.Status == PaymentRefundStatus.Failed)
+            })
+            .SingleOrDefaultAsync(cancellationToken) ?? new AdminRefundSummaryResponse();
+
+        summary.AmountsByCurrency = await query
+            .GroupBy(refund => refund.Currency)
+            .Select(group => new AdminRefundCurrencySummaryResponse
+            {
+                Currency = group.Key,
+                PendingAmountCents = group
+                    .Where(refund => refund.Status == PaymentRefundStatus.Pending)
+                    .Sum(refund => refund.AmountCents),
+                SucceededAmountCents = group
+                    .Where(refund => refund.Status == PaymentRefundStatus.Succeeded)
+                    .Sum(refund => refund.AmountCents),
+                FailedAmountCents = group
+                    .Where(refund => refund.Status == PaymentRefundStatus.Failed)
+                    .Sum(refund => refund.AmountCents)
+            })
+            .OrderBy(item => item.Currency)
+            .ToListAsync(cancellationToken);
+
+        return Ok(summary);
+    }
+
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    [HttpGet("refund-requests")]
+    public async Task<ActionResult<PagedResponse<AdminRefundRequestResponse>>> GetRefundRequests(
+        [FromQuery] AdminRefundRequestListRequest request,
+        CancellationToken cancellationToken)
+    {
+        var currentRestaurantId = await GetCurrentRestaurantIdAsync();
+
+        if (!User.IsInRole(ApplicationRoles.PlatformOwner) && currentRestaurantId is null)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                message = "Current user is not assigned to a restaurant."
+            });
+        }
+
+        var query = BuildRefundRequestQuery(currentRestaurantId, request.RestaurantId);
+
+        if (!TryParseFilter<PaymentRefundRequestStatus>(request.Status, nameof(request.Status), out var requestStatus, out var filterError))
+        {
+            return BadRequest(new { message = filterError });
+        }
+
+        if (requestStatus.HasValue)
+        {
+            query = query.Where(item => item.Status == requestStatus.Value);
+        }
+
+        query = ApplyRefundRequestSearch(query, request.Search);
+
+        var sortedQuery = ApplyRefundRequestSorting(query, request.SortBy, request.IsDescending);
+        if (sortedQuery is null)
+        {
+            return BadRequest(new
+            {
+                message = "Unsupported sortBy value.",
+                allowedValues = new[] { "createdAt", "updatedAt", "reviewedAt", "orderNumber", "restaurantName", "status", "amount" }
+            });
+        }
+
+        var page = await sortedQuery.ToPagedResponseAsync(request.Page, request.PageSize, cancellationToken);
+
+        return Ok(new PagedResponse<AdminRefundRequestResponse>
+        {
+            Items = page.Items.Select(MapToAdminRefundRequestResponse).ToList(),
+            Page = page.Page,
+            PageSize = page.PageSize,
+            TotalItems = page.TotalItems
+        });
+    }
+
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    [HttpPost("refund-requests/{requestId:guid}/approve")]
+    public async Task<ActionResult<AdminRefundRequestResponse>> ApproveRefundRequest(
+        Guid requestId,
+        ReviewRefundRequestRequest? request,
+        CancellationToken cancellationToken)
+    {
+        var note = TrimOrNull(request?.Note);
+        if (note?.Length > 1_000)
+        {
+            return BadRequest(new { message = "Note cannot exceed 1000 characters." });
+        }
+
+        var refundRequest = await LoadRefundRequestForReviewAsync(requestId, cancellationToken);
+        if (refundRequest is null)
+        {
+            return NotFound(new { message = "Refund request not found." });
+        }
+
+        if (!await CanAccessRefundRequestAsync(refundRequest))
+        {
+            return Forbid();
+        }
+
+        if (refundRequest.Status != PaymentRefundRequestStatus.Pending)
+        {
+            return Conflict(new
+            {
+                message = "Only pending refund requests can be approved.",
+                status = refundRequest.Status.ToString()
+            });
+        }
+
+        if (refundRequest.Order is null)
+        {
+            return Conflict(new { message = "Refund request is missing its order." });
+        }
+
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        var refundReason = BuildApprovalRefundReason(refundRequest.Reason, note);
+        var result = await _orderRefundProcessor.RefundAsync(
+            refundRequest.Order,
+            userId,
+            refundReason,
+            "refund-request-approval",
+            cancellationToken);
+
+        if (!result.IsSuccess)
+        {
+            return StatusCode(result.StatusCode, new
+            {
+                message = result.Message,
+                detail = result.Detail
+            });
+        }
+
+        var now = DateTime.UtcNow;
+        refundRequest.Status = PaymentRefundRequestStatus.Approved;
+        refundRequest.PaymentRefundId = result.Refund?.Id;
+        refundRequest.AdminNote = note;
+        refundRequest.ReviewedByUserId = userId;
+        refundRequest.ReviewedAt = now;
+        refundRequest.UpdatedAt = now;
+        _reportLogWriter.AddAudit(
+            "RefundRequest.Approved",
+            "PaymentRefundRequest",
+            refundRequest.Id.ToString(),
+            refundRequest.RestaurantId,
+            $"Refund request approved for {refundRequest.Order?.OrderNumber ?? refundRequest.OrderId.ToString()}.",
+            after: new
+            {
+                refundRequestId = refundRequest.Id,
+                refundRequest.OrderId,
+                refundRequest.PaymentId,
+                refundRequest.PaymentRefundId,
+                refundRequest.Status,
+                note
+            });
+        if (refundRequest.Order is not null)
+        {
+            _reportLogWriter.AddOrderEvent(
+                refundRequest.Order,
+                "refund_request.approved",
+                $"Refund request approved for {refundRequest.Order.OrderNumber}.",
+                new
+                {
+                    refundRequestId = refundRequest.Id,
+                    refundRequest.PaymentId,
+                    refundRequest.PaymentRefundId,
+                    note
+                });
+        }
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(MapToAdminRefundRequestResponse(refundRequest));
+    }
+
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    [HttpPost("refund-requests/{requestId:guid}/reject")]
+    public async Task<ActionResult<AdminRefundRequestResponse>> RejectRefundRequest(
+        Guid requestId,
+        ReviewRefundRequestRequest? request,
+        CancellationToken cancellationToken)
+    {
+        var note = TrimOrNull(request?.Note);
+        if (string.IsNullOrWhiteSpace(note))
+        {
+            return BadRequest(new { message = "A rejection note is required." });
+        }
+
+        if (note.Length > 1_000)
+        {
+            return BadRequest(new { message = "Note cannot exceed 1000 characters." });
+        }
+
+        var refundRequest = await LoadRefundRequestForReviewAsync(requestId, cancellationToken);
+        if (refundRequest is null)
+        {
+            return NotFound(new { message = "Refund request not found." });
+        }
+
+        if (!await CanAccessRefundRequestAsync(refundRequest))
+        {
+            return Forbid();
+        }
+
+        if (refundRequest.Status != PaymentRefundRequestStatus.Pending)
+        {
+            return Conflict(new
+            {
+                message = "Only pending refund requests can be rejected.",
+                status = refundRequest.Status.ToString()
+            });
+        }
+
+        var now = DateTime.UtcNow;
+        refundRequest.Status = PaymentRefundRequestStatus.Rejected;
+        refundRequest.AdminNote = note;
+        refundRequest.ReviewedByUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        refundRequest.ReviewedAt = now;
+        refundRequest.UpdatedAt = now;
+        _reportLogWriter.AddAudit(
+            "RefundRequest.Rejected",
+            "PaymentRefundRequest",
+            refundRequest.Id.ToString(),
+            refundRequest.RestaurantId,
+            $"Refund request rejected for {refundRequest.Order?.OrderNumber ?? refundRequest.OrderId.ToString()}.",
+            after: new
+            {
+                refundRequestId = refundRequest.Id,
+                refundRequest.OrderId,
+                refundRequest.PaymentId,
+                refundRequest.Status,
+                note
+            });
+        if (refundRequest.Order is not null)
+        {
+            _reportLogWriter.AddOrderEvent(
+                refundRequest.Order,
+                "refund_request.rejected",
+                $"Refund request rejected for {refundRequest.Order.OrderNumber}.",
+                new
+                {
+                    refundRequestId = refundRequest.Id,
+                    refundRequest.PaymentId,
+                    note
+                });
+        }
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(MapToAdminRefundRequestResponse(refundRequest));
     }
 
     [AllowAnonymous]
@@ -296,6 +641,37 @@ public class PaymentsController : ControllerBase
             payment.UpdatedAt = DateTime.UtcNow;
             order.PaymentStatus = PaymentStatus.Pending;
             order.UpdatedAt = DateTime.UtcNow;
+            _reportLogWriter.AddAudit(
+                "Payment.CheckoutSessionCreated",
+                "Order",
+                order.Id.ToString(),
+                order.RestaurantId,
+                $"Stripe checkout session created for {order.OrderNumber}.",
+                after: new
+                {
+                    orderId = order.Id,
+                    order.OrderNumber,
+                    paymentId = payment.Id,
+                    sessionId = session.Id,
+                    paymentIntentId = session.PaymentIntentId,
+                    payment.AmountCents,
+                    payment.Currency
+                });
+            _reportLogWriter.AddPaymentEvent(
+                order,
+                payment,
+                null,
+                "checkout_session.created",
+                session.Id,
+                payment.Status.ToString(),
+                "Stripe checkout session created.",
+                new
+                {
+                    sessionId = session.Id,
+                    paymentIntentId = session.PaymentIntentId,
+                    payment.AmountCents,
+                    payment.Currency
+                });
             await _dbContext.SaveChangesAsync(cancellationToken);
             await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 
@@ -318,6 +694,35 @@ public class PaymentsController : ControllerBase
             payment.UpdatedAt = DateTime.UtcNow;
             order.PaymentStatus = PaymentStatus.Failed;
             order.UpdatedAt = DateTime.UtcNow;
+            _reportLogWriter.AddAudit(
+                "Payment.CheckoutSessionFailed",
+                "Order",
+                order.Id.ToString(),
+                order.RestaurantId,
+                $"Stripe checkout session failed for {order.OrderNumber}.",
+                after: new
+                {
+                    orderId = order.Id,
+                    order.OrderNumber,
+                    paymentId = payment.Id,
+                    payment.AmountCents,
+                    payment.Currency,
+                    payment.FailureReason
+                });
+            _reportLogWriter.AddPaymentEvent(
+                order,
+                payment,
+                null,
+                "checkout_session.failed",
+                null,
+                payment.Status.ToString(),
+                "Stripe checkout session failed.",
+                new
+                {
+                    payment.AmountCents,
+                    payment.Currency,
+                    payment.FailureReason
+                });
             await _dbContext.SaveChangesAsync(cancellationToken);
             await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 
@@ -373,6 +778,14 @@ public class PaymentsController : ControllerBase
             case "payment_intent.payment_failed":
                 await UpdatePaymentFromPaymentIntentAsync(stripeEvent, PaymentStatus.Failed, cancellationToken);
                 break;
+            case "refund.created":
+            case "refund.updated":
+            case "refund.failed":
+                await UpsertRefundFromStripeEventAsync(stripeEvent, cancellationToken);
+                break;
+            case "charge.refunded":
+                await ReconcileChargeRefundedAsync(stripeEvent, cancellationToken);
+                break;
             default:
                 _logger.LogInformation("Ignored Stripe webhook event {EventType}.", stripeEvent.Type);
                 break;
@@ -416,6 +829,205 @@ public class PaymentsController : ControllerBase
                 : sorted.ThenBy(payment => payment.Id);
     }
 
+    private IQueryable<PaymentRefund> BuildRefundQuery(Guid? currentRestaurantId, Guid? requestedRestaurantId)
+    {
+        var query = _dbContext.PaymentRefunds
+            .AsNoTracking()
+            .Include(refund => refund.Payment)
+                .ThenInclude(payment => payment!.Order)
+                    .ThenInclude(order => order!.Restaurant)
+            .Include(refund => refund.Payment)
+                .ThenInclude(payment => payment!.Order)
+                    .ThenInclude(order => order!.Customer)
+            .AsQueryable();
+
+        if (!User.IsInRole(ApplicationRoles.PlatformOwner))
+        {
+            query = query.Where(refund =>
+                refund.Payment != null &&
+                refund.Payment.Order != null &&
+                refund.Payment.Order.RestaurantId == currentRestaurantId);
+        }
+
+        if (requestedRestaurantId.HasValue)
+        {
+            query = query.Where(refund =>
+                refund.Payment != null &&
+                refund.Payment.Order != null &&
+                refund.Payment.Order.RestaurantId == requestedRestaurantId);
+        }
+
+        return query;
+    }
+
+    private IQueryable<PaymentRefundRequest> BuildRefundRequestQuery(Guid? currentRestaurantId, Guid? requestedRestaurantId)
+    {
+        var query = _dbContext.PaymentRefundRequests
+            .AsNoTracking()
+            .Include(request => request.Order)
+                .ThenInclude(order => order!.Restaurant)
+            .Include(request => request.Order)
+                .ThenInclude(order => order!.Customer)
+            .Include(request => request.Payment)
+            .Include(request => request.PaymentRefund)
+            .AsQueryable();
+
+        if (!User.IsInRole(ApplicationRoles.PlatformOwner))
+        {
+            query = query.Where(request => request.RestaurantId == currentRestaurantId);
+        }
+
+        if (requestedRestaurantId.HasValue)
+        {
+            query = query.Where(request => request.RestaurantId == requestedRestaurantId);
+        }
+
+        return query;
+    }
+
+    private static IQueryable<PaymentRefundRequest> ApplyRefundRequestSearch(
+        IQueryable<PaymentRefundRequest> query,
+        string? search)
+    {
+        search = search?.Trim();
+        if (string.IsNullOrWhiteSpace(search))
+        {
+            return query;
+        }
+
+        var pattern = $"%{search}%";
+        return query.Where(request =>
+            (request.Reason != null && EF.Functions.ILike(request.Reason, pattern)) ||
+            (request.AdminNote != null && EF.Functions.ILike(request.AdminNote, pattern)) ||
+            (request.RequesterName != null && EF.Functions.ILike(request.RequesterName, pattern)) ||
+            (request.RequesterEmail != null && EF.Functions.ILike(request.RequesterEmail, pattern)) ||
+            (request.Order != null && EF.Functions.ILike(request.Order.OrderNumber, pattern)) ||
+            (request.Order != null && request.Order.Restaurant != null && EF.Functions.ILike(request.Order.Restaurant.Name, pattern)) ||
+            (request.Order != null && request.Order.Customer != null && request.Order.Customer.Email != null && EF.Functions.ILike(request.Order.Customer.Email, pattern)));
+    }
+
+    private static IOrderedQueryable<PaymentRefundRequest>? ApplyRefundRequestSorting(
+        IQueryable<PaymentRefundRequest> query,
+        string? sortBy,
+        bool descending)
+    {
+        var normalizedSort = string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy.Trim();
+
+        IOrderedQueryable<PaymentRefundRequest>? sorted = normalizedSort.ToLowerInvariant() switch
+        {
+            "createdat" => descending ? query.OrderByDescending(request => request.CreatedAt) : query.OrderBy(request => request.CreatedAt),
+            "updatedat" => descending ? query.OrderByDescending(request => request.UpdatedAt) : query.OrderBy(request => request.UpdatedAt),
+            "reviewedat" => descending ? query.OrderByDescending(request => request.ReviewedAt) : query.OrderBy(request => request.ReviewedAt),
+            "ordernumber" => descending ? query.OrderByDescending(request => request.Order!.OrderNumber) : query.OrderBy(request => request.Order!.OrderNumber),
+            "restaurantname" => descending ? query.OrderByDescending(request => request.Order!.Restaurant!.Name) : query.OrderBy(request => request.Order!.Restaurant!.Name),
+            "status" => descending ? query.OrderByDescending(request => request.Status) : query.OrderBy(request => request.Status),
+            "amount" => descending ? query.OrderByDescending(request => request.RequestedAmountCents) : query.OrderBy(request => request.RequestedAmountCents),
+            _ => null
+        };
+
+        return sorted is null
+            ? null
+            : descending
+                ? sorted.ThenByDescending(request => request.Id)
+                : sorted.ThenBy(request => request.Id);
+    }
+
+    private static IQueryable<PaymentRefund> ApplyRefundSearch(
+        IQueryable<PaymentRefund> query,
+        string? search)
+    {
+        search = search?.Trim();
+        if (string.IsNullOrWhiteSpace(search))
+        {
+            return query;
+        }
+
+        var pattern = $"%{search}%";
+        return query.Where(refund =>
+            (refund.ProviderRefundId != null && EF.Functions.ILike(refund.ProviderRefundId, pattern)) ||
+            (refund.ProviderPaymentIntentId != null && EF.Functions.ILike(refund.ProviderPaymentIntentId, pattern)) ||
+            (refund.Reason != null && EF.Functions.ILike(refund.Reason, pattern)) ||
+            (refund.FailureReason != null && EF.Functions.ILike(refund.FailureReason, pattern)) ||
+            (refund.Payment != null && refund.Payment.Order != null && EF.Functions.ILike(refund.Payment.Order.OrderNumber, pattern)) ||
+            (refund.Payment != null && refund.Payment.Order != null && refund.Payment.Order.Restaurant != null && EF.Functions.ILike(refund.Payment.Order.Restaurant.Name, pattern)) ||
+            (refund.Payment != null && refund.Payment.Order != null && refund.Payment.Order.Customer != null && refund.Payment.Order.Customer.Email != null && EF.Functions.ILike(refund.Payment.Order.Customer.Email, pattern)));
+    }
+
+    private static IOrderedQueryable<PaymentRefund>? ApplyRefundSorting(
+        IQueryable<PaymentRefund> query,
+        string? sortBy,
+        bool descending)
+    {
+        var normalizedSort = string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy.Trim();
+
+        IOrderedQueryable<PaymentRefund>? sorted = normalizedSort.ToLowerInvariant() switch
+        {
+            "createdat" => descending ? query.OrderByDescending(refund => refund.CreatedAt) : query.OrderBy(refund => refund.CreatedAt),
+            "updatedat" => descending ? query.OrderByDescending(refund => refund.UpdatedAt) : query.OrderBy(refund => refund.UpdatedAt),
+            "ordernumber" => descending ? query.OrderByDescending(refund => refund.Payment!.Order!.OrderNumber) : query.OrderBy(refund => refund.Payment!.Order!.OrderNumber),
+            "restaurantname" => descending ? query.OrderByDescending(refund => refund.Payment!.Order!.Restaurant!.Name) : query.OrderBy(refund => refund.Payment!.Order!.Restaurant!.Name),
+            "status" => descending ? query.OrderByDescending(refund => refund.Status) : query.OrderBy(refund => refund.Status),
+            "amount" => descending ? query.OrderByDescending(refund => refund.AmountCents) : query.OrderBy(refund => refund.AmountCents),
+            _ => null
+        };
+
+        return sorted is null
+            ? null
+            : descending
+                ? sorted.ThenByDescending(refund => refund.Id)
+                : sorted.ThenBy(refund => refund.Id);
+    }
+
+    private static AdminRefundResponse MapToAdminRefundResponse(PaymentRefund refund) =>
+        new()
+        {
+            Id = refund.Id,
+            PaymentId = refund.PaymentId,
+            OrderId = refund.OrderId,
+            OrderNumber = refund.Payment?.Order?.OrderNumber ?? string.Empty,
+            RestaurantId = refund.Payment?.Order?.RestaurantId,
+            RestaurantName = refund.Payment?.Order?.Restaurant?.Name,
+            CustomerName = refund.Payment?.Order?.Customer?.FullName,
+            CustomerEmail = refund.Payment?.Order?.Customer?.Email,
+            Provider = refund.Provider,
+            ProviderRefundId = refund.ProviderRefundId,
+            ProviderPaymentIntentId = refund.ProviderPaymentIntentId,
+            AmountCents = refund.AmountCents,
+            Currency = refund.Currency,
+            Status = refund.Status.ToString(),
+            Reason = refund.Reason,
+            FailureReason = refund.FailureReason,
+            RequestedByUserId = refund.RequestedByUserId,
+            CreatedAt = refund.CreatedAt,
+            UpdatedAt = refund.UpdatedAt,
+            RefundedAt = refund.RefundedAt,
+            FailedAt = refund.FailedAt
+        };
+
+    private static AdminRefundRequestResponse MapToAdminRefundRequestResponse(PaymentRefundRequest request) =>
+        new()
+        {
+            Id = request.Id,
+            OrderId = request.OrderId,
+            PaymentId = request.PaymentId,
+            PaymentRefundId = request.PaymentRefundId,
+            RestaurantId = request.RestaurantId,
+            RestaurantName = request.Order?.Restaurant?.Name,
+            OrderNumber = request.Order?.OrderNumber ?? string.Empty,
+            CustomerName = request.RequesterName ?? request.Order?.Customer?.FullName,
+            CustomerEmail = request.RequesterEmail ?? request.Order?.Customer?.Email,
+            Status = request.Status.ToString(),
+            RequestedAmountCents = request.RequestedAmountCents,
+            Currency = request.Currency,
+            Reason = request.Reason,
+            AdminNote = request.AdminNote,
+            RequestedByUserId = request.RequestedByUserId,
+            ReviewedByUserId = request.ReviewedByUserId,
+            CreatedAt = request.CreatedAt,
+            UpdatedAt = request.UpdatedAt,
+            ReviewedAt = request.ReviewedAt
+        };
+
     private static AdminPaymentResponse MapToAdminPaymentResponse(Payment payment)
     {
         return new AdminPaymentResponse
@@ -436,12 +1048,45 @@ public class PaymentsController : ControllerBase
             ProviderCheckoutSessionId = payment.ProviderCheckoutSessionId,
             ProviderPaymentIntentId = payment.ProviderPaymentIntentId,
             FailureReason = payment.FailureReason,
+            RefundCount = payment.Refunds.Count,
+            RefundedAmountCents = GetSucceededRefundedAmount(payment),
+            RefundableAmountCents = Math.Max(0, payment.AmountCents - GetSucceededRefundedAmount(payment)),
+            HasPendingRefund = payment.Refunds.Any(refund => refund.Status == PaymentRefundStatus.Pending),
+            Refunds = payment.Refunds
+                .OrderByDescending(refund => refund.CreatedAt)
+                .ThenByDescending(refund => refund.Id)
+                .Select(MapToAdminPaymentRefundResponse)
+                .ToList(),
             CreatedAt = payment.CreatedAt,
             UpdatedAt = payment.UpdatedAt,
             PaidAt = payment.PaidAt,
             FailedAt = payment.FailedAt
         };
     }
+
+    private static AdminPaymentRefundResponse MapToAdminPaymentRefundResponse(PaymentRefund refund) =>
+        new()
+        {
+            Id = refund.Id,
+            Provider = refund.Provider,
+            ProviderRefundId = refund.ProviderRefundId,
+            ProviderPaymentIntentId = refund.ProviderPaymentIntentId,
+            AmountCents = refund.AmountCents,
+            Currency = refund.Currency,
+            Status = refund.Status.ToString(),
+            Reason = refund.Reason,
+            FailureReason = refund.FailureReason,
+            RequestedByUserId = refund.RequestedByUserId,
+            CreatedAt = refund.CreatedAt,
+            UpdatedAt = refund.UpdatedAt,
+            RefundedAt = refund.RefundedAt,
+            FailedAt = refund.FailedAt
+        };
+
+    private static long GetSucceededRefundedAmount(Payment payment) =>
+        payment.Refunds
+            .Where(refund => refund.Status == PaymentRefundStatus.Succeeded)
+            .Sum(refund => refund.AmountCents);
 
     private static bool TryParseFilter<TEnum>(
         string? value,
@@ -576,6 +1221,50 @@ public class PaymentsController : ControllerBase
             payment.Order.UpdatedAt = DateTime.UtcNow;
         }
 
+        _reportLogWriter.AddAudit(
+            "Payment.WebhookUpdated",
+            "Payment",
+            payment.Id.ToString(),
+            payment.Order?.RestaurantId,
+            $"Stripe webhook {stripeEvent.Type} updated payment {payment.Id} to {status}.",
+            after: new
+            {
+                stripeEventId = stripeEvent.Id,
+                stripeEvent.Type,
+                paymentId = payment.Id,
+                orderId = payment.OrderId,
+                sessionId = session.Id,
+                paymentIntentId = session.PaymentIntentId,
+                status
+            });
+        _reportLogWriter.AddPaymentEvent(
+            payment.Order,
+            payment,
+            null,
+            stripeEvent.Type,
+            stripeEvent.Id,
+            status.ToString(),
+            $"Stripe checkout webhook updated payment to {status}.",
+            new
+            {
+                sessionId = session.Id,
+                paymentIntentId = session.PaymentIntentId
+            });
+        if (payment.Order is not null)
+        {
+            _reportLogWriter.AddOrderEvent(
+                payment.Order,
+                "payment.status_updated",
+                $"{payment.Order.OrderNumber} payment is {status}.",
+                new
+                {
+                    paymentId = payment.Id,
+                    stripeEventId = stripeEvent.Id,
+                    stripeEvent.Type,
+                    status
+                });
+        }
+
         await _dbContext.SaveChangesAsync(cancellationToken);
         if (payment.Order is not null)
         {
@@ -620,6 +1309,51 @@ public class PaymentsController : ControllerBase
             payment.Order.UpdatedAt = DateTime.UtcNow;
         }
 
+        _reportLogWriter.AddAudit(
+            "Payment.WebhookUpdated",
+            "Payment",
+            payment.Id.ToString(),
+            payment.Order?.RestaurantId,
+            $"Stripe webhook {stripeEvent.Type} updated payment {payment.Id} to {status}.",
+            after: new
+            {
+                stripeEventId = stripeEvent.Id,
+                stripeEvent.Type,
+                paymentId = payment.Id,
+                orderId = payment.OrderId,
+                paymentIntentId = paymentIntent.Id,
+                status,
+                failureReason = payment.FailureReason
+            });
+        _reportLogWriter.AddPaymentEvent(
+            payment.Order,
+            payment,
+            null,
+            stripeEvent.Type,
+            stripeEvent.Id,
+            status.ToString(),
+            $"Stripe payment intent webhook updated payment to {status}.",
+            new
+            {
+                paymentIntentId = paymentIntent.Id,
+                failureReason = payment.FailureReason
+            });
+        if (payment.Order is not null)
+        {
+            _reportLogWriter.AddOrderEvent(
+                payment.Order,
+                "payment.status_updated",
+                $"{payment.Order.OrderNumber} payment is {status}.",
+                new
+                {
+                    paymentId = payment.Id,
+                    stripeEventId = stripeEvent.Id,
+                    stripeEvent.Type,
+                    status,
+                    failureReason = payment.FailureReason
+                });
+        }
+
         await _dbContext.SaveChangesAsync(cancellationToken);
         if (payment.Order is not null)
         {
@@ -633,6 +1367,204 @@ public class PaymentsController : ControllerBase
             paymentIntent.Id);
     }
 
+    private async Task UpsertRefundFromStripeEventAsync(
+        Event stripeEvent,
+        CancellationToken cancellationToken)
+    {
+        if (stripeEvent.Data.Object is not Refund stripeRefund)
+        {
+            _logger.LogWarning("Stripe event {EventType} did not contain a refund.", stripeEvent.Type);
+            return;
+        }
+
+        var payment = await FindPaymentForRefundAsync(stripeRefund, cancellationToken);
+        if (payment is null)
+        {
+            _logger.LogWarning(
+                "No payment found for Stripe refund {RefundId} with payment intent {PaymentIntentId}.",
+                stripeRefund.Id,
+                stripeRefund.PaymentIntentId);
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var localRefund = await FindExistingRefundAsync(payment, stripeRefund, cancellationToken);
+
+        if (localRefund is null)
+        {
+            localRefund = new PaymentRefund
+            {
+                Id = Guid.NewGuid(),
+                PaymentId = payment.Id,
+                Payment = payment,
+                OrderId = payment.OrderId,
+                Provider = PaymentProviders.Stripe,
+                CreatedAt = stripeRefund.Created == default ? now : stripeRefund.Created
+            };
+            _dbContext.PaymentRefunds.Add(localRefund);
+            payment.Refunds.Add(localRefund);
+        }
+
+        localRefund.ProviderRefundId = stripeRefund.Id;
+        localRefund.ProviderPaymentIntentId = stripeRefund.PaymentIntentId ?? payment.ProviderPaymentIntentId;
+        localRefund.AmountCents = stripeRefund.Amount;
+        localRefund.Currency = NormalizeCurrency(stripeRefund.Currency ?? payment.Currency);
+        localRefund.Status = MapStripeRefundStatus(stripeRefund.Status);
+        localRefund.FailureReason = stripeRefund.FailureReason;
+        localRefund.UpdatedAt = now;
+
+        if (string.IsNullOrWhiteSpace(localRefund.Reason))
+        {
+            localRefund.Reason = ResolveRefundReason(stripeRefund);
+        }
+
+        if (localRefund.Status == PaymentRefundStatus.Succeeded)
+        {
+            localRefund.RefundedAt ??= now;
+            localRefund.FailedAt = null;
+        }
+        else if (localRefund.Status == PaymentRefundStatus.Failed)
+        {
+            localRefund.FailedAt ??= now;
+        }
+
+        ReconcilePaymentRefundStatus(payment, now);
+        _reportLogWriter.AddAudit(
+            "PaymentRefund.WebhookUpdated",
+            "PaymentRefund",
+            localRefund.Id.ToString(),
+            payment.Order?.RestaurantId,
+            $"Stripe webhook {stripeEvent.Type} reconciled refund {localRefund.ProviderRefundId ?? localRefund.Id.ToString()} to {localRefund.Status}.",
+            after: new
+            {
+                stripeEventId = stripeEvent.Id,
+                stripeEvent.Type,
+                paymentId = payment.Id,
+                orderId = payment.OrderId,
+                refundId = localRefund.Id,
+                stripeRefundId = localRefund.ProviderRefundId,
+                localRefund.Status,
+                localRefund.AmountCents,
+                localRefund.Currency,
+                localRefund.FailureReason
+            });
+        _reportLogWriter.AddPaymentEvent(
+            payment.Order,
+            payment,
+            localRefund,
+            stripeEvent.Type,
+            stripeEvent.Id,
+            localRefund.Status.ToString(),
+            $"Stripe refund webhook reconciled refund to {localRefund.Status}.",
+            new
+            {
+                stripeRefundId = localRefund.ProviderRefundId,
+                localRefund.AmountCents,
+                localRefund.Currency,
+                localRefund.FailureReason
+            });
+        if (payment.Order is not null)
+        {
+            _reportLogWriter.AddOrderEvent(
+                payment.Order,
+                "payment.refund_reconciled",
+                $"{payment.Order.OrderNumber} refund is {localRefund.Status}.",
+                new
+                {
+                    paymentId = payment.Id,
+                    refundId = localRefund.Id,
+                    stripeRefundId = localRefund.ProviderRefundId,
+                    stripeEventId = stripeEvent.Id,
+                    stripeEvent.Type,
+                    localRefund.Status,
+                    localRefund.AmountCents,
+                    localRefund.Currency,
+                    localRefund.FailureReason
+                });
+        }
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        if (payment.Order is not null)
+        {
+            await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(payment.Order, cancellationToken);
+        }
+
+        _logger.LogInformation(
+            "Reconciled Stripe refund {RefundId} for payment {PaymentId} from {EventType}.",
+            stripeRefund.Id,
+            payment.Id,
+            stripeEvent.Type);
+    }
+
+    private async Task ReconcileChargeRefundedAsync(
+        Event stripeEvent,
+        CancellationToken cancellationToken)
+    {
+        if (stripeEvent.Data.Object is not Charge charge)
+        {
+            _logger.LogWarning("Stripe event {EventType} did not contain a charge.", stripeEvent.Type);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(charge.PaymentIntentId))
+        {
+            _logger.LogWarning("Refunded Stripe charge {ChargeId} did not include a payment intent.", charge.Id);
+            return;
+        }
+
+        var payment = await _dbContext.Payments
+            .Include(currentPayment => currentPayment.Refunds)
+            .Include(currentPayment => currentPayment.Order)
+            .FirstOrDefaultAsync(
+                currentPayment => currentPayment.ProviderPaymentIntentId == charge.PaymentIntentId,
+                cancellationToken);
+
+        if (payment is null)
+        {
+            _logger.LogWarning(
+                "No payment found for refunded Stripe charge {ChargeId} with payment intent {PaymentIntentId}.",
+                charge.Id,
+                charge.PaymentIntentId);
+            return;
+        }
+
+        ReconcilePaymentRefundStatus(payment, DateTime.UtcNow);
+        _reportLogWriter.AddAudit(
+            "PaymentRefund.ChargeReconciled",
+            "Payment",
+            payment.Id.ToString(),
+            payment.Order?.RestaurantId,
+            $"Stripe charge refund reconciled payment {payment.Id}.",
+            after: new
+            {
+                stripeEventId = stripeEvent.Id,
+                chargeId = charge.Id,
+                paymentIntentId = charge.PaymentIntentId,
+                paymentId = payment.Id,
+                orderId = payment.OrderId,
+                payment.Status
+            });
+        _reportLogWriter.AddPaymentEvent(
+            payment.Order,
+            payment,
+            null,
+            stripeEvent.Type,
+            stripeEvent.Id,
+            payment.Status.ToString(),
+            "Stripe charge.refunded reconciled payment refund status.",
+            new
+            {
+                chargeId = charge.Id,
+                paymentIntentId = charge.PaymentIntentId
+            });
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        if (payment.Order is not null)
+        {
+            await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(payment.Order, cancellationToken);
+        }
+    }
+
     private async Task<Payment?> FindPaymentBySessionAsync(
         IReadOnlyDictionary<string, string> metadata,
         string sessionId,
@@ -642,6 +1574,7 @@ public class PaymentsController : ControllerBase
             Guid.TryParse(paymentId, out var parsedPaymentId))
         {
             var paymentById = await _dbContext.Payments
+                .Include(currentPayment => currentPayment.Refunds)
                 .Include(currentPayment => currentPayment.Order)
                 .FirstOrDefaultAsync(currentPayment => currentPayment.Id == parsedPaymentId, cancellationToken);
 
@@ -652,6 +1585,7 @@ public class PaymentsController : ControllerBase
         }
 
         return await _dbContext.Payments
+            .Include(currentPayment => currentPayment.Refunds)
             .Include(currentPayment => currentPayment.Order)
             .FirstOrDefaultAsync(
                 currentPayment => currentPayment.ProviderCheckoutSessionId == sessionId,
@@ -667,6 +1601,7 @@ public class PaymentsController : ControllerBase
             Guid.TryParse(paymentId, out var parsedPaymentId))
         {
             var paymentById = await _dbContext.Payments
+                .Include(currentPayment => currentPayment.Refunds)
                 .Include(currentPayment => currentPayment.Order)
                 .FirstOrDefaultAsync(currentPayment => currentPayment.Id == parsedPaymentId, cancellationToken);
 
@@ -677,10 +1612,115 @@ public class PaymentsController : ControllerBase
         }
 
         return await _dbContext.Payments
+            .Include(currentPayment => currentPayment.Refunds)
             .Include(currentPayment => currentPayment.Order)
             .FirstOrDefaultAsync(
                 currentPayment => currentPayment.ProviderPaymentIntentId == paymentIntentId,
                 cancellationToken);
+    }
+
+    private async Task<Payment?> FindPaymentForRefundAsync(
+        Refund stripeRefund,
+        CancellationToken cancellationToken)
+    {
+        if (stripeRefund.Metadata.TryGetValue(PaymentIdMetadataKey, out var paymentId) &&
+            Guid.TryParse(paymentId, out var parsedPaymentId))
+        {
+            var paymentById = await _dbContext.Payments
+                .Include(currentPayment => currentPayment.Refunds)
+                .Include(currentPayment => currentPayment.Order)
+                .FirstOrDefaultAsync(currentPayment => currentPayment.Id == parsedPaymentId, cancellationToken);
+
+            if (paymentById is not null)
+            {
+                return paymentById;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(stripeRefund.PaymentIntentId))
+        {
+            return await _dbContext.Payments
+                .Include(currentPayment => currentPayment.Refunds)
+                .Include(currentPayment => currentPayment.Order)
+                .FirstOrDefaultAsync(
+                    currentPayment => currentPayment.ProviderPaymentIntentId == stripeRefund.PaymentIntentId,
+                    cancellationToken);
+        }
+
+        return null;
+    }
+
+    private async Task<PaymentRefund?> FindExistingRefundAsync(
+        Payment payment,
+        Refund stripeRefund,
+        CancellationToken cancellationToken)
+    {
+        if (stripeRefund.Metadata.TryGetValue(RefundIdMetadataKey, out var refundId) &&
+            Guid.TryParse(refundId, out var parsedRefundId))
+        {
+            var refundById = payment.Refunds.FirstOrDefault(refund => refund.Id == parsedRefundId)
+                ?? await _dbContext.PaymentRefunds
+                    .FirstOrDefaultAsync(refund => refund.Id == parsedRefundId, cancellationToken);
+
+            if (refundById is not null)
+            {
+                return refundById;
+            }
+        }
+
+        return payment.Refunds.FirstOrDefault(refund => refund.ProviderRefundId == stripeRefund.Id)
+            ?? await _dbContext.PaymentRefunds
+                .FirstOrDefaultAsync(refund => refund.ProviderRefundId == stripeRefund.Id, cancellationToken);
+    }
+
+    private static string? ResolveRefundReason(Refund stripeRefund)
+    {
+        if (stripeRefund.Metadata.TryGetValue("reason", out var metadataReason) &&
+            !string.IsNullOrWhiteSpace(metadataReason))
+        {
+            return metadataReason.Trim();
+        }
+
+        return string.IsNullOrWhiteSpace(stripeRefund.Reason) ? null : stripeRefund.Reason.Trim();
+    }
+
+    private static PaymentRefundStatus MapStripeRefundStatus(string? status) =>
+        status?.Trim().ToLowerInvariant() switch
+        {
+            "succeeded" => PaymentRefundStatus.Succeeded,
+            "failed" or "canceled" => PaymentRefundStatus.Failed,
+            _ => PaymentRefundStatus.Pending
+        };
+
+    private static void ReconcilePaymentRefundStatus(Payment payment, DateTime now)
+    {
+        var refundedAmountCents = GetSucceededRefundedAmount(payment);
+        var nextStatus = payment.Status;
+
+        if (refundedAmountCents >= payment.AmountCents && payment.AmountCents > 0)
+        {
+            nextStatus = PaymentStatus.Refunded;
+        }
+        else if (refundedAmountCents > 0)
+        {
+            nextStatus = PaymentStatus.PartiallyRefunded;
+        }
+        else if (payment.Status is PaymentStatus.Refunded or PaymentStatus.PartiallyRefunded)
+        {
+            nextStatus = PaymentStatus.Paid;
+        }
+
+        if (payment.Status != nextStatus)
+        {
+            payment.Status = nextStatus;
+            payment.UpdatedAt = now;
+        }
+
+        if (payment.Order is not null && payment.Order.PaymentStatus != nextStatus)
+        {
+            payment.Order.PaymentStatus = nextStatus;
+            payment.Order.UpdatedAt = now;
+        }
     }
 
     private async Task<Guid?> GetCurrentRestaurantIdAsync()
@@ -694,6 +1734,58 @@ public class PaymentsController : ControllerBase
 
         var currentUser = await _userManager.FindByIdAsync(currentUserId);
         return currentUser?.RestaurantId;
+    }
+
+    private async Task<PaymentRefundRequest?> LoadRefundRequestForReviewAsync(
+        Guid requestId,
+        CancellationToken cancellationToken) =>
+        await _dbContext.PaymentRefundRequests
+            .Include(request => request.Order)
+                .ThenInclude(order => order!.Payments)
+                    .ThenInclude(payment => payment.Refunds)
+            .Include(request => request.Order)
+                .ThenInclude(order => order!.Restaurant)
+            .Include(request => request.Order)
+                .ThenInclude(order => order!.Customer)
+            .Include(request => request.Payment)
+            .Include(request => request.PaymentRefund)
+            .FirstOrDefaultAsync(request => request.Id == requestId, cancellationToken);
+
+    private async Task<bool> CanAccessRefundRequestAsync(PaymentRefundRequest request)
+    {
+        if (User.IsInRole(ApplicationRoles.PlatformOwner))
+        {
+            return true;
+        }
+
+        var currentRestaurantId = await GetCurrentRestaurantIdAsync();
+        return currentRestaurantId.HasValue && request.RestaurantId == currentRestaurantId.Value;
+    }
+
+    private static string? BuildApprovalRefundReason(string? customerReason, string? adminNote)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(customerReason))
+        {
+            parts.Add($"Customer: {customerReason.Trim()}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(adminNote))
+        {
+            parts.Add($"Admin: {adminNote.Trim()}");
+        }
+
+        return parts.Count == 0 ? null : string.Join(" | ", parts);
+    }
+
+    private static string? TrimOrNull(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        return value.Trim();
     }
 
     private async Task<bool> CanStartCheckoutSessionForOrderAsync(Order order)

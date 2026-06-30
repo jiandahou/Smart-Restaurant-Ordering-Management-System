@@ -7,23 +7,31 @@ import {
   ChevronRight,
   ClipboardList,
   CreditCard,
+  History,
   RefreshCw,
   ReceiptText,
   Search,
+  Undo2,
   X,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
+  getAdminOrderStatusHistory,
   getAdminOrders,
   recordCounterPayment,
+  refundAdminOrder,
   transitionAdminOrder,
   type AdminOrder,
+  type AdminOrderStatusHistory,
   type OrderTransitionAction,
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { OrderStatusBadge, getOrderStatusLabel, orderStatusOptions } from '../components/orders/OrderStatusBadge'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
+import { OrderRefundDialog } from '../components/orders/OrderRefundDialog'
+import { OrderStatusHistoryList } from '../components/orders/OrderStatusHistoryList'
 import { OrderTransitionReasonField } from '../components/orders/OrderTransitionReasonField'
+import { PaymentRefundHistory } from '../components/orders/PaymentRefundHistory'
 import { PaymentStatusBadge, getPaymentStatusLabel, paymentStatusOptions } from '../components/orders/PaymentStatusBadge'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
@@ -46,6 +54,7 @@ import {
 } from '../components/ui/select'
 import { HorizontalTableScroll } from '../components/HorizontalTableScroll'
 import { getOrderStats } from '../lib/orderStats'
+import { canRefundOrder } from '../lib/paymentRefunds'
 
 type SortKey =
   | 'createdAt'
@@ -156,12 +165,17 @@ export function AdminOrdersPage() {
   const [orders, setOrders] = useState<AdminOrder[]>([])
   const [loading, setLoading] = useState(true)
   const [settlingOrderId, setSettlingOrderId] = useState<string | null>(null)
+  const [refundingOrderId, setRefundingOrderId] = useState<string | null>(null)
   const [transitioningOrderId, setTransitioningOrderId] = useState<string | null>(null)
   const [pendingTransition, setPendingTransition] = useState<{
     order: AdminOrder
     action: OrderTransitionAction
   } | null>(null)
   const [transitionReason, setTransitionReason] = useState('')
+  const [pendingRefundOrder, setPendingRefundOrder] = useState<AdminOrder | null>(null)
+  const [refundReason, setRefundReason] = useState('')
+  const [statusHistoryByOrderId, setStatusHistoryByOrderId] = useState<Record<string, AdminOrderStatusHistory[]>>({})
+  const [statusHistoryLoadingId, setStatusHistoryLoadingId] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [paymentFilter, setPaymentFilter] = useState('all')
@@ -255,6 +269,62 @@ export function AdminOrdersPage() {
     }
   }
 
+  const loadStatusHistory = async (orderId: string, force = false) => {
+    if ((!force && statusHistoryByOrderId[orderId]) || statusHistoryLoadingId === orderId) {
+      return
+    }
+
+    setStatusHistoryLoadingId(orderId)
+    try {
+      const history = await getAdminOrderStatusHistory(orderId)
+      setStatusHistoryByOrderId((current) => ({
+        ...current,
+        [orderId]: history,
+      }))
+    } catch (error) {
+      toast.error('Could not load status history', {
+        description: error instanceof Error ? error.message : 'Status history loading failed.',
+      })
+    } finally {
+      setStatusHistoryLoadingId(null)
+    }
+  }
+
+  const toggleOrderExpansion = (order: AdminOrder) => {
+    setExpandedOrderId((current) => {
+      const next = current === order.id ? null : order.id
+      if (next) {
+        void loadStatusHistory(order.id)
+      }
+      return next
+    })
+  }
+
+  const submitRefund = async () => {
+    if (!pendingRefundOrder) {
+      return
+    }
+
+    setRefundingOrderId(pendingRefundOrder.id)
+    try {
+      const updatedOrder = await refundAdminOrder(pendingRefundOrder.id, {
+        reason: refundReason.trim() || undefined,
+      })
+      setOrders((current) => current.map((item) => item.id === updatedOrder.id ? updatedOrder : item))
+      toast.success('Refund created', {
+        description: `${pendingRefundOrder.orderNumber} is now ${updatedOrder.paymentStatus}.`,
+      })
+      setPendingRefundOrder(null)
+      setRefundReason('')
+    } catch (error) {
+      toast.error('Could not refund order', {
+        description: error instanceof Error ? error.message : 'Stripe refund failed.',
+      })
+    } finally {
+      setRefundingOrderId(null)
+    }
+  }
+
   const submitTransition = async (
     order: AdminOrder,
     action: OrderTransitionAction,
@@ -264,6 +334,14 @@ export function AdminOrdersPage() {
     try {
       const updatedOrder = await transitionAdminOrder(order.id, action, reason)
       setOrders((current) => current.map((item) => item.id === updatedOrder.id ? updatedOrder : item))
+      setStatusHistoryByOrderId((current) => {
+        const next = { ...current }
+        delete next[updatedOrder.id]
+        return next
+      })
+      if (expandedOrderId === updatedOrder.id) {
+        void loadStatusHistory(updatedOrder.id, true)
+      }
       toast.success(`Order ${transitionLabels[action].toLowerCase()}`, {
         description: `${order.orderNumber} is now ${updatedOrder.status}.`,
       })
@@ -506,13 +584,14 @@ export function AdminOrdersPage() {
               <tbody>
                 {filteredOrders.map((order) => {
                   const isExpanded = expandedOrderId === order.id
+                  const refundable = canRefundOrder(order)
 
                   return (
                     <Fragment key={order.id}>
                       <tr
                         className="expandable-table-row"
                         aria-expanded={isExpanded}
-                        onClick={() => setExpandedOrderId((current) => (current === order.id ? null : order.id))}
+                        onClick={() => toggleOrderExpansion(order)}
                       >
                         <td>
                           <span className="table-name">
@@ -524,7 +603,7 @@ export function AdminOrdersPage() {
                               aria-label={isExpanded ? 'Collapse order details' : 'Expand order details'}
                               onClick={(event) => {
                                 event.stopPropagation()
-                                setExpandedOrderId((current) => (current === order.id ? null : order.id))
+                                toggleOrderExpansion(order)
                               }}
                             >
                               {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
@@ -580,10 +659,29 @@ export function AdminOrdersPage() {
                                   type="button"
                                   variant="outline"
                                   size="sm"
-                                  disabled={settlingOrderId !== null || transitioningOrderId !== null}
-                                  onClick={() => void handleCounterPayment(order)}
+                                  disabled={settlingOrderId !== null || transitioningOrderId !== null || refundingOrderId !== null}
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    void handleCounterPayment(order)
+                                  }}
                                 >
                                   {settlingOrderId === order.id ? 'Recording' : 'Mark paid'}
+                                </Button>
+                              ) : null}
+                              {refundable ? (
+                                <Button
+                                  type="button"
+                                  variant="destructive"
+                                  size="sm"
+                                  disabled={settlingOrderId !== null || transitioningOrderId !== null || refundingOrderId !== null}
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    setRefundReason('')
+                                    setPendingRefundOrder(order)
+                                  }}
+                                >
+                                  <Undo2 size={15} />
+                                  {refundingOrderId === order.id ? 'Refunding' : 'Refund'}
                                 </Button>
                               ) : null}
                               {(order.availableActions ?? []).map((action) => (
@@ -592,14 +690,18 @@ export function AdminOrdersPage() {
                                   type="button"
                                   variant={action === 'Reject' || action === 'Cancel' ? 'destructive' : 'secondary'}
                                   size="sm"
-                                  disabled={transitioningOrderId !== null || settlingOrderId !== null}
-                                  onClick={() => handleTransition(order, action)}
+                                  disabled={transitioningOrderId !== null || settlingOrderId !== null || refundingOrderId !== null}
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    handleTransition(order, action)
+                                  }}
                                 >
                                   {transitioningOrderId === order.id ? 'Updating' : transitionLabels[action]}
                                 </Button>
                               ))}
                               {(order.availableActions ?? []).length === 0 &&
-                              !(order.paymentMethod === 'PayAtCounter' && order.paymentStatus !== 'Paid') ? (
+                              !(order.paymentMethod === 'PayAtCounter' && order.paymentStatus !== 'Paid') &&
+                              !refundable ? (
                               <Badge variant={order.canProcess ? 'secondary' : 'outline'}>
                                 {order.status === 'Completed' ? 'Completed' : order.canProcess ? 'No action' : 'Awaiting payment'}
                               </Badge>
@@ -675,6 +777,25 @@ export function AdminOrdersPage() {
                                   </div>
                                 )}
                               </section>
+
+                              <section className="order-detail-section">
+                                <div className="order-detail-heading">
+                                  <Undo2 size={16} />
+                                  <strong>Refunds</strong>
+                                </div>
+                                <PaymentRefundHistory payment={order.latestPayment} fallbackCurrency={order.currency} />
+                              </section>
+
+                              <section className="order-detail-section">
+                                <div className="order-detail-heading">
+                                  <History size={16} />
+                                  <strong>Status history</strong>
+                                </div>
+                                <OrderStatusHistoryList
+                                  history={statusHistoryByOrderId[order.id]}
+                                  loading={statusHistoryLoadingId === order.id}
+                                />
+                              </section>
                             </div>
                           </td>
                         </tr>
@@ -714,6 +835,20 @@ export function AdminOrdersPage() {
           </div>
         </CardContent>
       </Card>
+
+      <OrderRefundDialog
+        order={pendingRefundOrder}
+        reason={refundReason}
+        submitting={refundingOrderId !== null}
+        onReasonChange={setRefundReason}
+        onOpenChange={(open) => {
+          if (!open && refundingOrderId === null) {
+            setPendingRefundOrder(null)
+            setRefundReason('')
+          }
+        }}
+        onConfirm={() => void submitRefund()}
+      />
 
       <Dialog
         open={pendingTransition !== null}

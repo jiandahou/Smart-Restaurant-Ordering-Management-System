@@ -32,6 +32,7 @@ public class PublicCartsController(
     CartAccessService cartAccessService,
     CartRealtimeNotifier cartRealtimeNotifier,
     OrderRealtimeNotifier orderRealtimeNotifier,
+    ReportLogWriter reportLogWriter,
     IStripeClient stripeClient,
     IOptions<StripeOptions> stripeOptions,
     ILogger<PublicCartsController> logger) : ControllerBase
@@ -349,9 +350,72 @@ public class PublicCartsController(
             return NotFound(new { message = "Cart item not found." });
         }
 
-        item.Quantity = request.Quantity;
-        item.Note = NormalizeNote(request.Note);
-        item.UpdatedAt = DateTime.UtcNow;
+        var note = NormalizeNote(request.Note);
+        var selectedOptionIds = item.SelectedOptionIds;
+
+        if (request.SelectedOptionIds is not null)
+        {
+            var menuItem = await dbContext.MenuItems
+                .AsNoTracking()
+                .Include(menuItem => menuItem.Category)
+                .Include(menuItem => menuItem.OptionGroups.Where(group => group.IsActive))
+                    .ThenInclude(group => group.Options.Where(option => option.IsAvailable))
+                .Where(menuItem =>
+                    menuItem.Id == item.MenuItemId &&
+                    menuItem.RestaurantId == access.Cart!.RestaurantId &&
+                    menuItem.IsAvailable &&
+                    !menuItem.IsSoldOut)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (menuItem is null ||
+                menuItem.Category is null ||
+                menuItem.Category.RestaurantId != access.Cart!.RestaurantId ||
+                !menuItem.Category.IsActive)
+            {
+                return Conflict(new { message = "Menu item is unavailable, sold out, or belongs to another restaurant." });
+            }
+
+            var optionSelection = ValidateOptionSelection(menuItem, request.SelectedOptionIds);
+
+            if (optionSelection.Errors.Count > 0)
+            {
+                return BadRequest(new { message = string.Join(" ", optionSelection.Errors) });
+            }
+
+            selectedOptionIds = optionSelection.SelectedOptions
+                .SelectMany(selection => Enumerable.Repeat(selection.Option.Id, selection.Quantity))
+                .ToArray();
+        }
+
+        var matchingLines = await dbContext.CartItems
+            .Where(cartItem =>
+                cartItem.CartId == cartId &&
+                cartItem.Id != cartItemId &&
+                cartItem.MenuItemId == item.MenuItemId &&
+                cartItem.Note == note)
+            .ToListAsync(cancellationToken);
+        var matchingLine = matchingLines.FirstOrDefault(cartItem =>
+            OptionIdsEqual(cartItem.SelectedOptionIds, selectedOptionIds));
+
+        if (matchingLine is not null)
+        {
+            if (matchingLine.Quantity + request.Quantity > MaximumItemQuantity)
+            {
+                return BadRequest(new { message = $"Item quantity cannot exceed {MaximumItemQuantity}." });
+            }
+
+            matchingLine.Quantity += request.Quantity;
+            matchingLine.UpdatedAt = DateTime.UtcNow;
+            dbContext.CartItems.Remove(item);
+        }
+        else
+        {
+            item.Quantity = request.Quantity;
+            item.Note = note;
+            item.SelectedOptionIds = selectedOptionIds;
+            item.UpdatedAt = DateTime.UtcNow;
+        }
+
         access.Cart!.UpdatedAt = DateTime.UtcNow;
         access.Participant!.LastSeenAt = DateTime.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -631,6 +695,39 @@ public class PublicCartsController(
         access.Participant!.LastSeenAt = now;
 
         await dbContext.Orders.AddAsync(order, cancellationToken);
+        reportLogWriter.AddAudit(
+            "Order.Created",
+            "Order",
+            order.Id.ToString(),
+            order.RestaurantId,
+            $"Order {order.OrderNumber} submitted from cart.",
+            after: new
+            {
+                order.Id,
+                order.OrderNumber,
+                order.RestaurantId,
+                order.TableId,
+                order.CustomerId,
+                order.OrderType,
+                order.Status,
+                order.PaymentStatus,
+                order.PaymentMethod,
+                order.TotalAmount,
+                cartId
+            });
+        reportLogWriter.AddOrderEvent(
+            order,
+            "order.created",
+            $"Order {order.OrderNumber} submitted from cart.",
+            new
+            {
+                cartId,
+                order.OrderType,
+                order.Status,
+                order.PaymentStatus,
+                order.PaymentMethod,
+                order.TotalAmount
+            });
         await dbContext.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
 
@@ -1156,6 +1253,37 @@ public class PublicCartsController(
             payment.UpdatedAt = DateTime.UtcNow;
             order.PaymentStatus = PaymentStatus.Pending;
             order.UpdatedAt = DateTime.UtcNow;
+            reportLogWriter.AddAudit(
+                "Payment.CheckoutSessionCreated",
+                "Order",
+                order.Id.ToString(),
+                order.RestaurantId,
+                $"Stripe checkout session created for {order.OrderNumber}.",
+                after: new
+                {
+                    orderId = order.Id,
+                    order.OrderNumber,
+                    paymentId = payment.Id,
+                    sessionId = session.Id,
+                    paymentIntentId = session.PaymentIntentId,
+                    payment.AmountCents,
+                    payment.Currency
+                });
+            reportLogWriter.AddPaymentEvent(
+                order,
+                payment,
+                null,
+                "checkout_session.created",
+                session.Id,
+                payment.Status.ToString(),
+                "Stripe checkout session created.",
+                new
+                {
+                    sessionId = session.Id,
+                    paymentIntentId = session.PaymentIntentId,
+                    payment.AmountCents,
+                    payment.Currency
+                });
             await dbContext.SaveChangesAsync(cancellationToken);
             await orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 
@@ -1178,6 +1306,35 @@ public class PublicCartsController(
             payment.UpdatedAt = DateTime.UtcNow;
             order.PaymentStatus = PaymentStatus.Failed;
             order.UpdatedAt = DateTime.UtcNow;
+            reportLogWriter.AddAudit(
+                "Payment.CheckoutSessionFailed",
+                "Order",
+                order.Id.ToString(),
+                order.RestaurantId,
+                $"Stripe checkout session failed for {order.OrderNumber}.",
+                after: new
+                {
+                    orderId = order.Id,
+                    order.OrderNumber,
+                    paymentId = payment.Id,
+                    payment.AmountCents,
+                    payment.Currency,
+                    payment.FailureReason
+                });
+            reportLogWriter.AddPaymentEvent(
+                order,
+                payment,
+                null,
+                "checkout_session.failed",
+                null,
+                payment.Status.ToString(),
+                "Stripe checkout session failed.",
+                new
+                {
+                    payment.AmountCents,
+                    payment.Currency,
+                    payment.FailureReason
+                });
             await dbContext.SaveChangesAsync(cancellationToken);
             await orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 

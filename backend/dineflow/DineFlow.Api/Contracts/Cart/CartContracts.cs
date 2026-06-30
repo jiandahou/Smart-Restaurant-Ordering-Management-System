@@ -36,6 +36,8 @@ public sealed class UpdateCartItemRequest
     public int Quantity { get; init; }
 
     public string? Note { get; init; }
+
+    public IReadOnlyList<Guid>? SelectedOptionIds { get; init; }
 }
 
 public sealed class UpdateCartNoteRequest
@@ -95,6 +97,8 @@ public sealed class CartItemResponse
     public string? ImageUrl { get; init; }
 
     public int Quantity { get; init; }
+
+    public decimal BasePrice { get; init; }
 
     public decimal UnitPrice { get; init; }
 

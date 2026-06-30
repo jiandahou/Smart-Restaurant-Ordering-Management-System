@@ -4,6 +4,7 @@ using System.Security.Claims;
 using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Menu;
 using DineFlow.Api.Options;
+using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Menu;
@@ -40,19 +41,22 @@ public class AdminMenuItemsController : ControllerBase
     private readonly AvatarStorageOptions _storageOptions;
     private readonly IAmazonS3 _s3Client;
     private readonly ILogger<AdminMenuItemsController> _logger;
+    private readonly ReportLogWriter _reportLogWriter;
 
     public AdminMenuItemsController(
         AppDbContext dbContext,
         UserManager<ApplicationUser> userManager,
         IOptions<AvatarStorageOptions> storageOptions,
         IAmazonS3 s3Client,
-        ILogger<AdminMenuItemsController> logger)
+        ILogger<AdminMenuItemsController> logger,
+        ReportLogWriter reportLogWriter)
     {
         _dbContext = dbContext;
         _userManager = userManager;
         _storageOptions = storageOptions.Value;
         _s3Client = s3Client;
         _logger = logger;
+        _reportLogWriter = reportLogWriter;
     }
 
     [HttpPost("image-upload-url")]
@@ -365,6 +369,13 @@ public class AdminMenuItemsController : ControllerBase
         };
 
         await _dbContext.MenuItems.AddAsync(item, cancellationToken);
+        _reportLogWriter.AddAudit(
+            "MenuItem.Created",
+            "MenuItem",
+            item.Id.ToString(),
+            item.RestaurantId,
+            $"Created menu item {item.Name}.",
+            after: SnapshotItem(item));
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         var response = MapToResponse(item, category.Name);
@@ -427,6 +438,7 @@ public class AdminMenuItemsController : ControllerBase
         }
 
         var previousImageUrl = item.ImageUrl;
+        var beforeItem = SnapshotItem(item);
 
         item.CategoryId = request.CategoryId;
         item.Name = name;
@@ -438,6 +450,14 @@ public class AdminMenuItemsController : ControllerBase
         item.DisplayOrder = request.DisplayOrder;
         item.UpdatedAt = DateTime.UtcNow;
 
+        _reportLogWriter.AddAudit(
+            "MenuItem.Updated",
+            "MenuItem",
+            item.Id.ToString(),
+            item.RestaurantId,
+            $"Updated menu item {item.Name}.",
+            beforeItem,
+            SnapshotItem(item));
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         if (!string.Equals(previousImageUrl, item.ImageUrl, StringComparison.OrdinalIgnoreCase))
@@ -471,8 +491,17 @@ public class AdminMenuItemsController : ControllerBase
             return Forbid();
         }
 
+        var beforeAvailability = new { item.Id, item.Name, item.IsAvailable };
         item.IsAvailable = request.IsAvailable;
         item.UpdatedAt = DateTime.UtcNow;
+        _reportLogWriter.AddAudit(
+            "MenuItem.AvailabilityChanged",
+            "MenuItem",
+            item.Id.ToString(),
+            item.RestaurantId,
+            request.IsAvailable ? $"{item.Name} is now available." : $"{item.Name} is now unavailable.",
+            beforeAvailability,
+            new { item.Id, item.Name, item.IsAvailable });
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
@@ -502,8 +531,17 @@ public class AdminMenuItemsController : ControllerBase
             return Forbid();
         }
 
+        var beforeSoldOut = new { item.Id, item.Name, item.IsSoldOut };
         item.IsSoldOut = request.IsSoldOut;
         item.UpdatedAt = DateTime.UtcNow;
+        _reportLogWriter.AddAudit(
+            "MenuItem.SoldOutChanged",
+            "MenuItem",
+            item.Id.ToString(),
+            item.RestaurantId,
+            request.IsSoldOut ? $"{item.Name} marked as sold out." : $"{item.Name} marked as in stock.",
+            beforeSoldOut,
+            new { item.Id, item.Name, item.IsSoldOut });
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
@@ -578,6 +616,9 @@ public class AdminMenuItemsController : ControllerBase
             .ToDictionary(entry => entry.itemId, entry => entry.displayOrder);
 
         var updatedAt = DateTime.UtcNow;
+        var beforeOrder = categoryItems
+            .Select(item => new { item.Id, item.Name, item.DisplayOrder })
+            .ToList();
 
         foreach (var item in categoryItems)
         {
@@ -585,6 +626,17 @@ public class AdminMenuItemsController : ControllerBase
             item.UpdatedAt = updatedAt;
         }
 
+        _reportLogWriter.AddAudit(
+            "MenuItem.Reordered",
+            "MenuCategory",
+            category.Id.ToString(),
+            category.RestaurantId,
+            $"Reordered menu items in {category.Name}.",
+            beforeOrder,
+            categoryItems
+                .OrderBy(item => item.DisplayOrder)
+                .Select(item => new { item.Id, item.Name, item.DisplayOrder })
+                .ToList());
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
@@ -611,8 +663,16 @@ public class AdminMenuItemsController : ControllerBase
 
         var imageUrl = item.ImageUrl;
         var restaurantId = item.RestaurantId;
+        var deletedItem = SnapshotItem(item);
 
         _dbContext.MenuItems.Remove(item);
+        _reportLogWriter.AddAudit(
+            "MenuItem.Deleted",
+            "MenuItem",
+            item.Id.ToString(),
+            restaurantId,
+            $"Deleted menu item {item.Name}.",
+            deletedItem);
         await _dbContext.SaveChangesAsync(cancellationToken);
         await DeleteManagedImageAsync(imageUrl, restaurantId, cancellationToken);
 
@@ -914,4 +974,23 @@ public class AdminMenuItemsController : ControllerBase
                 .ToList()
         };
     }
+
+    private static object SnapshotItem(MenuItem item) => new
+    {
+        item.Id,
+        item.RestaurantId,
+        item.CategoryId,
+        item.Name,
+        item.Description,
+        item.Price,
+        item.ImageUrl,
+        item.IsAvailable,
+        item.IsSoldOut,
+        item.IsVegetarian,
+        item.IsVegan,
+        item.IsGlutenFree,
+        item.IsHalal,
+        item.Allergens,
+        item.DisplayOrder
+    };
 }

@@ -50,6 +50,7 @@ public class AuthController : ControllerBase
     private readonly IAmazonS3 _s3Client;
     private readonly IWebHostEnvironment _environment;
     private readonly ILogger<AuthController> _logger;
+    private readonly ReportLogWriter _reportLogWriter;
 
     public AuthController(
         UserManager<ApplicationUser> userManager,
@@ -65,7 +66,8 @@ public class AuthController : ControllerBase
         IOptions<AvatarStorageOptions> avatarStorageOptions,
         IAmazonS3 s3Client,
         IWebHostEnvironment environment,
-        ILogger<AuthController> logger)
+        ILogger<AuthController> logger,
+        ReportLogWriter reportLogWriter)
     {
         _userManager = userManager;
         _signInManager = signInManager;
@@ -81,6 +83,7 @@ public class AuthController : ControllerBase
         _s3Client = s3Client;
         _environment = environment;
         _logger = logger;
+        _reportLogWriter = reportLogWriter;
     }
 
     [Authorize(Policy = AuthorizationPolicies.PlatformOwnerOnly)]
@@ -303,6 +306,19 @@ public class AuthController : ControllerBase
         if (!mfaProtectsSensitiveActions)
         {
             await SendPasswordResetEmailAsync(user);
+            _reportLogWriter.AddAudit(
+                "Auth.PasswordResetRequested",
+                "User",
+                user.Id,
+                user.RestaurantId,
+                $"Password reset email sent for {user.Email}.",
+                after: new
+                {
+                    user.Email,
+                    user.RestaurantId,
+                    Delivery = "email"
+                });
+            await _dbContext.SaveChangesAsync(cancellationToken);
 
             return Ok(new
             {
@@ -337,6 +353,20 @@ public class AuthController : ControllerBase
                 errors = result.Errors
             });
         }
+
+        _reportLogWriter.AddAudit(
+            "Auth.PasswordUpdated",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            $"Password updated for {user.Email}.",
+            after: new
+            {
+                user.Email,
+                user.RestaurantId,
+                MfaVerified = true
+            });
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
         {
@@ -385,6 +415,19 @@ public class AuthController : ControllerBase
                 errors
             });
         }
+
+        _reportLogWriter.AddAudit(
+            "Auth.PasswordResetCompleted",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            $"Password reset completed for {user.Email}.",
+            after: new
+            {
+                user.Email,
+                user.RestaurantId
+            });
+        await _dbContext.SaveChangesAsync();
 
         return Ok(new
         {
@@ -872,6 +915,13 @@ public class AuthController : ControllerBase
             });
         }
 
+        var beforeProfile = new
+        {
+            user.FullName,
+            user.Email,
+            user.RestaurantId
+        };
+
         user.FullName = nextFullName;
         user.UpdatedAt = DateTime.UtcNow;
 
@@ -888,6 +938,21 @@ public class AuthController : ControllerBase
 
         var roles = await _userManager.GetRolesAsync(user);
         var userPayload = await BuildUserPayloadAsync(user, roles);
+
+        _reportLogWriter.AddAudit(
+            "Auth.ProfileUpdated",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            $"Profile updated for {user.Email}.",
+            beforeProfile,
+            new
+            {
+                user.FullName,
+                user.Email,
+                user.RestaurantId
+            });
+        await _dbContext.SaveChangesAsync();
 
         return Ok(new
         {
@@ -1088,6 +1153,22 @@ public class AuthController : ControllerBase
         var roles = await _userManager.GetRolesAsync(user);
         var userPayload = await BuildUserPayloadAsync(user, roles);
 
+        _reportLogWriter.AddAudit(
+            "Auth.AvatarUpdated",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            $"Avatar updated for {user.Email}.",
+            new
+            {
+                AvatarUrl = previousAvatarUrl
+            },
+            new
+            {
+                user.AvatarUrl
+            });
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
         return Ok(new
         {
             message = "Avatar updated.",
@@ -1176,6 +1257,22 @@ public class AuthController : ControllerBase
 
         var roles = await _userManager.GetRolesAsync(user);
         var userPayload = await BuildUserPayloadAsync(user, roles);
+
+        _reportLogWriter.AddAudit(
+            "Auth.AvatarUpdated",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            $"Avatar updated for {user.Email}.",
+            new
+            {
+                AvatarUrl = previousAvatarUrl
+            },
+            new
+            {
+                user.AvatarUrl
+            });
+        await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
         {
@@ -1267,6 +1364,20 @@ public class AuthController : ControllerBase
             });
         }
 
+        _reportLogWriter.AddAudit(
+            "Auth.EmailChangeRequested",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            $"Email change requested for {user.Email}.",
+            after: new
+            {
+                CurrentEmail = user.Email,
+                RequestedEmail = newEmail,
+                user.RestaurantId
+            });
+        await _dbContext.SaveChangesAsync();
+
         return Ok(new
         {
             message = "Check your new email to confirm the change."
@@ -1299,6 +1410,7 @@ public class AuthController : ControllerBase
 
         var newEmail = request.NewEmail.Trim();
         var existingUser = await _userManager.FindByEmailAsync(newEmail);
+        var previousEmail = user.Email;
 
         if (existingUser is not null && existingUser.Id != user.Id)
         {
@@ -1332,6 +1444,24 @@ public class AuthController : ControllerBase
 
         user.UpdatedAt = DateTime.UtcNow;
         await _userManager.UpdateSecurityStampAsync(user);
+
+        _reportLogWriter.AddAudit(
+            "Auth.EmailChanged",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            $"Email changed from {previousEmail} to {user.Email}.",
+            new
+            {
+                Email = previousEmail,
+                user.RestaurantId
+            },
+            new
+            {
+                user.Email,
+                user.RestaurantId
+            });
+        await _dbContext.SaveChangesAsync();
 
         return Ok(new
         {
@@ -1436,6 +1566,23 @@ public class AuthController : ControllerBase
                 _logger.LogError(ex, "Failed to send confirmation email to {Email}.", user.Email);
             }
         }
+
+        _reportLogWriter.AddAudit(
+            "Auth.UserRegistered",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            $"{role} user registered for {user.Email}.",
+            after: new
+            {
+                user.Email,
+                user.FullName,
+                user.RestaurantId,
+                user.EmailConfirmed,
+                ConfirmationEmailSent = confirmationEmailSent,
+                Role = role
+            });
+        await _dbContext.SaveChangesAsync();
 
         return Ok(new
         {
@@ -1565,6 +1712,20 @@ public class AuthController : ControllerBase
             user.UserName,
             roles);
 
+        _reportLogWriter.AddAudit(
+            GetAuthenticatedResponseAuditAction(message),
+            "User",
+            user.Id,
+            user.RestaurantId,
+            message,
+            after: new
+            {
+                user.Email,
+                user.RestaurantId,
+                Roles = roles.OrderBy(role => role, StringComparer.OrdinalIgnoreCase).ToArray()
+            });
+        await _dbContext.SaveChangesAsync();
+
         return Ok(new
         {
             message,
@@ -1593,6 +1754,26 @@ public class AuthController : ControllerBase
             hasPassword = !string.IsNullOrWhiteSpace(user.PasswordHash),
             externalProviders
         };
+    }
+
+    private static string GetAuthenticatedResponseAuditAction(string message)
+    {
+        if (message.Contains("email confirmed", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Auth.EmailConfirmed";
+        }
+
+        if (message.Contains("magic link", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Auth.MagicLinkLoginSucceeded";
+        }
+
+        if (message.Contains("sign-in", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Auth.OAuthLoginSucceeded";
+        }
+
+        return "Auth.LoginSucceeded";
     }
 
     private async Task<bool> ValidateSensitiveActionAsync(

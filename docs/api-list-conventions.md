@@ -64,8 +64,8 @@ Platform-owner variants `GET /api/users` and `GET /api/restaurants/{restaurantId
 
 `GET /api/restaurant`
 
-Filters: `isActive`, `currency`.
+Filters: `isActive`, `countryCode`, `currency`.
 
-Search fields: name, address, phone, timezone, and currency.
+Search fields: name, address, phone, country code, timezone, and currency.
 
 Sort fields: `name`, `address`, `currency`, `status`, `createdAt`, `updatedAt`.

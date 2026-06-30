@@ -34,6 +34,8 @@ public class OrderResponse
 
     public DateTime? UpdatedAt { get; set; }
 
+    public CustomerRefundRequestResponse? LatestRefundRequest { get; set; }
+
     public List<OrderItemResponse> OrderItems { get; set; } = new();
 }
 

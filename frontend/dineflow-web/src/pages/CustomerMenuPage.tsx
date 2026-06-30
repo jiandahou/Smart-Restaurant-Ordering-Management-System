@@ -14,6 +14,7 @@ import {
   Minus,
   MapPin,
   MinusCircle,
+  Pencil,
   Plus,
   Search,
   ShoppingBag,
@@ -107,6 +108,8 @@ type StoredCartSession = {
 
 type CartViewer = Pick<AuthUser, 'fullName' | 'email' | 'avatarUrl' | 'roles'> | null
 
+const defaultRestaurantHeroImageUrl = 'https://images.unsplash.com/photo-1519708227418-c8fd9a32b7a2?auto=format&fit=crop&w=1600&q=80'
+
 type CustomerMenuState =
   | { status: 'loading' }
   | {
@@ -199,6 +202,7 @@ export function CustomerMenuPage() {
   const [selectedItemQuantity, setSelectedItemQuantity] = useState(1)
   const [selectedItemNote, setSelectedItemNote] = useState('')
   const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([])
+  const [editingCartItem, setEditingCartItem] = useState<CartItem | null>(null)
   const [cartActivityBanners, setCartActivityBanners] = useState<Array<CartActivityBanner | null>>(
     Array.from({ length: cartActivityBannerLaneCount }, () => null),
   )
@@ -588,12 +592,22 @@ export function CustomerMenuPage() {
 
   const { context, menu, cart, participantToken } = state
   const currencyFormatter = createCurrencyFormatter(context.restaurant.currency)
+  const restaurantImageUrl = resolveRestaurantHeroImageUrl(context.restaurant.imageUrl)
+  const orderTypeLabel = cart.orderType === 'DineIn' ? 'Dine in' : 'Takeaway'
+  const paymentPolicyLabel = context.restaurant.paymentPolicy === 'PrepayRequired'
+    ? 'Online payment required'
+    : 'Online or counter'
   const hasMenu = menu.categories.some((category) => category.items.length > 0)
   const categorySummaries = menu.categories.map((category) => ({
     id: category.id,
     name: category.name,
     count: category.items.length,
   }))
+  const menuItemsById = new Map(
+    menu.categories.flatMap((category) => category.items.map((item) => [item.id, item] as const)),
+  )
+  const totalMenuItemCount = categorySummaries.reduce((total, category) => total + category.count, 0)
+  const visibleMenuItemCount = visibleCategories.reduce((total, category) => total + category.items.length, 0)
 
   const scrollToCategory = (categoryId: string | 'all') => {
     setActiveCategoryId(categoryId)
@@ -609,6 +623,7 @@ export function CustomerMenuPage() {
   }
 
   const openItemDetail = (item: PublicMenuItem) => {
+    setEditingCartItem(null)
     setSelectedItem(item)
     setSelectedItemQuantity(1)
     setSelectedItemNote('')
@@ -621,7 +636,27 @@ export function CustomerMenuPage() {
       setSelectedItemQuantity(1)
       setSelectedItemNote('')
       setSelectedOptionIds([])
+      setEditingCartItem(null)
     }
+  }
+
+  const openCartItemModifier = (item: CartItem) => {
+    if (cart.status !== 'Active') {
+      return
+    }
+
+    const menuItem = menuItemsById.get(item.menuItemId)
+
+    if (!menuItem) {
+      toast.error('This item is no longer available to modify.')
+      return
+    }
+
+    setEditingCartItem(item)
+    setSelectedItem(menuItem)
+    setSelectedItemQuantity(item.quantity)
+    setSelectedItemNote(item.note ?? '')
+    setSelectedOptionIds(getCartItemSelectedOptionIds(item))
   }
 
   const addItem = async (item: PublicMenuItem, quantity = 1, note = '', optionIds: string[] = []) => {
@@ -655,6 +690,43 @@ export function CustomerMenuPage() {
     }
   }
 
+  const updateCartLine = async (
+    item: CartItem,
+    quantity: number,
+    note = '',
+    optionIds?: string[],
+  ) => {
+    if (cart.status !== 'Active' || cartActionItemId || clearingCart) {
+      return false
+    }
+
+    if (quantity < 1) {
+      return false
+    }
+
+    setCartActionItemId(item.id)
+    const normalizedNote = note.trim()
+
+    try {
+      const updatedCart = await updateCartItem(cart.id, item.id, participantToken, {
+        quantity,
+        ...(normalizedNote ? { note: normalizedNote } : {}),
+        ...(optionIds ? { selectedOptionIds: optionIds } : {}),
+      })
+
+      latestCartRef.current = updatedCart
+      setState((current) =>
+        current.status === 'ready' ? { ...current, cart: updatedCart } : current,
+      )
+      return true
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not update cart')
+      return false
+    } finally {
+      setCartActionItemId(null)
+    }
+  }
+
   const addSelectedItem = async () => {
     if (!selectedItem) {
       return
@@ -664,6 +736,31 @@ export function CustomerMenuPage() {
 
     if (validationMessage) {
       toast.error(validationMessage)
+      return
+    }
+
+    if (editingCartItem) {
+      setAddingItemId(selectedItem.id)
+
+      const normalizedOptionIds = getOrderedSelectedOptionIds(selectedItem, selectedOptionIds)
+      const updated = await updateCartLine(
+        editingCartItem,
+        selectedItemQuantity,
+        selectedItemNote,
+        normalizedOptionIds,
+      )
+
+      setAddingItemId(null)
+
+      if (updated) {
+        setSelectedItem(null)
+        setSelectedItemQuantity(1)
+        setSelectedItemNote('')
+        setSelectedOptionIds([])
+        setEditingCartItem(null)
+        toast.success(`${selectedItem.name} updated`)
+      }
+
       return
     }
 
@@ -695,31 +792,41 @@ export function CustomerMenuPage() {
   }
 
   const updateCartLineQuantity = async (item: CartItem, nextQuantity: number) => {
-    if (cart.status !== 'Active' || cartActionItemId || clearingCart) {
+    await updateCartLine(item, nextQuantity, item.note ?? '')
+  }
+
+  const updateCartLineOptionQuantity = async (
+    item: CartItem,
+    group: PublicMenuOptionGroup,
+    option: PublicMenuOption,
+    nextQuantity: number,
+  ) => {
+    const menuItem = menuItemsById.get(item.menuItemId)
+
+    if (!menuItem) {
+      toast.error('This item is no longer available to modify.')
       return
     }
 
-    if (nextQuantity < 1) {
+    const nextOptionIds = setOptionQuantity(
+      getCartItemSelectedOptionIds(item),
+      group,
+      option,
+      nextQuantity,
+    )
+    const validationMessage = getOptionSelectionError(menuItem, nextOptionIds)
+
+    if (validationMessage) {
+      toast.error(validationMessage)
       return
     }
 
-    setCartActionItemId(item.id)
-
-    try {
-      const updatedCart = await updateCartItem(cart.id, item.id, participantToken, {
-        quantity: nextQuantity,
-        ...(item.note ? { note: item.note } : {}),
-      })
-
-      latestCartRef.current = updatedCart
-      setState((current) =>
-        current.status === 'ready' ? { ...current, cart: updatedCart } : current,
-      )
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Could not update cart')
-    } finally {
-      setCartActionItemId(null)
-    }
+    await updateCartLine(
+      item,
+      item.quantity,
+      item.note ?? '',
+      getOrderedSelectedOptionIds(menuItem, nextOptionIds),
+    )
   }
 
   const removeCartLine = async (item: CartItem) => {
@@ -820,11 +927,25 @@ export function CustomerMenuPage() {
   return (
     <main className="min-h-svh bg-background pb-28 text-foreground">
       <section className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-3 py-4 sm:px-6 lg:px-8">
-        <header className="flex flex-col gap-4 border-b pb-5">
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0 space-y-2">
+        <header className="overflow-hidden rounded-[2rem] border bg-card shadow-sm">
+          <div className="relative min-h-[230px] overflow-hidden bg-muted sm:min-h-[280px]">
+            {restaurantImageUrl ? (
+              <img
+                src={restaurantImageUrl}
+                alt={`${context.restaurant.name} restaurant`}
+                className="absolute inset-0 h-full w-full object-cover"
+              />
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-orange-100 via-background to-muted dark:from-orange-950/40 dark:via-background dark:to-muted">
+                <div className="grid size-24 place-items-center rounded-full border border-white/40 bg-background/75 text-3xl font-semibold shadow-xl backdrop-blur">
+                  {getInitials(context.restaurant.name)}
+                </div>
+              </div>
+            )}
+            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/35 to-black/10" />
+            <div className="absolute inset-x-0 top-0 z-10 flex items-start justify-between gap-3 p-4 sm:p-5">
               {context.table ? (
-                <Badge variant="outline" className="h-7 gap-1.5 px-3 text-sm">
+                <Badge variant="outline" className="h-9 gap-1.5 rounded-full border-white/50 bg-background/95 px-3 text-sm text-foreground shadow-lg">
                   <Utensils className="size-3.5" />
                   Table {context.table.tableNumber}
                 </Badge>
@@ -838,7 +959,7 @@ export function CustomerMenuPage() {
                     }
                   }}
                 >
-                  <SelectTrigger size="sm" aria-label="Order type" className="rounded-full px-3">
+                  <SelectTrigger size="sm" aria-label="Order type" className="h-10 rounded-full border-white/50 bg-background/95 px-3 text-foreground shadow-lg">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent position="popper" align="start">
@@ -857,51 +978,71 @@ export function CustomerMenuPage() {
                   </SelectContent>
                 </Select>
               )}
-              <div>
-                <p className="text-xs font-semibold uppercase text-muted-foreground">DineFlow</p>
-                <h1 className="text-3xl font-semibold leading-tight sm:text-4xl">
+              <CartViewerButton
+                viewer={user}
+                onLogout={() => {
+                  logout()
+                  navigate('/login')
+                }}
+              />
+            </div>
+            <div className="absolute inset-x-0 bottom-0 z-10 space-y-3 p-5 text-white sm:p-7">
+              <div className="space-y-1">
+                <p className="text-xs font-semibold uppercase tracking-[0.22em] text-white/75">DineFlow</p>
+                <h1 className="font-heading max-w-3xl text-4xl font-semibold leading-none tracking-tight sm:text-6xl">
                   {context.restaurant.name}
                 </h1>
               </div>
+              <div className="flex flex-wrap gap-2 text-sm font-medium">
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-white/15 px-3 py-1 text-white ring-1 ring-white/25 backdrop-blur">
+                  {cart.orderType === 'DineIn' ? <Utensils className="size-3.5" /> : <ShoppingBag className="size-3.5" />}
+                  {orderTypeLabel}
+                </span>
+                <span className="rounded-full bg-white/15 px-3 py-1 text-white ring-1 ring-white/25 backdrop-blur">
+                  {context.restaurant.currency}
+                </span>
+                <span className="rounded-full bg-white/15 px-3 py-1 text-white ring-1 ring-white/25 backdrop-blur">
+                  {paymentPolicyLabel}
+                </span>
+              </div>
             </div>
-            <CartViewerButton
-              viewer={user}
-              onLogout={() => {
-                logout()
-                navigate('/login')
-              }}
-            />
           </div>
 
-          <div className="grid gap-2 text-sm text-muted-foreground sm:grid-cols-[1fr_auto] sm:items-center">
+          <div className="p-4 text-sm text-muted-foreground sm:p-5">
             <div className="flex min-w-0 items-center gap-2">
               <MapPin className="size-4 shrink-0" />
               <span className="truncate">{context.restaurant.address || 'Restaurant address unavailable'}</span>
             </div>
-            <span>{context.restaurant.currency}</span>
           </div>
         </header>
 
-        <div className="grid grid-cols-[112px_minmax(0,1fr)] gap-2 sm:grid-cols-[180px_minmax(0,1fr)] sm:gap-3 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-5">
+        <div className="grid grid-cols-[118px_minmax(0,1fr)] items-start gap-3 sm:grid-cols-[190px_minmax(0,1fr)] lg:grid-cols-[230px_minmax(0,1fr)] lg:gap-6">
           <CategorySidebar
             categories={categorySummaries}
             activeCategoryId={activeCategoryId}
             onSelect={scrollToCategory}
           />
 
-          <div className="min-w-0 space-y-5">
-            <div className="sticky top-0 z-10 -mx-1 border-b bg-background/95 px-1 py-3 backdrop-blur">
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={search}
-                  onChange={(event) => {
-                    setSearch(event.target.value)
-                    setActiveCategoryId('all')
-                  }}
-                  placeholder="Search menu"
-                  className="h-11 pl-9"
-                />
+          <div className="min-w-0 space-y-6">
+            <div className="sticky top-3 z-10 rounded-2xl border bg-card/95 p-2 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-card/85">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="relative min-w-0 flex-1">
+                  <Search className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={search}
+                    onChange={(event) => {
+                      setSearch(event.target.value)
+                      setActiveCategoryId('all')
+                    }}
+                    placeholder="Search dishes, drinks, or add-ons"
+                    className="h-12 rounded-xl border-muted bg-background/80 pl-10 pr-4 text-base shadow-inner shadow-black/[0.02] focus-visible:ring-2"
+                  />
+                </div>
+                <div className="flex shrink-0 items-center justify-between gap-2 rounded-xl bg-muted/60 px-3 py-2 text-xs font-semibold text-muted-foreground sm:min-w-28 sm:justify-center">
+                  <span>{visibleMenuItemCount} shown</span>
+                  <span className="text-muted-foreground/60">/</span>
+                  <span>{totalMenuItemCount} total</span>
+                </div>
               </div>
             </div>
 
@@ -931,6 +1072,7 @@ export function CustomerMenuPage() {
       <CartSummaryBar
         cart={cart}
         currencyFormatter={currencyFormatter}
+        menuItemsById={menuItemsById}
         open={cartOpen}
         updatingItemId={cartActionItemId}
         isClearingCart={clearingCart}
@@ -938,6 +1080,8 @@ export function CustomerMenuPage() {
         isCheckingOut={checkingOut}
         onOpenChange={setCartOpen}
         onQuantityChange={updateCartLineQuantity}
+        onOptionQuantityChange={updateCartLineOptionQuantity}
+        onModifyItem={openCartItemModifier}
         onRemoveItem={removeCartLine}
         onClearCart={clearCart}
         onOrderNoteSave={saveCartNote}
@@ -951,6 +1095,7 @@ export function CustomerMenuPage() {
         selectedOptionIds={selectedOptionIds}
         currencyFormatter={currencyFormatter}
         isAdding={selectedItem ? addingItemId === selectedItem.id : false}
+        isEditing={Boolean(editingCartItem)}
         onClose={closeItemDetail}
         onQuantityChange={setSelectedItemQuantity}
         onNoteChange={setSelectedItemNote}
@@ -1066,10 +1211,36 @@ function detectCartAddition(previousCart: Cart, nextCart: Cart) {
 
 function getCartItemKey(item: CartItem) {
   const optionKey = item.selectedOptions
-    .map((option) => `${option.menuItemOptionId ?? `${option.groupNameSnapshot}:${option.optionNameSnapshot}`}×${option.quantity ?? 1}`)
+    .map((option) => `${option.menuItemOptionId ?? `${option.groupNameSnapshot}:${option.optionNameSnapshot}`}x${option.quantity ?? 1}`)
     .join(',')
 
   return `${item.menuItemId}:${optionKey}:${item.note ?? ''}`
+}
+
+function getCartItemSelectedOptionIds(item: CartItem) {
+  return item.selectedOptions.flatMap((option) => {
+    if (!option.menuItemOptionId) {
+      return []
+    }
+
+    return Array.from({ length: option.quantity ?? 1 }, () => option.menuItemOptionId!)
+  })
+}
+
+function findPublicMenuOption(menuItem: PublicMenuItem | null, optionId: string | null) {
+  if (!menuItem || !optionId) {
+    return null
+  }
+
+  for (const group of getAvailableOptionGroups(menuItem)) {
+    const option = group.options.find((entry) => entry.id === optionId)
+
+    if (option) {
+      return { group, option }
+    }
+  }
+
+  return null
 }
 
 function getAvailableOptionGroups(item: PublicMenuItem) {
@@ -1254,41 +1425,58 @@ function CategorySidebar({
   activeCategoryId: string | 'all'
   onSelect: (categoryId: string | 'all') => void
 }) {
+  const totalItems = categories.reduce((total, category) => total + category.count, 0)
+
   return (
-    <aside className="sticky top-3 h-[calc(100svh-7rem)] overflow-hidden rounded-lg border bg-card">
+    <aside className="sticky top-3 h-[calc(100svh-8rem)] overflow-hidden rounded-2xl border bg-card/95 shadow-sm supports-[backdrop-filter]:bg-card/85">
       <div className="flex h-full flex-col">
-        <div className="border-b px-1.5 py-2.5 sm:px-3 sm:py-3">
-          <p className="hidden text-xs font-semibold uppercase text-muted-foreground sm:block">
-            Categories
-          </p>
-          <p className="text-center text-xs font-semibold uppercase text-muted-foreground sm:hidden">
-            Menu
-          </p>
+        <div className="border-b bg-muted/25 px-2 py-2 sm:px-3">
+          <div className="flex min-h-12 items-center justify-center gap-2 rounded-xl bg-background/70 px-2 sm:justify-between sm:px-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="hidden size-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary sm:flex">
+                <Utensils className="size-4" />
+              </span>
+              <div className="min-w-0 text-center sm:text-left">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Menu
+                </p>
+                <p className="hidden truncate text-[11px] text-muted-foreground sm:block">
+                  {categories.length} categories
+                </p>
+              </div>
+            </div>
+            <Badge variant="secondary" className="hidden shrink-0 sm:inline-flex">
+              {totalItems}
+            </Badge>
+          </div>
         </div>
 
-        <nav className="min-h-0 flex-1 overflow-y-auto p-1.5 sm:p-2">
+        <nav className="min-h-0 flex-1 overflow-y-auto p-1.5 sm:p-2.5">
           <button
             type="button"
             title="All"
             aria-label="All categories"
             className={cn(
-              'flex min-h-11 w-full items-center justify-start gap-2 rounded-md px-3 text-sm font-medium transition-colors sm:justify-between',
+              'group flex min-h-12 w-full items-center justify-start gap-2 rounded-xl px-3 text-sm font-semibold transition-all sm:justify-between',
               activeCategoryId === 'all'
-                ? 'bg-primary text-primary-foreground'
-                : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                ? 'bg-primary text-primary-foreground shadow-sm'
+                : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground',
             )}
             onClick={() => onSelect('all')}
           >
-            <span className="truncate">All</span>
+            <span className="truncate">All items</span>
             <Badge
               variant={activeCategoryId === 'all' ? 'secondary' : 'outline'}
-              className="hidden shrink-0 sm:inline-flex"
+              className={cn(
+                'hidden shrink-0 sm:inline-flex',
+                activeCategoryId !== 'all' && 'bg-background/80',
+              )}
             >
-              {categories.reduce((total, category) => total + category.count, 0)}
+              {totalItems}
             </Badge>
           </button>
 
-          <div className="mt-1 space-y-1">
+          <div className="mt-1.5 space-y-1">
             {categories.map((category) => (
               <button
                 key={category.id}
@@ -1296,19 +1484,28 @@ function CategorySidebar({
                 title={category.name}
                 aria-label={category.name}
                 className={cn(
-                  'flex min-h-12 w-full items-center justify-start gap-2 rounded-md px-3 text-sm font-medium transition-colors sm:min-h-11 sm:justify-between',
+                  'group relative flex min-h-12 w-full items-center justify-start gap-2 overflow-hidden rounded-xl px-3 text-sm font-semibold transition-all sm:min-h-11 sm:justify-between',
                   activeCategoryId === category.id
-                    ? 'bg-primary text-primary-foreground'
-                    : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                    ? 'bg-primary text-primary-foreground shadow-sm'
+                    : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground',
                 )}
                 onClick={() => onSelect(category.id)}
               >
+                <span
+                  className={cn(
+                    'absolute left-0 top-1/2 h-6 w-1 -translate-y-1/2 rounded-r-full bg-primary opacity-0 transition-opacity',
+                    activeCategoryId !== category.id && 'group-hover:opacity-70',
+                  )}
+                />
                 <span className="line-clamp-2 min-w-0 text-left text-[13px] leading-tight sm:truncate sm:text-sm">
                   {category.name}
                 </span>
                 <Badge
                   variant={activeCategoryId === category.id ? 'secondary' : 'outline'}
-                  className="hidden shrink-0 sm:inline-flex"
+                  className={cn(
+                    'hidden shrink-0 sm:inline-flex',
+                    activeCategoryId !== category.id && 'bg-background/80',
+                  )}
                 >
                   {category.count}
                 </Badge>
@@ -1331,18 +1528,24 @@ function MenuCategorySection({
   onOpenItem: (item: PublicMenuItem) => void
 }) {
   return (
-    <section id={getCategorySectionId(category.id)} className="scroll-mt-20 space-y-3">
-      <div className="space-y-1">
-        <h2 className="text-xl font-semibold">{category.name}</h2>
+    <section id={getCategorySectionId(category.id)} className="scroll-mt-28 space-y-3">
+      <div className="flex items-end justify-between gap-3 rounded-2xl border bg-card/70 px-4 py-3 shadow-sm">
+        <div className="min-w-0 space-y-1">
+        <h2 className="font-heading text-xl font-semibold tracking-tight">{category.name}</h2>
         {category.description ? (
           <p className="text-sm text-muted-foreground">{category.description}</p>
         ) : null}
+        </div>
+        <Badge variant="secondary" className="shrink-0">
+          {category.items.length}
+        </Badge>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
         {category.items.map((item) => {
           const disabled = item.isSoldOut || !item.isAvailable
           const imageUrl = resolvePublicAssetUrl(item.imageUrl)
+          const unavailableLabel = getMenuItemUnavailableLabel(item)
 
           return (
             <Card
@@ -1350,8 +1553,8 @@ function MenuCategorySection({
               role="button"
               tabIndex={0}
               className={cn(
-                'rounded-lg py-0 transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                disabled && 'bg-muted/35 text-muted-foreground',
+                'overflow-hidden rounded-2xl py-0 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/25 hover:bg-muted/20 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                disabled && 'bg-muted/35 text-muted-foreground hover:translate-y-0 hover:border-border hover:shadow-sm',
               )}
               onClick={() => onOpenItem(item)}
               onKeyDown={(event) => {
@@ -1361,8 +1564,8 @@ function MenuCategorySection({
                 }
               }}
             >
-              <CardContent className="grid gap-2 p-2 sm:gap-3 sm:p-3 lg:grid-cols-[112px_minmax(0,1fr)]">
-                <div className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted lg:aspect-square">
+              <CardContent className="grid gap-3 p-2.5 sm:p-3 lg:grid-cols-[116px_minmax(0,1fr)]">
+                <div className="relative aspect-[4/3] overflow-hidden rounded-xl border bg-muted lg:aspect-square">
                   {imageUrl ? (
                     <img
                       src={imageUrl}
@@ -1374,25 +1577,26 @@ function MenuCategorySection({
                     />
                   ) : (
                     <div className="flex size-full items-center justify-center">
-                      <Store className="size-7 text-muted-foreground" />
+                      <Store className="size-8 text-muted-foreground" />
                     </div>
                   )}
                   {item.isSoldOut ? (
-                    <Badge className="absolute left-1.5 top-1.5" variant="destructive">
-                      Sold out
-                    </Badge>
+                    <SoldOutImageBadge compact className="absolute bottom-2 left-2 max-w-[calc(100%-1rem)]" />
                   ) : null}
                 </div>
 
-                <div className="flex min-w-0 flex-col gap-3 lg:min-h-[112px]">
+                <div className="flex min-w-0 flex-col gap-3 lg:min-h-[116px]">
                   <div className="min-w-0 flex-1 space-y-1.5">
                     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
                       <h3 className="min-w-0 text-base font-semibold leading-snug">
                         <span className="line-clamp-2 break-words">{item.name}</span>
                       </h3>
-                      <span className="max-w-[7.5rem] shrink-0 text-right text-sm font-semibold leading-snug sm:max-w-[8rem] sm:text-base">
-                        {currencyFormatter.format(item.price)}
-                      </span>
+                      <PriceText
+                        value={item.price}
+                        currencyFormatter={currencyFormatter}
+                        variant="menu"
+                        className="max-w-[8rem] sm:max-w-[9rem]"
+                      />
                     </div>
                     {item.description ? (
                       <p className="line-clamp-2 min-h-10 text-sm leading-5 text-muted-foreground">
@@ -1407,7 +1611,7 @@ function MenuCategorySection({
                       size="sm"
                       variant={disabled ? 'secondary' : 'default'}
                       disabled={disabled}
-                      className="h-9 min-w-20 px-3 sm:min-w-24"
+                      className="h-9 min-w-20 rounded-full px-3 shadow-sm sm:min-w-24"
                       onClick={(event) => {
                         event.stopPropagation()
                         onOpenItem(item)
@@ -1418,7 +1622,7 @@ function MenuCategorySection({
                       ) : (
                         <Plus className="size-4" />
                       )}
-                      {disabled ? 'Unavailable' : 'Add'}
+                      {unavailableLabel ?? 'Add'}
                     </Button>
                   </div>
                 </div>
@@ -1438,6 +1642,7 @@ function ItemDetailOverlay({
   selectedOptionIds,
   currencyFormatter,
   isAdding,
+  isEditing,
   onClose,
   onQuantityChange,
   onNoteChange,
@@ -1451,6 +1656,7 @@ function ItemDetailOverlay({
   selectedOptionIds: string[]
   currencyFormatter: Intl.NumberFormat
   isAdding: boolean
+  isEditing: boolean
   onClose: () => void
   onQuantityChange: (quantity: number) => void
   onNoteChange: (note: string) => void
@@ -1472,7 +1678,9 @@ function ItemDetailOverlay({
 
   const description = item.isSoldOut || !item.isAvailable
     ? 'This item is currently unavailable.'
-    : item.optionGroups?.length
+    : isEditing
+      ? 'Update options, quantity, and item notes for this cart item.'
+      : item.optionGroups?.length
       ? 'Choose your options, quantity, and any item notes.'
       : 'Choose quantity and add optional item notes.'
 
@@ -1480,8 +1688,8 @@ function ItemDetailOverlay({
     return (
       <Drawer open onOpenChange={handleOpenChange}>
         <DrawerContent className="max-h-[88svh] overflow-hidden">
-          <DrawerHeader className="shrink-0 text-left">
-            <DrawerTitle className="text-xl leading-tight">{item.name}</DrawerTitle>
+          <DrawerHeader className="shrink-0 border-b bg-muted/20 text-left">
+            <DrawerTitle className="font-heading text-2xl leading-tight tracking-tight">{item.name}</DrawerTitle>
             <DrawerDescription>{description}</DrawerDescription>
           </DrawerHeader>
           <ItemDetailContent
@@ -1491,6 +1699,7 @@ function ItemDetailOverlay({
             selectedOptionIds={selectedOptionIds}
             currencyFormatter={currencyFormatter}
             isAdding={isAdding}
+            isEditing={isEditing}
             onQuantityChange={onQuantityChange}
             onNoteChange={onNoteChange}
             onToggleOption={onToggleOption}
@@ -1506,9 +1715,9 @@ function ItemDetailOverlay({
 
   return (
     <Dialog open onOpenChange={handleOpenChange}>
-      <DialogContent className="flex max-h-[90svh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
-        <DialogHeader className="shrink-0 px-5 pt-5 pr-12 pb-4">
-          <DialogTitle className="text-xl leading-tight">{item.name}</DialogTitle>
+      <DialogContent className="flex max-h-[90svh] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+        <DialogHeader className="shrink-0 border-b bg-muted/20 px-5 pt-5 pr-12 pb-4">
+          <DialogTitle className="font-heading text-2xl leading-tight tracking-tight">{item.name}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
         <ItemDetailContent
@@ -1518,6 +1727,7 @@ function ItemDetailOverlay({
           selectedOptionIds={selectedOptionIds}
           currencyFormatter={currencyFormatter}
           isAdding={isAdding}
+          isEditing={isEditing}
           onQuantityChange={onQuantityChange}
           onNoteChange={onNoteChange}
           onToggleOption={onToggleOption}
@@ -1538,6 +1748,7 @@ function ItemDetailContent({
   selectedOptionIds,
   currencyFormatter,
   isAdding,
+  isEditing,
   onQuantityChange,
   onNoteChange,
   onToggleOption,
@@ -1552,6 +1763,7 @@ function ItemDetailContent({
   selectedOptionIds: string[]
   currencyFormatter: Intl.NumberFormat
   isAdding: boolean
+  isEditing: boolean
   onQuantityChange: (quantity: number) => void
   onNoteChange: (note: string) => void
   onToggleOption: (group: PublicMenuOptionGroup, option: PublicMenuOption) => void
@@ -1561,6 +1773,7 @@ function ItemDetailContent({
   bodyClassName?: string
 }) {
   const disabled = item.isSoldOut || !item.isAvailable
+  const unavailableLabel = getMenuItemUnavailableLabel(item)
   const imageUrl = resolvePublicAssetUrl(item.imageUrl)
   const optionGroups = getAvailableOptionGroups(item)
   const selectedOptions = getOrderedSelectedOptions(item, selectedOptionIds)
@@ -1571,13 +1784,13 @@ function ItemDetailContent({
   return (
     <div className={cn('flex min-h-0 flex-1 flex-col', className)}>
       <div className={cn('min-h-0 flex-1 overflow-y-auto', bodyClassName)}>
-        <div className="grid gap-4 sm:grid-cols-[220px_minmax(0,1fr)]">
-          <div className="relative aspect-[4/3] overflow-hidden rounded-lg border bg-muted sm:aspect-square">
+        <div className="grid gap-5 sm:grid-cols-[240px_minmax(0,1fr)]">
+          <div className="relative aspect-[4/3] overflow-hidden rounded-2xl border bg-gradient-to-br from-muted to-background shadow-sm sm:aspect-square">
           {imageUrl ? (
             <img
               src={imageUrl}
               alt=""
-              className={cn('size-full object-contain p-3', disabled && 'grayscale')}
+              className={cn('size-full object-contain p-4', disabled && 'grayscale')}
             />
           ) : (
             <div className="flex size-full items-center justify-center">
@@ -1585,24 +1798,20 @@ function ItemDetailContent({
             </div>
           )}
           {item.isSoldOut ? (
-            <Badge className="absolute left-3 top-3" variant="destructive">
-              Sold out
-            </Badge>
+            <SoldOutImageBadge className="absolute inset-x-4 bottom-4" />
           ) : null}
           {!item.isAvailable && !item.isSoldOut ? (
-            <Badge className="absolute left-3 top-3" variant="secondary">
+            <Badge className="absolute bottom-4 left-4 rounded-full border bg-background/90 px-3 py-1 shadow-sm" variant="secondary">
               Unavailable
             </Badge>
           ) : null}
         </div>
 
         <div className="min-w-0 space-y-4">
-          <div className="space-y-2">
+          <div className="space-y-3 rounded-2xl border bg-card p-4 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-2xl font-semibold">{currencyFormatter.format(item.price)}</p>
-              <Badge variant={disabled ? 'secondary' : 'outline'}>
-                {disabled ? 'Not orderable' : 'Available'}
-              </Badge>
+              <PriceText value={item.price} currencyFormatter={currencyFormatter} variant="detail" />
+              <MenuAvailabilityPill item={item} />
             </div>
             {item.description ? (
               <p className="text-sm leading-6 text-muted-foreground">{item.description}</p>
@@ -1614,7 +1823,7 @@ function ItemDetailContent({
                 {selectedOptions.map(({ group, option, quantity: optionQuantity }) => (
                   <Badge key={option.id} variant="secondary" className="h-auto rounded-full px-2 py-1 text-xs">
                     {group.name}: {option.name}
-                    {optionQuantity > 1 ? ` ×${optionQuantity}` : ''}
+                    {optionQuantity > 1 ? ` x${optionQuantity}` : ''}
                   </Badge>
                 ))}
               </div>
@@ -1628,26 +1837,33 @@ function ItemDetailContent({
                 const maxReached = selectedInGroup >= group.maxSelections
 
                 return (
-                  <div key={group.id} className="rounded-lg border bg-muted/20 p-3">
-                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="font-medium leading-tight">{group.name}</p>
-                        <p className="text-xs text-muted-foreground">{getSelectionRule(group)}</p>
+                  <div key={group.id} className="overflow-hidden rounded-3xl border bg-card shadow-sm">
+                    <div className="border-b bg-muted/20 px-4 py-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="font-heading font-semibold leading-tight">{group.name}</p>
+                          <p className="text-xs text-muted-foreground">{getSelectionRule(group)}</p>
+                        </div>
+                        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                          <Badge variant="outline" className="rounded-full bg-background/80 text-xs">
+                            {selectedInGroup}/{group.maxSelections} selected
+                          </Badge>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              'rounded-full text-xs',
+                              group.isRequired
+                                ? 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-100'
+                                : 'bg-background/80 text-muted-foreground',
+                            )}
+                          >
+                            {group.isRequired ? 'Required' : 'Optional'}
+                          </Badge>
+                        </div>
                       </div>
-                      <Badge
-                        variant="outline"
-                        className={cn(
-                          'rounded-full',
-                          group.isRequired
-                            ? 'border-amber-300 bg-amber-50 text-amber-900'
-                            : 'bg-muted/50 text-muted-foreground',
-                        )}
-                      >
-                        {group.isRequired ? 'Required' : 'Optional'}
-                      </Badge>
                     </div>
 
-                    <div className="grid gap-2">
+                    <div className="grid gap-2.5 p-3">
                       {group.options.map((option) => {
                         const selectedQuantity = getOptionQuantity(selectedOptionIds, option.id)
                         const selected = selectedQuantity > 0
@@ -1663,33 +1879,41 @@ function ItemDetailContent({
                           <div
                             key={option.id}
                             className={cn(
-                              'flex min-h-12 w-full items-center justify-between gap-3 rounded-lg border bg-background px-3 py-2 text-left transition-colors',
-                              selected && 'border-primary bg-primary/5',
+                              'relative grid min-h-16 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 overflow-hidden rounded-2xl border bg-background p-3 text-left shadow-sm transition-all',
+                              !selected && !optionDisabled && 'hover:border-primary/30 hover:bg-muted/20 hover:shadow',
+                              selected && 'border-primary/60 bg-primary/[0.07] shadow-md shadow-primary/10 ring-1 ring-primary/10',
                               optionDisabled && 'cursor-not-allowed opacity-55',
                             )}
                           >
+                            {selected ? <span className="absolute inset-y-3 left-0 w-1 rounded-r-full bg-primary" /> : null}
                             <button
                               type="button"
-                              className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                              className="grid min-w-0 grid-cols-[2rem_minmax(0,1fr)] items-center gap-3 text-left"
                               disabled={optionDisabled}
+                              aria-pressed={selected}
                               onClick={() => onToggleOption(group, option)}
                             >
                               <span className={cn(
-                                'flex size-5 shrink-0 items-center justify-center rounded-full border',
-                                selected ? 'border-primary bg-primary text-primary-foreground' : 'bg-background',
+                                'flex size-8 shrink-0 items-center justify-center rounded-full border transition-colors',
+                                selected
+                                  ? 'border-primary bg-primary text-primary-foreground shadow-sm'
+                                  : 'border-muted-foreground/25 bg-muted/40 text-muted-foreground',
                               )}>
-                                {selected ? <Check className="size-3" /> : null}
+                                {selected ? <Check className="size-4" /> : <Plus className="size-4" />}
                               </span>
                               <span className="min-w-0">
-                                <span className="block truncate text-sm font-semibold">{option.name}</span>
+                                <span className="block truncate text-sm font-semibold text-foreground">{option.name}</span>
                                 {option.maxQuantity > 1 ? (
-                                  <span className="block text-xs text-muted-foreground">Max {option.maxQuantity}</span>
+                                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                                    Max {option.maxQuantity}
+                                    {selectedQuantity > 1 ? ` - selected ${selectedQuantity}` : ''}
+                                  </span>
                                 ) : null}
                               </span>
                             </button>
-                            <span className="flex shrink-0 items-center gap-2 text-sm font-semibold text-muted-foreground">
+                            <span className="flex shrink-0 flex-col items-end gap-2 sm:flex-row sm:items-center">
                               {selected && option.maxQuantity > 1 ? (
-                                <span className="flex items-center gap-1 rounded-full border bg-muted/40 p-0.5">
+                                <span className="flex items-center gap-1 rounded-full border bg-background/80 p-0.5 shadow-sm">
                                   <Button
                                     type="button"
                                     variant="ghost"
@@ -1717,7 +1941,17 @@ function ItemDetailContent({
                                   </Button>
                                 </span>
                               ) : null}
-                              <span>{getOptionAdjustmentLabel(option, currencyFormatter)}</span>
+                              <span
+                                className={cn(
+                                  'rounded-full px-2.5 py-1 text-xs font-semibold leading-none',
+                                  option.priceAdjustment === 0
+                                    ? 'bg-muted text-muted-foreground'
+                                    : 'bg-amber-50 text-amber-900 ring-1 ring-amber-200/80 dark:bg-amber-400/10 dark:text-amber-100 dark:ring-amber-400/25',
+                                  option.adjustmentType === 2 && 'bg-primary/10 text-primary ring-1 ring-primary/20',
+                                )}
+                              >
+                                {getOptionAdjustmentLabel(option, currencyFormatter)}
+                              </span>
                             </span>
                           </div>
                         )
@@ -1735,9 +1969,12 @@ function ItemDetailContent({
             </div>
           ) : null}
 
-          <div className="space-y-2">
-            <p className="text-sm font-medium">Quantity</p>
-            <div className="flex w-fit items-center gap-2 rounded-lg border bg-muted/20 p-1">
+          <div className="rounded-2xl border bg-card p-3.5 shadow-sm">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold">Quantity</p>
+              <span className="text-xs text-muted-foreground">Choose how many</span>
+            </div>
+            <div className="flex w-fit items-center gap-2 rounded-full border bg-muted/20 p-1">
               <Button
                 type="button"
                 variant="ghost"
@@ -1764,7 +2001,7 @@ function ItemDetailContent({
             </div>
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-2 rounded-2xl border bg-card p-3.5 shadow-sm">
             <div className="flex items-center justify-between gap-3">
               <label className="text-sm font-medium" htmlFor="customer-item-note">
                 Item note
@@ -1794,10 +2031,10 @@ function ItemDetailContent({
       </div>
       </div>
 
-      <div className="shrink-0 border-t bg-popover/95 px-4 py-3 backdrop-blur sm:px-5">
+      <div className="shrink-0 border-t bg-background/95 px-4 py-3 shadow-[0_-12px_30px_rgba(0,0,0,0.06)] backdrop-blur sm:px-5">
         <Button
           type="button"
-          className="h-12 w-full rounded-lg text-base"
+          className="h-12 w-full rounded-xl text-base shadow-sm"
           disabled={disabled || isAdding || Boolean(optionSelectionError)}
           onClick={() => void onAddToCart()}
         >
@@ -1805,10 +2042,12 @@ function ItemDetailContent({
             <Loader2 className="size-4 animate-spin" />
           ) : disabled ? (
             <MinusCircle className="size-4" />
+          ) : isEditing ? (
+            <Check className="size-4" />
           ) : (
             <ShoppingBag className="size-4" />
           )}
-          {disabled ? 'Unavailable' : `Add ${currencyFormatter.format(lineTotal)}`}
+          {unavailableLabel ?? `${isEditing ? 'Save changes' : 'Add'} ${currencyFormatter.format(lineTotal)}`}
         </Button>
       </div>
     </div>
@@ -1831,7 +2070,7 @@ function QuickNotePresetGroups({
   const noteIsFull = note.trim().length >= maxLength
 
   return (
-    <div className="space-y-2 rounded-lg border bg-background/70 p-2.5">
+    <div className="space-y-3 rounded-2xl border bg-muted/25 p-3">
       <div className="flex items-center justify-between gap-3">
         <p className="text-xs font-semibold text-muted-foreground">Quick notes</p>
         <p className="text-[11px] text-muted-foreground">Tap to append</p>
@@ -1853,7 +2092,7 @@ function QuickNotePresetGroups({
                   size="sm"
                   aria-pressed={applied}
                   className={cn(
-                    'h-auto min-h-7 rounded-full px-2.5 py-1 text-xs',
+                    'h-auto min-h-8 rounded-full px-3 py-1 text-xs',
                     applied ? 'border-primary/20 bg-primary/10 text-primary' : '',
                   )}
                   disabled={disabled || noteIsFull}
@@ -1874,6 +2113,7 @@ function QuickNotePresetGroups({
 function CartSummaryBar({
   cart,
   currencyFormatter,
+  menuItemsById,
   open,
   updatingItemId,
   isClearingCart,
@@ -1881,6 +2121,8 @@ function CartSummaryBar({
   isCheckingOut,
   onOpenChange,
   onQuantityChange,
+  onOptionQuantityChange,
+  onModifyItem,
   onRemoveItem,
   onClearCart,
   onOrderNoteSave,
@@ -1888,6 +2130,7 @@ function CartSummaryBar({
 }: {
   cart: Cart
   currencyFormatter: Intl.NumberFormat
+  menuItemsById: Map<string, PublicMenuItem>
   open: boolean
   updatingItemId: string | null
   isClearingCart: boolean
@@ -1895,6 +2138,13 @@ function CartSummaryBar({
   isCheckingOut: boolean
   onOpenChange: (open: boolean) => void
   onQuantityChange: (item: CartItem, nextQuantity: number) => Promise<void> | void
+  onOptionQuantityChange: (
+    item: CartItem,
+    group: PublicMenuOptionGroup,
+    option: PublicMenuOption,
+    nextQuantity: number,
+  ) => Promise<void> | void
+  onModifyItem: (item: CartItem) => void
   onRemoveItem: (item: CartItem) => Promise<void> | void
   onClearCart: () => Promise<void> | void
   onOrderNoteSave: (note: string) => Promise<void> | void
@@ -1915,16 +2165,18 @@ function CartSummaryBar({
   }
 
   return (
-    <div className="fixed inset-x-0 bottom-0 z-20 border-t bg-background/95 p-3 backdrop-blur">
+    <div className="fixed inset-x-0 bottom-0 z-20 border-t bg-background/85 p-3 shadow-[0_-18px_45px_rgba(0,0,0,0.08)] backdrop-blur-xl">
       <div className="mx-auto flex max-w-6xl flex-col gap-3">
         {open ? (
-          <Card className="overflow-hidden rounded-lg shadow-lg">
+          <Card className="overflow-hidden rounded-3xl border shadow-2xl shadow-black/10">
             <CardContent className="p-0">
-              <div className="flex items-start justify-between gap-3 border-b p-4">
+              <div className="flex items-start justify-between gap-3 border-b bg-muted/20 p-4">
                 <div className="min-w-0 flex-1">
                   <div className="min-w-0 space-y-1">
-                    <h2 className="flex items-center gap-2 text-lg font-semibold">
-                      <ShoppingBag className="size-5" />
+                    <h2 className="font-heading flex items-center gap-2 text-xl font-semibold tracking-tight">
+                      <span className="flex size-9 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                        <ShoppingBag className="size-5" />
+                      </span>
                       Cart
                     </h2>
                     <p className="text-sm text-muted-foreground">
@@ -1990,17 +2242,20 @@ function CartSummaryBar({
                 </div>
               </div>
 
-              <div className="max-h-[52svh] overflow-y-auto p-4">
+              <div className="max-h-[52svh] overflow-y-auto bg-background/80 p-4">
                 {hasItems ? (
                   <div className="space-y-3">
                     {cart.items.map((item) => (
                       <CartSummaryLine
                         key={item.id}
                         item={item}
+                        menuItem={menuItemsById.get(item.menuItemId) ?? null}
                         currencyFormatter={currencyFormatter}
                         isReadOnly={isReadOnly}
                         isUpdating={updatingItemId === item.id}
                         onQuantityChange={onQuantityChange}
+                        onOptionQuantityChange={onOptionQuantityChange}
+                        onModifyItem={onModifyItem}
                         onRemoveItem={onRemoveItem}
                       />
                     ))}
@@ -2018,7 +2273,7 @@ function CartSummaryBar({
                 )}
               </div>
 
-              <div className="space-y-3 border-t p-4">
+              <div className="space-y-3 border-t bg-card p-4">
                 <CartOrderNoteEditor
                   note={cart.customerNote ?? ''}
                   isReadOnly={isReadOnly}
@@ -2027,11 +2282,9 @@ function CartSummaryBar({
                   onDirtyChange={setOrderNoteHasUnsavedChanges}
                 />
 
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm text-muted-foreground">Total</span>
-                  <span className="text-xl font-semibold">
-                    {currencyFormatter.format(cart.total)}
-                  </span>
+                <div className="flex items-center justify-between gap-3 rounded-2xl bg-muted/35 px-4 py-3">
+                  <span className="text-sm font-semibold text-muted-foreground">Total</span>
+                  <PriceText value={cart.total} currencyFormatter={currencyFormatter} variant="total" />
                 </div>
 
                 {isReadOnly ? (
@@ -2042,7 +2295,7 @@ function CartSummaryBar({
 
                 <Button
                   type="button"
-                  className="h-11 w-full rounded-lg"
+                  className="h-12 w-full rounded-xl text-base shadow-sm"
                   disabled={!hasItems || isReadOnly || isCheckingOut || isClearingCart || isSavingNote}
                   onClick={requestCheckout}
                 >
@@ -2079,21 +2332,21 @@ function CartSummaryBar({
 
         <Button
           type="button"
-          className="min-h-14 flex-1 justify-between rounded-xl px-5 py-3 text-base"
+          className="min-h-14 flex-1 justify-between rounded-2xl px-5 py-3 text-base shadow-lg shadow-black/10"
           onClick={() => onOpenChange(!open)}
         >
           <span className="flex items-center gap-3">
             <span className="flex size-8 items-center justify-center rounded-md border border-primary-foreground/25 bg-primary-foreground/10">
               <ShoppingBag className="size-5" />
             </span>
-            Cart
+            <span className="font-heading text-lg font-semibold">Cart</span>
             {open ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />}
           </span>
           <span className="flex items-center gap-4">
             <Badge variant="secondary" className="h-7 min-w-7 justify-center rounded-full bg-primary-foreground px-2 text-primary">
               {cart.itemCount}
             </Badge>
-            <span className="font-semibold">{currencyFormatter.format(cart.total)}</span>
+            <PriceText value={cart.total} currencyFormatter={currencyFormatter} variant="bar" />
           </span>
         </Button>
       </div>
@@ -2352,58 +2605,192 @@ function CartViewerButton({ viewer, onLogout }: { viewer: CartViewer; onLogout: 
 
 function CartSummaryLine({
   item,
+  menuItem,
   currencyFormatter,
   isReadOnly,
   isUpdating,
   onQuantityChange,
+  onOptionQuantityChange,
+  onModifyItem,
   onRemoveItem,
 }: {
   item: CartItem
+  menuItem: PublicMenuItem | null
   currencyFormatter: Intl.NumberFormat
   isReadOnly: boolean
   isUpdating: boolean
   onQuantityChange: (item: CartItem, nextQuantity: number) => Promise<void> | void
+  onOptionQuantityChange: (
+    item: CartItem,
+    group: PublicMenuOptionGroup,
+    option: PublicMenuOption,
+    nextQuantity: number,
+  ) => Promise<void> | void
+  onModifyItem: (item: CartItem) => void
   onRemoveItem: (item: CartItem) => Promise<void> | void
 }) {
   const itemUnavailable = !item.isAvailable || item.isSoldOut
+  const unavailableLabel = getMenuItemUnavailableLabel(item)
+  const imageUrl = resolvePublicAssetUrl(item.imageUrl)
+  const basePrice = getCartItemBasePrice(item)
 
   return (
-    <div className="rounded-lg border bg-background p-3">
-      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-3">
+    <div className="rounded-2xl border bg-card p-3 shadow-sm">
+      <div className="grid min-w-0 grid-cols-[56px_minmax(0,1fr)_auto] gap-3">
+        <div className="relative size-14 overflow-hidden rounded-xl border bg-muted">
+          {imageUrl ? (
+            <img
+              src={imageUrl}
+              alt=""
+              className={cn('size-full object-contain p-1.5', itemUnavailable && 'grayscale')}
+            />
+          ) : (
+            <div className="flex size-full items-center justify-center">
+              <Store className="size-5 text-muted-foreground" />
+            </div>
+          )}
+        </div>
         <div className="min-w-0 space-y-1">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <p className="min-w-0 font-semibold leading-tight">
               <span className="line-clamp-2 break-words">{item.name}</span>
             </p>
-            {itemUnavailable ? (
-              <Badge variant="destructive" className="shrink-0">
-                Unavailable
+            {unavailableLabel ? (
+              <Badge
+                variant="outline"
+                className={cn(
+                  'shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold',
+                  item.isSoldOut
+                    ? 'border-amber-200 bg-amber-50 text-amber-900 shadow-sm shadow-amber-900/5 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-100'
+                    : 'border-muted-foreground/20 bg-muted/70 text-muted-foreground',
+                )}
+              >
+                {unavailableLabel}
               </Badge>
             ) : null}
           </div>
-          <p className="text-sm text-muted-foreground">
-            {item.quantity} x {currencyFormatter.format(item.unitPrice)}
+          <p className="text-sm font-medium text-muted-foreground">
+            {item.quantity} x {currencyFormatter.format(basePrice)}
           </p>
           {item.selectedOptions.length > 0 ? (
-            <div className="space-y-1 rounded-md bg-muted/35 px-2 py-1.5 text-sm text-muted-foreground">
-              {item.selectedOptions.map((option) => (
-                <div
-                  key={`${option.menuItemOptionId ?? `${option.groupNameSnapshot}:${option.optionNameSnapshot}`}×${option.quantity ?? 1}`}
-                  className="flex items-center justify-between gap-2"
-                >
-                  <span className="min-w-0 truncate">
-                    {option.groupNameSnapshot}: {option.optionNameSnapshot}
-                    {(option.quantity ?? 1) > 1 ? ` ×${option.quantity ?? 1}` : ''}
-                  </span>
-                  <span className="shrink-0">
-                    {option.priceAdjustmentSnapshot === 0
-                      ? 'Included'
-                      : option.priceAdjustmentSnapshot * (option.quantity ?? 1) > 0
-                        ? `+${currencyFormatter.format(option.priceAdjustmentSnapshot * (option.quantity ?? 1))}`
-                        : currencyFormatter.format(option.priceAdjustmentSnapshot * (option.quantity ?? 1))}
-                  </span>
-                </div>
-              ))}
+            <div className="mt-2 rounded-2xl border border-border/70 bg-muted/20 px-2.5 py-2">
+              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                Selected options
+              </p>
+              <div className="grid gap-1.5">
+                {item.selectedOptions.map((cartOption) => {
+                  const optionDefinition = findPublicMenuOption(menuItem, cartOption.menuItemOptionId)
+                  const selectedOptionIds = getCartItemSelectedOptionIds(item)
+                  const selectedInGroup = optionDefinition
+                    ? getSelectedCountInGroup(selectedOptionIds, optionDefinition.group)
+                    : 0
+                  const optionQuantity = cartOption.quantity ?? 1
+                  const canRemoveOption = Boolean(
+                    optionDefinition &&
+                    !isReadOnly &&
+                    !isUpdating &&
+                    selectedInGroup - optionQuantity >= optionDefinition.group.minSelections,
+                  )
+                  const canAdjustQuantity = Boolean(
+                    optionDefinition &&
+                    optionDefinition.option.maxQuantity > 1 &&
+                    !isReadOnly &&
+                    !isUpdating,
+                  )
+                  const canDecreaseOption = canAdjustQuantity && (optionQuantity > 1 || canRemoveOption)
+                  const canIncreaseOption = Boolean(
+                    optionDefinition &&
+                    canAdjustQuantity &&
+                    optionQuantity < optionDefinition.option.maxQuantity &&
+                    selectedInGroup < optionDefinition.group.maxSelections,
+                  )
+
+                  return (
+                    <div
+                      key={`${cartOption.menuItemOptionId ?? `${cartOption.groupNameSnapshot}:${cartOption.optionNameSnapshot}`}x${optionQuantity}`}
+                      className="rounded-2xl border bg-background px-2.5 py-2 text-xs shadow-sm"
+                    >
+                      <div className="flex min-w-0 items-center justify-between gap-2">
+                        <span className="min-w-0 truncate font-semibold text-foreground">
+                          {cartOption.optionNameSnapshot}
+                        </span>
+                        {canAdjustQuantity ? (
+                          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border bg-muted/30 p-0.5">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="size-6"
+                              disabled={!canDecreaseOption}
+                              aria-label={`Decrease ${cartOption.optionNameSnapshot}`}
+                              onClick={() => optionDefinition && onOptionQuantityChange(
+                                item,
+                                optionDefinition.group,
+                                optionDefinition.option,
+                                optionQuantity - 1,
+                              )}
+                            >
+                              <Minus className="size-3" />
+                            </Button>
+                            <span className="min-w-5 text-center text-xs font-semibold text-foreground">
+                              {optionQuantity}
+                            </span>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="size-6"
+                              disabled={!canIncreaseOption}
+                              aria-label={`Increase ${cartOption.optionNameSnapshot}`}
+                              onClick={() => optionDefinition && onOptionQuantityChange(
+                                item,
+                                optionDefinition.group,
+                                optionDefinition.option,
+                                optionQuantity + 1,
+                              )}
+                            >
+                              <Plus className="size-3" />
+                            </Button>
+                          </span>
+                        ) : optionQuantity > 1 ? (
+                          <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary">
+                            x{optionQuantity}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                        <span
+                          className={cn(
+                            'shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold',
+                            cartOption.priceAdjustmentSnapshot === 0
+                              ? 'bg-muted text-muted-foreground'
+                              : 'bg-amber-50 text-amber-900 ring-1 ring-amber-200/80 dark:bg-amber-400/10 dark:text-amber-100 dark:ring-amber-400/25',
+                          )}
+                        >
+                          {formatCartOptionPriceAdjustment(cartOption, currencyFormatter)}
+                        </span>
+                        {canRemoveOption && optionDefinition ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 rounded-full px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            disabled={isUpdating}
+                            onClick={() => onOptionQuantityChange(
+                              item,
+                              optionDefinition.group,
+                              optionDefinition.option,
+                              0,
+                            )}
+                          >
+                            Remove option
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
           ) : null}
           {item.note ? (
@@ -2413,13 +2800,11 @@ function CartSummaryLine({
           ) : null}
         </div>
 
-        <p className="shrink-0 text-right font-semibold">
-          {currencyFormatter.format(item.lineTotal)}
-        </p>
+        <PriceText value={item.lineTotal} currencyFormatter={currencyFormatter} variant="cart" />
       </div>
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-1 rounded-md border bg-muted/20 p-1">
+        <div className="flex items-center gap-1 rounded-full border bg-muted/20 p-1">
           <Button
             type="button"
             variant="ghost"
@@ -2445,17 +2830,31 @@ function CartSummaryLine({
           </Button>
         </div>
 
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-9 text-destructive hover:text-destructive"
-          disabled={isReadOnly || isUpdating}
-          onClick={() => void onRemoveItem(item)}
-        >
-          {isUpdating ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-          Remove
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-9 rounded-full"
+            disabled={isReadOnly || isUpdating || !menuItem}
+            onClick={() => onModifyItem(item)}
+          >
+            <Pencil className="size-4" />
+            Modify
+          </Button>
+
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-9 rounded-full text-destructive hover:bg-destructive/10 hover:text-destructive"
+            disabled={isReadOnly || isUpdating}
+            onClick={() => void onRemoveItem(item)}
+          >
+            {isUpdating ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+            Remove
+          </Button>
+        </div>
       </div>
     </div>
   )
@@ -2581,11 +2980,167 @@ function NoResultsState({ onReset }: { onReset: () => void }) {
   )
 }
 
+type MenuAvailabilityState = {
+  isAvailable: boolean
+  isSoldOut: boolean
+}
+
+function getMenuItemUnavailableLabel(item: MenuAvailabilityState) {
+  if (item.isSoldOut) {
+    return 'Sold out'
+  }
+
+  if (!item.isAvailable) {
+    return 'Unavailable'
+  }
+
+  return null
+}
+
+function SoldOutImageBadge({ className, compact = false }: { className?: string; compact?: boolean }) {
+  return (
+    <div
+      className={cn(
+        'pointer-events-none flex items-center justify-center gap-1.5 rounded-full border border-amber-200/80 bg-amber-50/95 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-amber-950 shadow-lg shadow-amber-950/10 backdrop-blur',
+        'dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-100',
+        compact && 'w-fit px-2.5 py-1 text-[10px] leading-none tracking-[0.14em] shadow-md',
+        className,
+      )}
+    >
+      <span className={cn('rounded-full bg-amber-500 shadow-[0_0_0_3px_rgba(245,158,11,0.18)]', compact ? 'size-1' : 'size-1.5')} />
+      Sold out
+    </div>
+  )
+}
+
+function MenuAvailabilityPill({ item }: { item: MenuAvailabilityState }) {
+  const unavailableLabel = getMenuItemUnavailableLabel(item)
+
+  if (!unavailableLabel) {
+    return (
+      <Badge
+        variant="outline"
+        className="rounded-full border-emerald-200 bg-emerald-50 px-3 py-1 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-400/10 dark:text-emerald-100"
+      >
+        Available
+      </Badge>
+    )
+  }
+
+  if (item.isSoldOut) {
+    return (
+      <Badge
+        variant="outline"
+        className="rounded-full border-amber-200 bg-amber-50 px-3 py-1 font-semibold text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-100"
+      >
+        <MinusCircle className="size-3.5" />
+        {unavailableLabel}
+      </Badge>
+    )
+  }
+
+  return (
+    <Badge variant="secondary" className="rounded-full px-3 py-1">
+      {unavailableLabel}
+    </Badge>
+  )
+}
+
+function getCartItemBasePrice(item: CartItem) {
+  if (Number.isFinite(item.basePrice)) {
+    return item.basePrice
+  }
+
+  const optionAdjustmentTotal = item.selectedOptions.reduce((total, option) => {
+    return total + option.priceAdjustmentSnapshot * (option.quantity ?? 1)
+  }, 0)
+
+  return Math.max(0, item.unitPrice - optionAdjustmentTotal)
+}
+
+function formatCartOptionPriceAdjustment(
+  option: CartItem['selectedOptions'][number],
+  currencyFormatter: Intl.NumberFormat,
+) {
+  const amount = option.priceAdjustmentSnapshot * (option.quantity ?? 1)
+
+  if (amount === 0) {
+    return 'Included'
+  }
+
+  return amount > 0
+    ? `+${currencyFormatter.format(amount)}`
+    : currencyFormatter.format(amount)
+}
+
+type PriceTextVariant = 'menu' | 'cart' | 'detail' | 'total' | 'bar'
+
+function PriceText({
+  value,
+  currencyFormatter,
+  variant = 'menu',
+  className,
+}: {
+  value: number
+  currencyFormatter: Intl.NumberFormat
+  variant?: PriceTextVariant
+  className?: string
+}) {
+  const parts = currencyFormatter.formatToParts(value)
+
+  return (
+    <span
+      className={cn(
+        'inline-flex shrink-0 items-baseline justify-end whitespace-nowrap tabular-nums text-amber-950 dark:text-amber-100',
+        variant === 'menu' &&
+          'rounded-full bg-amber-50 px-2.5 py-1 text-sm font-semibold leading-none shadow-sm ring-1 ring-amber-200/80 dark:bg-amber-400/10 dark:ring-amber-400/25',
+        variant === 'cart' &&
+          'self-start justify-self-end rounded-full bg-amber-50 px-3 py-1.5 text-sm font-semibold leading-none shadow-sm ring-1 ring-amber-200/80 dark:bg-amber-400/10 dark:ring-amber-400/25',
+        variant === 'detail' &&
+          'font-heading text-3xl font-semibold leading-none tracking-tight text-foreground',
+        variant === 'total' &&
+          'font-heading text-3xl font-semibold leading-none tracking-tight text-foreground',
+        variant === 'bar' &&
+          'text-base font-semibold leading-none text-primary-foreground',
+        className,
+      )}
+    >
+      {parts.map((part, index) => (
+        <span
+          key={`${part.type}-${index}`}
+          className={cn(
+            part.type === 'currency' &&
+              cn(
+                'mr-0.5 text-[0.7em] font-semibold',
+                variant === 'bar' ? 'text-primary-foreground/75' : 'text-amber-700 dark:text-amber-200/80',
+              ),
+            part.type === 'decimal' &&
+              cn('mx-px text-[0.85em]', variant === 'bar' ? 'text-primary-foreground/75' : 'text-amber-700 dark:text-amber-200/80'),
+            part.type === 'fraction' && 'text-[0.82em]',
+          )}
+        >
+          {part.value}
+        </span>
+      ))}
+    </span>
+  )
+}
+
 function createCurrencyFormatter(currency: string) {
   return new Intl.NumberFormat(undefined, {
     style: 'currency',
     currency: currency || 'AUD',
   })
+}
+
+function resolveRestaurantHeroImageUrl(imageUrl: string | null) {
+  const resolvedImageUrl = resolvePublicAssetUrl(imageUrl)
+
+  if (!resolvedImageUrl || /\/seed-menu\/[^/?]+\.svg(?:$|\?)/i.test(resolvedImageUrl)) {
+    return defaultRestaurantHeroImageUrl
+  }
+
+  return resolvedImageUrl
 }
 
 function getInitials(value?: string | null) {

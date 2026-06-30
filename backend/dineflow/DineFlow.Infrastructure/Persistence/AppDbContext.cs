@@ -5,6 +5,7 @@ using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Restaurant;
 using RestaurantEntity = DineFlow.Infrastructure.Restaurant.Restaurant;
 using DineFlow.Infrastructure.Payments;
+using DineFlow.Infrastructure.Reporting;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 
@@ -27,8 +28,27 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<RestaurantEntity> Restaurants => Set<RestaurantEntity>();
 
     public DbSet<Payment> Payments => Set<Payment>();
+    public DbSet<PaymentRefund> PaymentRefunds => Set<PaymentRefund>();
+    public DbSet<PaymentRefundRequest> PaymentRefundRequests => Set<PaymentRefundRequest>();
+    public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
+    public DbSet<OrderEventLog> OrderEventLogs => Set<OrderEventLog>();
+    public DbSet<PaymentEventLog> PaymentEventLogs => Set<PaymentEventLog>();
     public DbSet<UserPasskey> UserPasskeys => Set<UserPasskey>();
     public DbSet<UserMfaSettings> UserMfaSettings => Set<UserMfaSettings>();
+
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        EnsureReportLogsAreAppendOnly();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(
+        bool acceptAllChangesOnSuccess,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureReportLogsAreAppendOnly();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -63,6 +83,17 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .WithOne()
                 .HasForeignKey<UserMfaSettings>(settings => settings.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<RestaurantEntity>(entity =>
+        {
+            entity.Property(restaurant => restaurant.ImageUrl)
+                .HasMaxLength(2048);
+
+            entity.Property(restaurant => restaurant.CountryCode)
+                .HasMaxLength(2)
+                .HasDefaultValue("AU")
+                .IsRequired();
         });
 
               builder.Entity<RestaurantTable>(entity =>
@@ -335,7 +366,128 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(payment => payment.OrderId);
             entity.HasIndex(payment => payment.ProviderCheckoutSessionId);
             entity.HasIndex(payment => payment.ProviderPaymentIntentId);
+            entity.HasMany(payment => payment.Refunds)
+                .WithOne(refund => refund.Payment)
+                .HasForeignKey(refund => refund.PaymentId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasMany(payment => payment.RefundRequests)
+                .WithOne(request => request.Payment)
+                .HasForeignKey(request => request.PaymentId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
+        builder.Entity<PaymentRefund>(entity =>
+        {
+            entity.HasKey(refund => refund.Id);
+            entity.Property(refund => refund.Provider).HasMaxLength(64).IsRequired();
+            entity.Property(refund => refund.ProviderRefundId).HasMaxLength(255);
+            entity.Property(refund => refund.ProviderPaymentIntentId).HasMaxLength(255);
+            entity.Property(refund => refund.Currency).HasMaxLength(8).IsRequired();
+            entity.Property(refund => refund.Reason).HasMaxLength(1_000);
+            entity.Property(refund => refund.FailureReason).HasMaxLength(1_000);
+            entity.Property(refund => refund.RequestedByUserId).HasMaxLength(450);
+            entity.HasIndex(refund => refund.PaymentId);
+            entity.HasIndex(refund => refund.OrderId);
+            entity.HasIndex(refund => refund.ProviderRefundId);
+            entity.HasIndex(refund => refund.ProviderPaymentIntentId);
+            entity.ToTable(table => table.HasCheckConstraint(
+                "CK_PaymentRefunds_AmountCents",
+                "\"AmountCents\" > 0"));
+        });
+
+        builder.Entity<PaymentRefundRequest>(entity =>
+        {
+            entity.HasKey(request => request.Id);
+            entity.Property(request => request.Currency).HasMaxLength(8).IsRequired();
+            entity.Property(request => request.Reason).HasMaxLength(1_000);
+            entity.Property(request => request.AdminNote).HasMaxLength(1_000);
+            entity.Property(request => request.RequestedByUserId).HasMaxLength(450);
+            entity.Property(request => request.RequesterName).HasMaxLength(200);
+            entity.Property(request => request.RequesterEmail).HasMaxLength(256);
+            entity.Property(request => request.ReviewedByUserId).HasMaxLength(450);
+            entity.HasIndex(request => request.OrderId);
+            entity.HasIndex(request => request.PaymentId);
+            entity.HasIndex(request => request.PaymentRefundId);
+            entity.HasIndex(request => request.RestaurantId);
+            entity.HasIndex(request => request.Status);
+            entity.HasOne(request => request.Order)
+                .WithMany(order => order.RefundRequests)
+                .HasForeignKey(request => request.OrderId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(request => request.PaymentRefund)
+                .WithMany()
+                .HasForeignKey(request => request.PaymentRefundId)
+                .OnDelete(DeleteBehavior.SetNull);
+            entity.ToTable(table => table.HasCheckConstraint(
+                "CK_PaymentRefundRequests_RequestedAmountCents",
+                "\"RequestedAmountCents\" > 0"));
+        });
+
+        builder.Entity<AuditLog>(entity =>
+        {
+            entity.HasKey(log => log.Id);
+            entity.Property(log => log.ActorUserId).HasMaxLength(450);
+            entity.Property(log => log.ActorEmail).HasMaxLength(256);
+            entity.Property(log => log.ActorRoles).HasMaxLength(300);
+            entity.Property(log => log.Action).HasMaxLength(120).IsRequired();
+            entity.Property(log => log.EntityType).HasMaxLength(80).IsRequired();
+            entity.Property(log => log.EntityId).HasMaxLength(120);
+            entity.Property(log => log.Summary).HasMaxLength(700);
+            entity.Property(log => log.IpAddress).HasMaxLength(64);
+            entity.Property(log => log.UserAgent).HasMaxLength(512);
+            entity.HasIndex(log => new { log.RestaurantId, log.CreatedAt });
+            entity.HasIndex(log => log.ActorUserId);
+            entity.HasIndex(log => log.Action);
+            entity.HasIndex(log => new { log.EntityType, log.EntityId });
+        });
+
+        builder.Entity<OrderEventLog>(entity =>
+        {
+            entity.HasKey(log => log.Id);
+            entity.Property(log => log.OrderNumber).HasMaxLength(80).IsRequired();
+            entity.Property(log => log.ActorUserId).HasMaxLength(450);
+            entity.Property(log => log.ActorDisplayName).HasMaxLength(256);
+            entity.Property(log => log.ActorRoles).HasMaxLength(300);
+            entity.Property(log => log.EventType).HasMaxLength(120).IsRequired();
+            entity.Property(log => log.Message).HasMaxLength(700).IsRequired();
+            entity.HasIndex(log => new { log.RestaurantId, log.CreatedAt });
+            entity.HasIndex(log => new { log.OrderId, log.CreatedAt });
+            entity.HasIndex(log => log.EventType);
+        });
+
+        builder.Entity<PaymentEventLog>(entity =>
+        {
+            entity.HasKey(log => log.Id);
+            entity.Property(log => log.OrderNumber).HasMaxLength(80);
+            entity.Property(log => log.Provider).HasMaxLength(64).IsRequired();
+            entity.Property(log => log.EventType).HasMaxLength(120).IsRequired();
+            entity.Property(log => log.ProviderEventId).HasMaxLength(255);
+            entity.Property(log => log.Status).HasMaxLength(80);
+            entity.Property(log => log.Message).HasMaxLength(700).IsRequired();
+            entity.Property(log => log.ActorUserId).HasMaxLength(450);
+            entity.Property(log => log.ActorDisplayName).HasMaxLength(256);
+            entity.Property(log => log.ActorRoles).HasMaxLength(300);
+            entity.HasIndex(log => new { log.RestaurantId, log.CreatedAt });
+            entity.HasIndex(log => new { log.OrderId, log.CreatedAt });
+            entity.HasIndex(log => new { log.PaymentId, log.CreatedAt });
+            entity.HasIndex(log => log.PaymentRefundId);
+            entity.HasIndex(log => log.EventType);
+            entity.HasIndex(log => log.ProviderEventId);
+        });
+
+    }
+
+    private void EnsureReportLogsAreAppendOnly()
+    {
+        var invalidEntry = ChangeTracker
+            .Entries()
+            .FirstOrDefault(entry =>
+                entry.Entity is AuditLog or OrderEventLog or PaymentEventLog &&
+                entry.State is EntityState.Modified or EntityState.Deleted);
+
+        if (invalidEntry is not null)
+        {
+            throw new InvalidOperationException("Report log entries are immutable and cannot be updated or deleted.");
+        }
     }
 }
