@@ -2,6 +2,7 @@ using System.Security.Claims;
 using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Common;
 using DineFlow.Api.Contracts.Order;
+using DineFlow.Api.Contracts.Payments;
 using DineFlow.Api.Extensions;
 using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
@@ -32,15 +33,21 @@ public class AdminOrdersController : ControllerBase
     private readonly AppDbContext _dbContext;
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
+    private readonly OrderRefundProcessor _orderRefundProcessor;
+    private readonly ReportLogWriter _reportLogWriter;
 
     public AdminOrdersController(
         AppDbContext dbContext,
         UserManager<ApplicationUser> userManager,
-        OrderRealtimeNotifier orderRealtimeNotifier)
+        OrderRealtimeNotifier orderRealtimeNotifier,
+        OrderRefundProcessor orderRefundProcessor,
+        ReportLogWriter reportLogWriter)
     {
         _dbContext = dbContext;
         _userManager = userManager;
         _orderRealtimeNotifier = orderRealtimeNotifier;
+        _orderRefundProcessor = orderRefundProcessor;
+        _reportLogWriter = reportLogWriter;
     }
 
     [HttpGet]
@@ -63,6 +70,7 @@ public class AdminOrdersController : ControllerBase
             .Include(order => order.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
             .Include(order => order.Payments)
+                .ThenInclude(payment => payment.Refunds)
             .Include(order => order.Customer)
             .Include(order => order.Restaurant)
             .Include(order => order.Table)
@@ -212,6 +220,7 @@ public class AdminOrdersController : ControllerBase
             .Include(item => item.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
             .Include(item => item.Payments)
+                .ThenInclude(payment => payment.Refunds)
             .Include(item => item.Customer)
             .Include(item => item.Restaurant)
             .Include(item => item.Table)
@@ -243,6 +252,7 @@ public class AdminOrdersController : ControllerBase
         }
 
         var now = DateTime.UtcNow;
+        var previousPaymentStatus = order.PaymentStatus;
         order.PaymentStatus = PaymentStatus.Paid;
         order.UpdatedAt = now;
         var counterPayment = new Payment
@@ -262,9 +272,110 @@ public class AdminOrdersController : ControllerBase
             RecordedByUserId = User.FindFirstValue(ClaimTypes.NameIdentifier)
         };
         _dbContext.Payments.Add(counterPayment);
+        _reportLogWriter.AddAudit(
+            "Payment.CounterRecorded",
+            "Order",
+            order.Id.ToString(),
+            order.RestaurantId,
+            $"Counter payment recorded for {order.OrderNumber}.",
+            before: new
+            {
+                paymentStatus = previousPaymentStatus.ToString()
+            },
+            after: new
+            {
+                paymentStatus = order.PaymentStatus.ToString(),
+                paymentId = counterPayment.Id,
+                counterPayment.AmountCents,
+                counterPayment.Currency
+            });
+        _reportLogWriter.AddOrderEvent(
+            order,
+            "payment.counter_recorded",
+            $"Counter payment recorded for {order.OrderNumber}.",
+            new
+            {
+                paymentId = counterPayment.Id,
+                counterPayment.AmountCents,
+                counterPayment.Currency
+            });
+        _reportLogWriter.AddPaymentEvent(
+            order,
+            counterPayment,
+            null,
+            "counter.recorded",
+            null,
+            counterPayment.Status.ToString(),
+            "Counter payment recorded.",
+            new
+            {
+                counterPayment.AmountCents,
+                counterPayment.Currency
+            },
+            PaymentProviders.Counter);
 
         await _dbContext.SaveChangesAsync(cancellationToken);
         await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
+        return Ok(MapToAdminResponse(order));
+    }
+
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    [HttpPost("{orderId:guid}/refund")]
+    public async Task<ActionResult<AdminOrderResponse>> RefundOrder(
+        Guid orderId,
+        RefundOrderRequest? request,
+        CancellationToken cancellationToken)
+    {
+        var reason = string.IsNullOrWhiteSpace(request?.Reason) ? null : request.Reason.Trim();
+        if (reason?.Length > 1_000)
+        {
+            return BadRequest(new { message = "Reason cannot exceed 1000 characters." });
+        }
+
+        var currentRestaurantId = await GetCurrentRestaurantIdAsync();
+        if (!User.IsInRole(ApplicationRoles.PlatformOwner) && currentRestaurantId is null)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                message = "Current user is not assigned to a restaurant."
+            });
+        }
+
+        var order = await _dbContext.Orders
+            .Include(item => item.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
+            .Include(item => item.Payments)
+                .ThenInclude(payment => payment.Refunds)
+            .Include(item => item.Customer)
+            .Include(item => item.Restaurant)
+            .Include(item => item.Table)
+            .FirstOrDefaultAsync(item => item.Id == orderId, cancellationToken);
+
+        if (order is null)
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
+        if (!User.IsInRole(ApplicationRoles.PlatformOwner) && order.RestaurantId != currentRestaurantId)
+        {
+            return Forbid();
+        }
+
+        var result = await _orderRefundProcessor.RefundAsync(
+            order,
+            User.FindFirstValue(ClaimTypes.NameIdentifier),
+            reason,
+            "admin-direct",
+            cancellationToken);
+        if (!result.IsSuccess)
+        {
+            return StatusCode(result.StatusCode, new
+            {
+                message = result.Message,
+                detail = result.Detail
+            });
+        }
+
         return Ok(MapToAdminResponse(order));
     }
 
@@ -306,6 +417,7 @@ public class AdminOrdersController : ControllerBase
             .Include(item => item.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
             .Include(item => item.Payments)
+                .ThenInclude(payment => payment.Refunds)
             .Include(item => item.Customer)
             .Include(item => item.Restaurant)
             .Include(item => item.Table)
@@ -357,6 +469,33 @@ public class AdminOrdersController : ControllerBase
             CreatedAt = now
         };
         _dbContext.OrderStatusHistories.Add(statusHistory);
+        _reportLogWriter.AddAudit(
+            "Order.StatusChanged",
+            "Order",
+            order.Id.ToString(),
+            order.RestaurantId,
+            $"{order.OrderNumber}: {previousStatus} -> {nextStatus}.",
+            before: new
+            {
+                status = previousStatus.ToString()
+            },
+            after: new
+            {
+                status = nextStatus.ToString(),
+                action = action.ToString(),
+                reason
+            });
+        _reportLogWriter.AddOrderEvent(
+            order,
+            "order.status_changed",
+            $"{order.OrderNumber}: {previousStatus} -> {nextStatus}.",
+            new
+            {
+                previousStatus = previousStatus.ToString(),
+                nextStatus = nextStatus.ToString(),
+                action = action.ToString(),
+                reason
+            });
 
         await _dbContext.SaveChangesAsync(cancellationToken);
         await _orderRealtimeNotifier.OrderUpdatedAsync(order, cancellationToken);
@@ -468,12 +607,74 @@ public class AdminOrdersController : ControllerBase
         return currentUser?.RestaurantId;
     }
 
+    private static Dictionary<string, string> BuildRefundMetadata(
+        Infrastructure.Orders.Order order,
+        Payment payment,
+        PaymentRefund refund,
+        string? reason)
+    {
+        var metadata = new Dictionary<string, string>
+        {
+            ["mode"] = "order-refund",
+            ["orderId"] = order.Id.ToString(),
+            ["orderNumber"] = order.OrderNumber,
+            ["paymentId"] = payment.Id.ToString(),
+            ["refundId"] = refund.Id.ToString()
+        };
+
+        if (!string.IsNullOrWhiteSpace(reason))
+        {
+            metadata["reason"] = TrimStripeMetadataValue(reason);
+        }
+
+        return metadata;
+    }
+
+    private static string TrimStripeMetadataValue(string value) =>
+        value.Length <= 500 ? value : value[..500];
+
+    private static PaymentRefundStatus MapStripeRefundStatus(string? status) =>
+        status?.Trim().ToLowerInvariant() switch
+        {
+            "succeeded" => PaymentRefundStatus.Succeeded,
+            "failed" or "canceled" => PaymentRefundStatus.Failed,
+            _ => PaymentRefundStatus.Pending
+        };
+
+    private static long GetSucceededRefundedAmount(Payment payment) =>
+        payment.Refunds
+            .Where(refund => refund.Status == PaymentRefundStatus.Succeeded)
+            .Sum(refund => refund.AmountCents);
+
+    private static AdminPaymentRefundResponse MapToAdminPaymentRefundResponse(PaymentRefund refund) =>
+        new()
+        {
+            Id = refund.Id,
+            Provider = refund.Provider,
+            ProviderRefundId = refund.ProviderRefundId,
+            ProviderPaymentIntentId = refund.ProviderPaymentIntentId,
+            AmountCents = refund.AmountCents,
+            Currency = refund.Currency,
+            Status = refund.Status.ToString(),
+            Reason = refund.Reason,
+            FailureReason = refund.FailureReason,
+            RequestedByUserId = refund.RequestedByUserId,
+            CreatedAt = refund.CreatedAt,
+            UpdatedAt = refund.UpdatedAt,
+            RefundedAt = refund.RefundedAt,
+            FailedAt = refund.FailedAt
+        };
+
     internal static AdminOrderResponse MapToAdminResponse(Infrastructure.Orders.Order order)
     {
         var latestPayment = order.Payments
             .OrderByDescending(payment => payment.CreatedAt)
             .ThenByDescending(payment => payment.Id)
             .FirstOrDefault();
+        var latestRefundedAmountCents = latestPayment is null ? 0 : GetSucceededRefundedAmount(latestPayment);
+        var latestRefundableAmountCents = latestPayment is null
+            ? 0
+            : Math.Max(0, latestPayment.AmountCents - latestRefundedAmountCents);
         var orderedItems = order.OrderItems
             .OrderBy(item => item.CreatedAt)
             .ThenBy(item => item.Id)
@@ -515,6 +716,15 @@ public class AdminOrdersController : ControllerBase
                     ProviderCheckoutSessionId = latestPayment.ProviderCheckoutSessionId,
                     ProviderPaymentIntentId = latestPayment.ProviderPaymentIntentId,
                     FailureReason = latestPayment.FailureReason,
+                    RefundCount = latestPayment.Refunds.Count,
+                    RefundedAmountCents = latestRefundedAmountCents,
+                    RefundableAmountCents = latestRefundableAmountCents,
+                    HasPendingRefund = latestPayment.Refunds.Any(refund => refund.Status == PaymentRefundStatus.Pending),
+                    Refunds = latestPayment.Refunds
+                        .OrderByDescending(refund => refund.CreatedAt)
+                        .ThenByDescending(refund => refund.Id)
+                        .Select(MapToAdminPaymentRefundResponse)
+                        .ToList(),
                     CreatedAt = latestPayment.CreatedAt,
                     UpdatedAt = latestPayment.UpdatedAt,
                     PaidAt = latestPayment.PaidAt,

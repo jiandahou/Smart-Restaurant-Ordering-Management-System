@@ -26,6 +26,7 @@ public sealed class PasskeysController : ControllerBase
     private readonly IPasskeyAssertionOptionsStore _assertionOptionsStore;
     private readonly IPasskeyRegistrationOptionsStore _registrationOptionsStore;
     private readonly UserManager<ApplicationUser> _userManager;
+    private readonly ReportLogWriter _reportLogWriter;
 
     public PasskeysController(
         AppDbContext dbContext,
@@ -34,7 +35,8 @@ public sealed class PasskeysController : ControllerBase
         IMfaEmailSetupCodeStore mfaEmailCodeStore,
         IPasskeyAssertionOptionsStore assertionOptionsStore,
         IPasskeyRegistrationOptionsStore registrationOptionsStore,
-        UserManager<ApplicationUser> userManager)
+        UserManager<ApplicationUser> userManager,
+        ReportLogWriter reportLogWriter)
     {
         _dbContext = dbContext;
         _fido2 = fido2;
@@ -43,6 +45,7 @@ public sealed class PasskeysController : ControllerBase
         _assertionOptionsStore = assertionOptionsStore;
         _registrationOptionsStore = registrationOptionsStore;
         _userManager = userManager;
+        _reportLogWriter = reportLogWriter;
     }
 
     [Authorize]
@@ -257,7 +260,16 @@ public sealed class PasskeysController : ControllerBase
             });
         }
 
+        var beforePasskey = SnapshotPasskey(passkey);
         passkey.DeviceName = NormalizeDeviceName(request.DeviceName);
+        _reportLogWriter.AddAudit(
+            "Auth.PasskeyUpdated",
+            "UserPasskey",
+            passkey.Id.ToString(),
+            user.RestaurantId,
+            $"Passkey updated for {user.Email}.",
+            beforePasskey,
+            SnapshotPasskey(passkey));
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
@@ -305,7 +317,15 @@ public sealed class PasskeysController : ControllerBase
             });
         }
 
+        var deletedPasskey = SnapshotPasskey(passkey);
         _dbContext.UserPasskeys.Remove(passkey);
+        _reportLogWriter.AddAudit(
+            "Auth.PasskeyDeleted",
+            "UserPasskey",
+            passkey.Id.ToString(),
+            user.RestaurantId,
+            $"Passkey deleted for {user.Email}.",
+            deletedPasskey);
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
@@ -373,6 +393,13 @@ public sealed class PasskeysController : ControllerBase
         };
 
         _dbContext.UserPasskeys.Add(passkey);
+        _reportLogWriter.AddAudit(
+            "Auth.PasskeyRegistered",
+            "UserPasskey",
+            passkey.Id.ToString(),
+            user.RestaurantId,
+            $"Passkey registered for {user.Email}.",
+            after: SnapshotPasskey(passkey));
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
@@ -405,6 +432,20 @@ public sealed class PasskeysController : ControllerBase
             user.UserName,
             roles);
 
+        _reportLogWriter.AddAudit(
+            "Auth.PasskeyLoginSucceeded",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            message,
+            after: new
+            {
+                user.Email,
+                user.RestaurantId,
+                Roles = roles.OrderBy(role => role, StringComparer.OrdinalIgnoreCase).ToArray()
+            });
+        await _dbContext.SaveChangesAsync();
+
         return Ok(new
         {
             message,
@@ -420,6 +461,18 @@ public sealed class PasskeysController : ControllerBase
             }
         });
     }
+
+    private static object SnapshotPasskey(UserPasskey passkey) => new
+    {
+        passkey.Id,
+        passkey.UserId,
+        passkey.DeviceName,
+        passkey.CredentialType,
+        passkey.Transports,
+        passkey.IsBackedUp,
+        passkey.CreatedAt,
+        passkey.LastUsedAt
+    };
 
     private async Task<bool> ValidateSensitiveActionAsync(
         string userId,

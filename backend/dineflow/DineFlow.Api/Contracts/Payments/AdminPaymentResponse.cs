@@ -34,6 +34,16 @@ public sealed class AdminPaymentResponse
 
     public string? FailureReason { get; set; }
 
+    public int RefundCount { get; set; }
+
+    public long RefundedAmountCents { get; set; }
+
+    public long RefundableAmountCents { get; set; }
+
+    public bool HasPendingRefund { get; set; }
+
+    public List<AdminPaymentRefundResponse> Refunds { get; set; } = [];
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime? UpdatedAt { get; set; }

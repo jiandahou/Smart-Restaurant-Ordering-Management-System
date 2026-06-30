@@ -19,15 +19,18 @@ public class OrderController : ControllerBase
     private const int MaximumGuestOrderLookupCount = 50;
     private readonly AppDbContext _dbContext;
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
+    private readonly ReportLogWriter _reportLogWriter;
     private readonly ILogger<OrderController> _logger;
 
     public OrderController(
         AppDbContext dbContext,
         OrderRealtimeNotifier orderRealtimeNotifier,
+        ReportLogWriter reportLogWriter,
         ILogger<OrderController> logger)
     {
         _dbContext = dbContext;
         _orderRealtimeNotifier = orderRealtimeNotifier;
+        _reportLogWriter = reportLogWriter;
         _logger = logger;
     }
 
@@ -38,6 +41,7 @@ public class OrderController : ControllerBase
             .AsNoTracking()
             .Include(order => order.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
+            .Include(order => order.RefundRequests)
             .Include(order => order.Restaurant)
             .Include(order => order.Table)
             .ToListAsync(cancellationToken);
@@ -60,6 +64,7 @@ public class OrderController : ControllerBase
             .AsNoTracking()
             .Include(order => order.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
+            .Include(order => order.RefundRequests)
             .Include(order => order.Restaurant)
             .Include(order => order.Table)
             .Where(order => order.CustomerId == currentUserId)
@@ -91,6 +96,7 @@ public class OrderController : ControllerBase
             .AsNoTracking()
             .Include(order => order.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
+            .Include(order => order.RefundRequests)
             .Include(order => order.Restaurant)
             .Include(order => order.Table)
             .Where(order => orderIds.Contains(order.Id))
@@ -108,6 +114,7 @@ public class OrderController : ControllerBase
             .AsNoTracking()
             .Include(item => item.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
+            .Include(item => item.RefundRequests)
             .Include(item => item.Restaurant)
             .Include(item => item.Table)
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
@@ -118,6 +125,151 @@ public class OrderController : ControllerBase
         }
 
         return Ok(MapToResponse(order));
+    }
+
+    [AllowAnonymous]
+    [HttpPost("{id:guid}/refund-requests")]
+    public async Task<ActionResult<CustomerRefundRequestResponse>> CreateRefundRequest(
+        Guid id,
+        [FromBody] CreateRefundRequestRequest? request,
+        CancellationToken cancellationToken)
+    {
+        var reason = TrimOrNull(request?.Reason);
+        if (reason?.Length > 1_000)
+        {
+            return BadRequest(new { message = "Reason cannot exceed 1000 characters." });
+        }
+
+        var requesterName = TrimOrNull(request?.CustomerName);
+        if (requesterName?.Length > 200)
+        {
+            return BadRequest(new { message = "Customer name cannot exceed 200 characters." });
+        }
+
+        var requesterEmail = TrimOrNull(request?.CustomerEmail);
+        if (requesterEmail?.Length > 256)
+        {
+            return BadRequest(new { message = "Customer email cannot exceed 256 characters." });
+        }
+
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        var order = await _dbContext.Orders
+            .Include(item => item.Payments)
+                .ThenInclude(payment => payment.Refunds)
+            .Include(item => item.RefundRequests)
+            .Include(item => item.Customer)
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+
+        if (order is null)
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
+        if (!string.IsNullOrWhiteSpace(order.CustomerId) &&
+            !string.Equals(order.CustomerId, currentUserId, StringComparison.Ordinal))
+        {
+            return Forbid();
+        }
+
+        if (order.PaymentMethod != PaymentMethod.Online)
+        {
+            return Conflict(new { message = "Only online payments can be requested for refund here." });
+        }
+
+        if (order.PaymentStatus is not (PaymentStatus.Paid or PaymentStatus.PartiallyRefunded))
+        {
+            return Conflict(new
+            {
+                message = "Only paid online orders can be requested for refund.",
+                paymentStatus = order.PaymentStatus.ToString()
+            });
+        }
+
+        if (order.RefundRequests.Any(item => item.Status == PaymentRefundRequestStatus.Pending))
+        {
+            return Conflict(new { message = "A refund request is already waiting for review." });
+        }
+
+        var payment = order.Payments
+            .Where(item =>
+                item.Provider == PaymentProviders.Stripe &&
+                item.Status is PaymentStatus.Paid or PaymentStatus.PartiallyRefunded &&
+                !string.IsNullOrWhiteSpace(item.ProviderPaymentIntentId))
+            .OrderByDescending(item => item.PaidAt ?? item.CreatedAt)
+            .ThenByDescending(item => item.Id)
+            .FirstOrDefault();
+
+        if (payment is null)
+        {
+            return Conflict(new { message = "No refundable Stripe payment was found for this order." });
+        }
+
+        if (payment.ProviderPaymentIntentId!.StartsWith("pi_demo_", StringComparison.OrdinalIgnoreCase))
+        {
+            return Conflict(new { message = "Demo payments cannot be requested for live Stripe refund." });
+        }
+
+        if (payment.Refunds.Any(refund => refund.Status == PaymentRefundStatus.Pending))
+        {
+            return Conflict(new { message = "A refund is already pending for this payment." });
+        }
+
+        var refundedAmountCents = GetSucceededRefundedAmount(payment);
+        var refundableAmountCents = payment.AmountCents - refundedAmountCents;
+        if (refundableAmountCents <= 0)
+        {
+            return Conflict(new { message = "This payment has already been fully refunded." });
+        }
+
+        var now = DateTime.UtcNow;
+        var refundRequest = new PaymentRefundRequest
+        {
+            Id = Guid.NewGuid(),
+            OrderId = order.Id,
+            PaymentId = payment.Id,
+            RestaurantId = order.RestaurantId,
+            Status = PaymentRefundRequestStatus.Pending,
+            RequestedAmountCents = refundableAmountCents,
+            Currency = payment.Currency,
+            Reason = reason,
+            RequestedByUserId = currentUserId,
+            RequesterName = requesterName ?? order.Customer?.FullName,
+            RequesterEmail = requesterEmail ?? order.Customer?.Email,
+            CreatedAt = now
+        };
+
+        _dbContext.PaymentRefundRequests.Add(refundRequest);
+        _reportLogWriter.AddAudit(
+            "RefundRequest.Created",
+            "Order",
+            order.Id.ToString(),
+            order.RestaurantId,
+            $"Refund request submitted for {order.OrderNumber}.",
+            after: new
+            {
+                refundRequestId = refundRequest.Id,
+                orderId = order.Id,
+                order.OrderNumber,
+                paymentId = payment.Id,
+                refundRequest.RequestedAmountCents,
+                refundRequest.Currency,
+                reason
+            });
+        _reportLogWriter.AddOrderEvent(
+            order,
+            "refund_request.created",
+            $"Refund request submitted for {order.OrderNumber}.",
+            new
+            {
+                refundRequestId = refundRequest.Id,
+                paymentId = payment.Id,
+                refundRequest.RequestedAmountCents,
+                refundRequest.Currency,
+                reason
+            });
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(MapToCustomerRefundRequestResponse(refundRequest));
     }
 
     [HttpPost]
@@ -183,6 +335,37 @@ public class OrderController : ControllerBase
         }
 
         await _dbContext.Orders.AddAsync(order, cancellationToken);
+        _reportLogWriter.AddAudit(
+            "Order.Created",
+            "Order",
+            order.Id.ToString(),
+            order.RestaurantId,
+            $"Order {order.OrderNumber} created.",
+            after: new
+            {
+                order.Id,
+                order.OrderNumber,
+                order.RestaurantId,
+                order.TableId,
+                order.CustomerId,
+                order.OrderType,
+                order.Status,
+                order.PaymentStatus,
+                order.PaymentMethod,
+                order.TotalAmount
+            });
+        _reportLogWriter.AddOrderEvent(
+            order,
+            "order.created",
+            $"Order {order.OrderNumber} created.",
+            new
+            {
+                order.OrderType,
+                order.Status,
+                order.PaymentStatus,
+                order.PaymentMethod,
+                order.TotalAmount
+            });
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         await _dbContext.Entry(order).Reference(item => item.Restaurant).LoadAsync(cancellationToken);
@@ -499,6 +682,11 @@ public class OrderController : ControllerBase
         ScheduledTime = order.ScheduledTime,
         CreatedAt = order.CreatedAt,
         UpdatedAt = order.UpdatedAt,
+        LatestRefundRequest = order.RefundRequests
+            .OrderByDescending(item => item.CreatedAt)
+            .ThenByDescending(item => item.Id)
+            .Select(MapToCustomerRefundRequestResponse)
+            .FirstOrDefault(),
         OrderItems = order.OrderItems
             .OrderBy(item => item.CreatedAt)
             .ThenBy(item => item.Id)
@@ -533,6 +721,36 @@ public class OrderController : ControllerBase
             })
             .ToList()
     };
+
+    private static CustomerRefundRequestResponse MapToCustomerRefundRequestResponse(PaymentRefundRequest request) =>
+        new()
+        {
+            Id = request.Id,
+            OrderId = request.OrderId,
+            Status = request.Status.ToString(),
+            RequestedAmountCents = request.RequestedAmountCents,
+            Currency = request.Currency,
+            Reason = request.Reason,
+            AdminNote = request.AdminNote,
+            CreatedAt = request.CreatedAt,
+            UpdatedAt = request.UpdatedAt,
+            ReviewedAt = request.ReviewedAt
+        };
+
+    private static long GetSucceededRefundedAmount(Payment payment) =>
+        payment.Refunds
+            .Where(refund => refund.Status == PaymentRefundStatus.Succeeded)
+            .Sum(refund => refund.AmountCents);
+
+    private static string? TrimOrNull(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        return value.Trim();
+    }
 
     private static string GenerateOrderNumber() =>
         $"ORD-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid().ToString("N")[..6].ToUpper()}";

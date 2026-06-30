@@ -22,7 +22,7 @@ export type CheckoutNavigationState = {
 
 type PageState =
   | { status: 'ready' }
-  | { status: 'paying' }
+  | { status: 'paying'; method: 'online' | 'counter' }
   | { status: 'pay_offline' }
   | { status: 'error'; message: string }
 
@@ -52,7 +52,7 @@ export function CheckoutPage() {
   const currencyFormatter = createCurrencyFormatter(currency)
 
   const handlePay = async () => {
-    setPageState({ status: 'paying' })
+    setPageState({ status: 'paying', method: 'online' })
     try {
       const result = await createPublicPaymentSession(cartId, participantToken)
       rememberGuestOrder(result.orderId)
@@ -65,7 +65,7 @@ export function CheckoutPage() {
   }
 
   const handlePayAtCounter = async () => {
-    setPageState({ status: 'paying' })
+    setPageState({ status: 'paying', method: 'counter' })
     try {
       const result = await selectOrderPaymentMethod(cartId, participantToken, 'PayAtCounter')
       rememberGuestOrder(result.order.id)
@@ -83,18 +83,18 @@ export function CheckoutPage() {
 
   if (pageState.status === 'pay_offline') {
     return (
-      <main className="flex min-h-svh flex-col items-center justify-start bg-background px-4 pt-8 pb-16">
-        <div className="w-full max-w-lg space-y-5">
+      <main className="flex min-h-svh flex-col items-center justify-start bg-background px-4 pt-6 pb-12">
+        <div className="w-full max-w-lg space-y-4">
           <CheckoutBackButton onClick={handleBack} />
           <OrderContextHeader restaurantName={restaurantName} tableNumber={displayedTableNumber} isDineIn={isDineIn} />
-          <Card>
-            <CardContent className="flex flex-col items-center gap-4 p-8 text-center">
-              <div className="flex size-14 items-center justify-center rounded-full bg-green-100 text-green-600">
-                <CheckCircle className="size-7" />
+          <Card size="sm">
+            <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
+              <div className="flex size-12 items-center justify-center rounded-full bg-green-100 text-green-600">
+                <CheckCircle className="size-6" />
               </div>
               <div className="space-y-1">
-                <h2 className="text-lg font-semibold">Order placed</h2>
-                <p className="text-sm text-muted-foreground">
+                <h2 className="font-heading text-lg font-semibold">Order placed</h2>
+                <p className="text-sm leading-5 text-muted-foreground">
                   Your order <span className="font-medium text-foreground">{order.orderNumber}</span> has been
                   received. {isDineIn
                     ? 'Enjoy your meal and pay at the counter when you are ready.'
@@ -112,15 +112,17 @@ export function CheckoutPage() {
   }
 
   const isPaying = pageState.status === 'paying'
+  const isOnlinePaying = pageState.status === 'paying' && pageState.method === 'online'
+  const isCounterPaying = pageState.status === 'paying' && pageState.method === 'counter'
 
   return (
-    <main className="flex min-h-svh flex-col items-center justify-start bg-background px-4 pt-8 pb-16">
-      <div className="w-full max-w-lg space-y-5">
+    <main className="flex min-h-svh flex-col items-center justify-start bg-background px-4 pt-6 pb-12">
+      <div className="w-full max-w-lg space-y-4">
         <CheckoutBackButton onClick={handleBack} />
         <OrderContextHeader restaurantName={restaurantName} tableNumber={displayedTableNumber} isDineIn={isDineIn} />
 
-        <Card>
-          <CardHeader className="pb-3">
+        <Card size="sm">
+          <CardHeader className="pb-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Receipt className="size-4" />
@@ -129,31 +131,31 @@ export function CheckoutPage() {
               <Badge variant="outline">{orderScope}</Badge>
             </div>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-3">
+          <CardContent className="space-y-3">
+            <div className="space-y-2.5">
               {order.orderItems.map((item) => (
                 <div key={item.id} className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 space-y-0.5">
+                  <div className="min-w-0 space-y-1">
                     <p className="font-medium leading-snug">{item.itemNameSnapshot}</p>
                     {item.selectedOptions.length > 0 ? (
-                      <div className="space-y-0.5 text-xs text-muted-foreground">
-                        {item.selectedOptions.map((option) => (
-                          <p key={`${option.menuItemOptionId ?? `${option.groupNameSnapshot}:${option.optionNameSnapshot}`}×${option.quantity ?? 1}`}>
+                      <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-xs leading-5 text-muted-foreground">
+                        {item.selectedOptions.map((option, index) => (
+                          <span key={`${option.menuItemOptionId ?? `${option.groupNameSnapshot}:${option.optionNameSnapshot}`}-${index}`}>
                             {option.groupNameSnapshot}: {option.optionNameSnapshot}
-                            {(option.quantity ?? 1) > 1 ? ` ×${option.quantity ?? 1}` : ''}
+                            {(option.quantity ?? 1) > 1 ? ` x${option.quantity ?? 1}` : ''}
                             {option.priceAdjustmentSnapshot === 0
                               ? ''
                               : ` (${option.priceAdjustmentSnapshot * (option.quantity ?? 1) > 0 ? '+' : ''}${currencyFormatter.format(option.priceAdjustmentSnapshot * (option.quantity ?? 1))})`}
-                          </p>
+                          </span>
                         ))}
                       </div>
                     ) : null}
                     {item.note ? (
-                      <p className="text-xs text-muted-foreground">{item.note}</p>
+                      <p className="text-xs leading-5 text-muted-foreground">{item.note}</p>
                     ) : null}
                   </div>
-                  <div className="shrink-0 text-right text-sm">
-                    <span className="text-muted-foreground">{item.quantity} ×</span>{' '}
+                  <div className="shrink-0 text-right text-sm tabular-nums">
+                    <span className="text-muted-foreground">{item.quantity} x</span>{' '}
                     <span className="font-medium">{currencyFormatter.format(item.unitPrice)}</span>
                   </div>
                 </div>
@@ -165,7 +167,7 @@ export function CheckoutPage() {
                 <Separator />
                 <div className="space-y-1">
                   <p className="text-xs font-semibold uppercase text-muted-foreground">Order note</p>
-                  <p className="text-sm">{order.customerNote}</p>
+                  <p className="text-sm leading-5">{order.customerNote}</p>
                 </div>
               </>
             ) : null}
@@ -174,7 +176,9 @@ export function CheckoutPage() {
 
             <div className="flex items-center justify-between">
               <span className="text-sm text-muted-foreground">Total</span>
-              <span className="text-xl font-semibold">{currencyFormatter.format(order.totalAmount)}</span>
+              <span className="font-heading text-2xl font-semibold leading-none tabular-nums">
+                {currencyFormatter.format(order.totalAmount)}
+              </span>
             </div>
           </CardContent>
         </Card>
@@ -188,17 +192,17 @@ export function CheckoutPage() {
 
         <Button
           type="button"
-          className="h-14 w-full rounded-xl text-base"
+          className="h-12 w-full rounded-xl text-base"
           disabled={isPaying}
           onClick={() => void handlePay()}
         >
-          {isPaying ? (
+          {isOnlinePaying ? (
             <Loader2 className="size-5 animate-spin" />
           ) : (
             <CreditCard className="size-5" />
           )}
-          {isPaying
-            ? 'Redirecting to payment…'
+          {isOnlinePaying
+            ? 'Redirecting to payment...'
             : `Pay ${currencyFormatter.format(order.totalAmount)}`}
         </Button>
 
@@ -206,12 +210,12 @@ export function CheckoutPage() {
           <Button
             type="button"
             variant="outline"
-            className="h-auto min-h-16 w-full items-start justify-center gap-3 rounded-xl px-5 py-3 text-left font-normal"
+            className="h-auto min-h-14 w-full items-center justify-center gap-3 rounded-xl px-5 py-2.5 text-left font-normal"
             disabled={isPaying}
             onClick={() => void handlePayAtCounter()}
           >
             <span className="flex size-5 shrink-0 items-center justify-center">
-              <Banknote className="size-5" />
+              {isCounterPaying ? <Loader2 className="size-5 animate-spin" /> : <Banknote className="size-5" />}
             </span>
             <span className="flex flex-col items-start gap-0.5 leading-none">
               <span className="text-base font-medium leading-5">
@@ -224,7 +228,7 @@ export function CheckoutPage() {
           </Button>
         ) : null}
 
-        <p className="text-center text-xs text-muted-foreground">
+        <p className="text-center text-xs leading-5 text-muted-foreground">
           {paymentPolicy === 'PrepayRequired'
             ? 'Online payment is required before the restaurant can process this order.'
             : 'Choose secure online payment or settle this order at the counter.'}
@@ -260,15 +264,15 @@ function OrderContextHeader({
 }) {
   return (
     <div className="flex items-center gap-3">
-      <div className="flex size-11 shrink-0 items-center justify-center rounded-full border bg-muted/60">
+      <div className="flex size-10 shrink-0 items-center justify-center rounded-full border bg-muted/60">
         {isDineIn ? <Utensils className="size-5" /> : <ShoppingBag className="size-5" />}
       </div>
       <div className="min-w-0">
-        <p className="text-xs font-semibold uppercase text-muted-foreground">Checkout</p>
-        <p className="truncate font-semibold leading-snug">
+        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Checkout</p>
+        <p className="font-heading truncate text-lg font-semibold leading-tight">
           {restaurantName}
           {tableNumber ? (
-            <span className="font-normal text-muted-foreground"> · Table {tableNumber}</span>
+            <span className="font-sans text-sm font-normal text-muted-foreground"> · Table {tableNumber}</span>
           ) : null}
         </p>
       </div>

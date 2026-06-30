@@ -26,6 +26,7 @@ public class PublicOrderingController(AppDbContext dbContext) : ControllerBase
                 Name = item.Name,
                 Address = item.Address,
                 Phone = item.Phone,
+                ImageUrl = item.ImageUrl,
                 Timezone = item.Timezone,
                 Currency = item.Currency,
                 PaymentPolicy = item.PaymentPolicy.ToString()
@@ -70,6 +71,7 @@ public class PublicOrderingController(AppDbContext dbContext) : ControllerBase
                         Name = restaurant.Name,
                         Address = restaurant.Address,
                         Phone = restaurant.Phone,
+                        ImageUrl = restaurant.ImageUrl,
                         Timezone = restaurant.Timezone,
                         Currency = restaurant.Currency,
                         PaymentPolicy = restaurant.PaymentPolicy.ToString()

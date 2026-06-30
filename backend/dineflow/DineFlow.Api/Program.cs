@@ -27,6 +27,7 @@ var builder = WebApplication.CreateBuilder(args);
 const string FrontendCorsPolicy = "FrontendCorsPolicy";
 
 builder.Services.AddControllers();
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddSignalR(options =>
 {
     options.EnableDetailedErrors = builder.Environment.IsDevelopment();
@@ -66,6 +67,8 @@ builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
 builder.Services.AddScoped<CartAccessService>();
 builder.Services.AddScoped<CartRealtimeNotifier>();
 builder.Services.AddScoped<OrderRealtimeNotifier>();
+builder.Services.AddScoped<OrderRefundProcessor>();
+builder.Services.AddScoped<ReportLogWriter>();
 builder.Services.AddSingleton<IOAuthLoginCodeStore, MemoryOAuthLoginCodeStore>();
 builder.Services.AddSingleton<IMfaLoginChallengeStore, MemoryMfaLoginChallengeStore>();
 builder.Services.AddSingleton<IMfaEmailSetupCodeStore, MemoryMfaEmailSetupCodeStore>();

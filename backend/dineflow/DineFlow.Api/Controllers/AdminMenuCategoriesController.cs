@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Menu;
+using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Menu;
@@ -23,13 +24,16 @@ public class AdminMenuCategoriesController : ControllerBase
 
     private readonly AppDbContext _dbContext;
     private readonly UserManager<ApplicationUser> _userManager;
+    private readonly ReportLogWriter _reportLogWriter;
 
     public AdminMenuCategoriesController(
         AppDbContext dbContext,
-        UserManager<ApplicationUser> userManager)
+        UserManager<ApplicationUser> userManager,
+        ReportLogWriter reportLogWriter)
     {
         _dbContext = dbContext;
         _userManager = userManager;
+        _reportLogWriter = reportLogWriter;
     }
 
     [HttpGet]
@@ -150,6 +154,13 @@ public class AdminMenuCategoriesController : ControllerBase
         };
 
         await _dbContext.MenuCategories.AddAsync(category, cancellationToken);
+        _reportLogWriter.AddAudit(
+            "MenuCategory.Created",
+            "MenuCategory",
+            category.Id.ToString(),
+            category.RestaurantId,
+            $"Created menu category {category.Name}.",
+            after: SnapshotCategory(category));
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return CreatedAtAction(
@@ -198,12 +209,22 @@ public class AdminMenuCategoriesController : ControllerBase
             return Conflict(new { message = "A category with this name already exists in the restaurant." });
         }
 
+        var beforeCategory = SnapshotCategory(category);
+
         category.Name = name;
         category.Description = NormalizeDescription(request.Description);
         category.DisplayOrder = request.DisplayOrder;
         category.IsActive = request.IsActive;
         category.UpdatedAt = DateTime.UtcNow;
 
+        _reportLogWriter.AddAudit(
+            "MenuCategory.Updated",
+            "MenuCategory",
+            category.Id.ToString(),
+            category.RestaurantId,
+            $"Updated menu category {category.Name}.",
+            beforeCategory,
+            SnapshotCategory(category));
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
@@ -241,7 +262,15 @@ public class AdminMenuCategoriesController : ControllerBase
             });
         }
 
+        var deletedCategory = SnapshotCategory(category);
         _dbContext.MenuCategories.Remove(category);
+        _reportLogWriter.AddAudit(
+            "MenuCategory.Deleted",
+            "MenuCategory",
+            category.Id.ToString(),
+            category.RestaurantId,
+            $"Deleted menu category {category.Name}.",
+            deletedCategory);
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
@@ -306,6 +335,9 @@ public class AdminMenuCategoriesController : ControllerBase
             .ToDictionary(entry => entry.categoryId, entry => entry.displayOrder);
 
         var updatedAt = DateTime.UtcNow;
+        var beforeOrder = categories
+            .Select(category => new { category.Id, category.Name, category.DisplayOrder })
+            .ToList();
 
         foreach (var category in categories)
         {
@@ -313,6 +345,17 @@ public class AdminMenuCategoriesController : ControllerBase
             category.UpdatedAt = updatedAt;
         }
 
+        _reportLogWriter.AddAudit(
+            "MenuCategory.Reordered",
+            "MenuCategory",
+            request.RestaurantId.ToString(),
+            request.RestaurantId,
+            "Reordered menu categories.",
+            beforeOrder,
+            categories
+                .OrderBy(category => category.DisplayOrder)
+                .Select(category => new { category.Id, category.Name, category.DisplayOrder })
+                .ToList());
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(new
@@ -403,4 +446,14 @@ public class AdminMenuCategoriesController : ControllerBase
             UpdatedAt = category.UpdatedAt
         };
     }
+
+    private static object SnapshotCategory(MenuCategory category) => new
+    {
+        category.Id,
+        category.RestaurantId,
+        category.Name,
+        category.Description,
+        category.DisplayOrder,
+        category.IsActive
+    };
 }

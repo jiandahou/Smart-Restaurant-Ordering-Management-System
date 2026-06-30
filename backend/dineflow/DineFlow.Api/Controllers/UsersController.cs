@@ -3,6 +3,7 @@ using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Common;
 using DineFlow.Api.Contracts.Users;
 using DineFlow.Api.Extensions;
+using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Persistence;
@@ -20,11 +21,16 @@ public class UsersController : ControllerBase
 {
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly AppDbContext _dbContext;
+    private readonly ReportLogWriter _reportLogWriter;
 
-    public UsersController(UserManager<ApplicationUser> userManager, AppDbContext dbContext)
+    public UsersController(
+        UserManager<ApplicationUser> userManager,
+        AppDbContext dbContext,
+        ReportLogWriter reportLogWriter)
     {
         _userManager = userManager;
         _dbContext = dbContext;
+        _reportLogWriter = reportLogWriter;
     }
 
     [Authorize(Policy = AuthorizationPolicies.PlatformOwnerOnly)]
@@ -120,6 +126,13 @@ public class UsersController : ControllerBase
         var targetRoles = await _userManager.GetRolesAsync(targetUser);
         var currentRank = GetHighestRank(currentRoles);
         var targetRank = GetHighestRank(targetRoles);
+        var beforeUser = new
+        {
+            targetUser.Email,
+            targetUser.FullName,
+            targetUser.RestaurantId,
+            Roles = targetRoles.OrderBy(role => role, StringComparer.OrdinalIgnoreCase).ToArray()
+        };
 
         if (currentRank <= targetRank)
         {
@@ -292,6 +305,23 @@ public class UsersController : ControllerBase
 
         var updatedRoles = await _userManager.GetRolesAsync(targetUser);
 
+        _reportLogWriter.AddAudit(
+            "Admin.UserUpdated",
+            "User",
+            targetUser.Id,
+            targetUser.RestaurantId,
+            $"Updated user {targetUser.Email}.",
+            beforeUser,
+            new
+            {
+                targetUser.Email,
+                targetUser.FullName,
+                targetUser.RestaurantId,
+                Roles = updatedRoles.OrderBy(role => role, StringComparer.OrdinalIgnoreCase).ToArray(),
+                PasswordChanged = !string.IsNullOrWhiteSpace(request.Password)
+            });
+        await _dbContext.SaveChangesAsync();
+
         await transaction.CommitAsync();
 
         return Ok(new
@@ -347,6 +377,14 @@ public class UsersController : ControllerBase
         var targetRoles = await _userManager.GetRolesAsync(targetUser);
         var currentRank = GetHighestRank(currentRoles);
         var targetRank = GetHighestRank(targetRoles);
+        var deletedUser = new
+        {
+            targetUser.Id,
+            targetUser.Email,
+            targetUser.FullName,
+            targetUser.RestaurantId,
+            Roles = targetRoles.OrderBy(role => role, StringComparer.OrdinalIgnoreCase).ToArray()
+        };
 
         if (currentRank <= targetRank)
         {
@@ -379,6 +417,15 @@ public class UsersController : ControllerBase
                 errors = deleteResult.Errors
             });
         }
+
+        _reportLogWriter.AddAudit(
+            "Admin.UserDeleted",
+            "User",
+            targetUser.Id,
+            targetUser.RestaurantId,
+            $"Deleted user {deletedUser.Email}.",
+            deletedUser);
+        await _dbContext.SaveChangesAsync();
 
         await transaction.CommitAsync();
 

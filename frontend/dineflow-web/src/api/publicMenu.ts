@@ -5,6 +5,7 @@ export type PublicOrderingRestaurant = {
   name: string
   address: string
   phone: string
+  imageUrl: string | null
   timezone: string
   currency: string
   paymentPolicy: 'PrepayRequired' | 'PayAtCounterAllowed'

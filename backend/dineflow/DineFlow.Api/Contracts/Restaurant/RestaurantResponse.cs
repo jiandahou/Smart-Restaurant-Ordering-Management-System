@@ -10,6 +10,10 @@ public class RestaurantResponse
 
     public string Phone { get; set; } = string.Empty;
 
+    public string? ImageUrl { get; set; }
+
+    public string CountryCode { get; set; } = string.Empty;
+
     public string Timezone { get; set; } = string.Empty;
 
     public string Currency { get; set; } = string.Empty;

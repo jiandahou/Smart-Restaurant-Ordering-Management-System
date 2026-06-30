@@ -10,6 +10,7 @@ export type CartItem = {
   name: string
   imageUrl: string | null
   quantity: number
+  basePrice: number
   unitPrice: number
   lineTotal: number
   note: string | null
@@ -103,6 +104,7 @@ export type AddCartItemRequest = {
 export type UpdateCartItemRequest = {
   quantity: number
   note?: string
+  selectedOptionIds?: string[]
 }
 
 export async function joinCart(request: JoinCartRequest) {

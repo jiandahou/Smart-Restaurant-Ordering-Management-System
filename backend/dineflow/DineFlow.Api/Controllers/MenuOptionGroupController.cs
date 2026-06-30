@@ -1,4 +1,5 @@
 using DineFlow.Api.Contracts.Menu;
+using DineFlow.Api.Services;
 using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
@@ -14,11 +15,16 @@ public class MenuOptionGroupController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly ILogger<MenuOptionGroupController> _logger;
+    private readonly ReportLogWriter _reportLogWriter;
 
-    public MenuOptionGroupController(AppDbContext db, ILogger<MenuOptionGroupController> logger)
+    public MenuOptionGroupController(
+        AppDbContext db,
+        ILogger<MenuOptionGroupController> logger,
+        ReportLogWriter reportLogWriter)
     {
         _db = db;
         _logger = logger;
+        _reportLogWriter = reportLogWriter;
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────
@@ -109,6 +115,13 @@ public class MenuOptionGroupController : ControllerBase
         };
 
         _db.MenuItemOptionGroups.Add(group);
+        _reportLogWriter.AddAudit(
+            "MenuOptionGroup.Created",
+            "MenuOptionGroup",
+            group.Id.ToString(),
+            item.RestaurantId,
+            $"Created option group {group.Name} for {item.Name}.",
+            after: SnapshotGroup(group, item.Name));
         await _db.SaveChangesAsync();
 
         group.Options = [];
@@ -136,6 +149,8 @@ public class MenuOptionGroupController : ControllerBase
         if (request.MinSelections > request.MaxSelections)
             return BadRequest(new { message = "MinSelections cannot exceed MaxSelections." });
 
+        var beforeGroup = SnapshotGroup(group, item.Name);
+
         group.Name = request.Name;
         group.IsRequired = request.IsRequired;
         group.MinSelections = request.MinSelections;
@@ -144,6 +159,14 @@ public class MenuOptionGroupController : ControllerBase
         group.IsActive = request.IsActive;
         group.UpdatedAt = DateTime.UtcNow;
 
+        _reportLogWriter.AddAudit(
+            "MenuOptionGroup.Updated",
+            "MenuOptionGroup",
+            group.Id.ToString(),
+            item.RestaurantId,
+            $"Updated option group {group.Name} for {item.Name}.",
+            beforeGroup,
+            SnapshotGroup(group, item.Name));
         await _db.SaveChangesAsync();
         return Ok(MapGroup(group));
     }
@@ -159,8 +182,17 @@ public class MenuOptionGroupController : ControllerBase
         var item = await LoadItemForTenantAsync(itemId);
         if (item is null) return Forbid();
 
+        var beforeGroup = SnapshotGroup(group, item.Name);
         group.IsActive = false;
         group.UpdatedAt = DateTime.UtcNow;
+        _reportLogWriter.AddAudit(
+            "MenuOptionGroup.Archived",
+            "MenuOptionGroup",
+            group.Id.ToString(),
+            item.RestaurantId,
+            $"Archived option group {group.Name} for {item.Name}.",
+            beforeGroup,
+            SnapshotGroup(group, item.Name));
         await _db.SaveChangesAsync();
         return NoContent();
     }
@@ -176,7 +208,15 @@ public class MenuOptionGroupController : ControllerBase
         var item = await LoadItemForTenantAsync(itemId);
         if (item is null) return Forbid();
 
+        var deletedGroup = SnapshotGroup(group, item.Name);
         _db.MenuItemOptionGroups.Remove(group);
+        _reportLogWriter.AddAudit(
+            "MenuOptionGroup.Deleted",
+            "MenuOptionGroup",
+            group.Id.ToString(),
+            item.RestaurantId,
+            $"Deleted option group {group.Name} for {item.Name}.",
+            deletedGroup);
         await _db.SaveChangesAsync();
         return NoContent();
     }
@@ -234,6 +274,13 @@ public class MenuOptionGroupController : ControllerBase
         };
 
         _db.MenuItemOptions.Add(option);
+        _reportLogWriter.AddAudit(
+            "MenuOption.Created",
+            "MenuOption",
+            option.Id.ToString(),
+            item.RestaurantId,
+            $"Created option {option.Name} for {item.Name}.",
+            after: SnapshotOption(option, group.Name, item.Name));
         await _db.SaveChangesAsync();
         return CreatedAtAction(nameof(ListOptions), new { itemId, groupId }, MapOption(option));
     }
@@ -260,6 +307,11 @@ public class MenuOptionGroupController : ControllerBase
         if (request.MaxQuantity < 1)
             return BadRequest(new { message = "MaxQuantity must be at least 1." });
 
+        var group = await _db.MenuItemOptionGroups
+            .AsNoTracking()
+            .FirstOrDefaultAsync(g => g.Id == groupId && g.MenuItemId == itemId);
+        var beforeOption = SnapshotOption(option, group?.Name, item.Name);
+
         option.Name = request.Name;
         option.PriceAdjustment = request.PriceAdjustment;
         option.AdjustmentType = adjustmentType;
@@ -268,6 +320,14 @@ public class MenuOptionGroupController : ControllerBase
         option.IsAvailable = request.IsAvailable;
         option.UpdatedAt = DateTime.UtcNow;
 
+        _reportLogWriter.AddAudit(
+            "MenuOption.Updated",
+            "MenuOption",
+            option.Id.ToString(),
+            item.RestaurantId,
+            $"Updated option {option.Name} for {item.Name}.",
+            beforeOption,
+            SnapshotOption(option, group?.Name, item.Name));
         await _db.SaveChangesAsync();
         return Ok(MapOption(option));
     }
@@ -283,8 +343,20 @@ public class MenuOptionGroupController : ControllerBase
         var item = await LoadItemForTenantAsync(itemId);
         if (item is null) return Forbid();
 
+        var group = await _db.MenuItemOptionGroups
+            .AsNoTracking()
+            .FirstOrDefaultAsync(g => g.Id == groupId && g.MenuItemId == itemId);
+        var beforeOption = SnapshotOption(option, group?.Name, item.Name);
         option.IsAvailable = false;
         option.UpdatedAt = DateTime.UtcNow;
+        _reportLogWriter.AddAudit(
+            "MenuOption.Archived",
+            "MenuOption",
+            option.Id.ToString(),
+            item.RestaurantId,
+            $"Archived option {option.Name} for {item.Name}.",
+            beforeOption,
+            SnapshotOption(option, group?.Name, item.Name));
         await _db.SaveChangesAsync();
         return NoContent();
     }
@@ -300,8 +372,62 @@ public class MenuOptionGroupController : ControllerBase
         var item = await LoadItemForTenantAsync(itemId);
         if (item is null) return Forbid();
 
+        var group = await _db.MenuItemOptionGroups
+            .AsNoTracking()
+            .FirstOrDefaultAsync(g => g.Id == groupId && g.MenuItemId == itemId);
+        var deletedOption = SnapshotOption(option, group?.Name, item.Name);
         _db.MenuItemOptions.Remove(option);
+        _reportLogWriter.AddAudit(
+            "MenuOption.Deleted",
+            "MenuOption",
+            option.Id.ToString(),
+            item.RestaurantId,
+            $"Deleted option {option.Name} for {item.Name}.",
+            deletedOption);
         await _db.SaveChangesAsync();
         return NoContent();
     }
+
+    private static object SnapshotGroup(MenuItemOptionGroup group, string? itemName) => new
+    {
+        group.Id,
+        group.RestaurantId,
+        group.MenuItemId,
+        ItemName = itemName,
+        group.Name,
+        group.IsRequired,
+        group.MinSelections,
+        group.MaxSelections,
+        group.DisplayOrder,
+        group.IsActive,
+        Options = group.Options
+            .OrderBy(option => option.DisplayOrder)
+            .Select(option => new
+            {
+                option.Id,
+                option.Name,
+                option.PriceAdjustment,
+                AdjustmentType = option.AdjustmentType.ToString(),
+                option.MaxQuantity,
+                option.DisplayOrder,
+                option.IsAvailable
+            })
+            .ToList()
+    };
+
+    private static object SnapshotOption(MenuItemOption option, string? groupName, string? itemName) => new
+    {
+        option.Id,
+        option.RestaurantId,
+        option.MenuItemId,
+        option.GroupId,
+        GroupName = groupName,
+        ItemName = itemName,
+        option.Name,
+        option.PriceAdjustment,
+        AdjustmentType = option.AdjustmentType.ToString(),
+        option.MaxQuantity,
+        option.DisplayOrder,
+        option.IsAvailable
+    };
 }

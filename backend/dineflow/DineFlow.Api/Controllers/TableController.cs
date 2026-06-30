@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Restaurant;
+using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Persistence;
@@ -18,11 +19,16 @@ public class TableController : ControllerBase
 {
     private readonly AppDbContext _dbContext;
     private readonly UserManager<ApplicationUser> _userManager;
+    private readonly ReportLogWriter _reportLogWriter;
 
-    public TableController(AppDbContext dbContext, UserManager<ApplicationUser> userManager)
+    public TableController(
+        AppDbContext dbContext,
+        UserManager<ApplicationUser> userManager,
+        ReportLogWriter reportLogWriter)
     {
         _dbContext = dbContext;
         _userManager = userManager;
+        _reportLogWriter = reportLogWriter;
     }
 
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]
@@ -98,6 +104,13 @@ public class TableController : ControllerBase
         };
 
         await _dbContext.RestaurantTables.AddAsync(table);
+        _reportLogWriter.AddAudit(
+            "RestaurantTable.Created",
+            "RestaurantTable",
+            table.Id.ToString(),
+            table.RestaurantId,
+            $"Created table {table.TableNumber}.",
+            after: SnapshotTable(table));
         await _dbContext.SaveChangesAsync();
 
         return CreatedAtAction(
@@ -141,11 +154,21 @@ public class TableController : ControllerBase
             return Conflict(new { message = "A table with this number already exists in the restaurant." });
         }
 
+        var beforeTable = SnapshotTable(table);
+
         table.TableNumber = tableNumber;
         table.Capacity = request.Capacity;
         table.IsActive = request.IsActive;
         table.UpdatedAt = DateTime.UtcNow;
 
+        _reportLogWriter.AddAudit(
+            "RestaurantTable.Updated",
+            "RestaurantTable",
+            table.Id.ToString(),
+            table.RestaurantId,
+            $"Updated table {table.TableNumber}.",
+            beforeTable,
+            SnapshotTable(table));
         await _dbContext.SaveChangesAsync();
 
         return Ok(new
@@ -239,4 +262,14 @@ public class TableController : ControllerBase
             UpdatedAt = table.UpdatedAt
         };
     }
+
+    private static object SnapshotTable(RestaurantTable table) => new
+    {
+        table.Id,
+        table.RestaurantId,
+        table.TableNumber,
+        table.Capacity,
+        table.IsActive,
+        QrTokenPresent = !string.IsNullOrWhiteSpace(table.QrToken)
+    };
 }
