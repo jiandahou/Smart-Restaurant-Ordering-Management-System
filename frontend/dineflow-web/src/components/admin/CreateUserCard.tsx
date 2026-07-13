@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { ChevronsUpDown, Loader2, ShieldPlus } from 'lucide-react'
+import { ShieldPlus } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
 import { z } from 'zod'
@@ -11,16 +11,9 @@ import {
   type ManagedUserRole,
   type Restaurant,
 } from '../../api/auth'
+import { RestaurantCombobox } from './RestaurantCombobox'
 import { Button } from '../ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card'
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from '../ui/command'
 import {
   Dialog,
   DialogContent,
@@ -31,7 +24,6 @@ import {
 } from '../ui/dialog'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '../ui/form'
 import { Input } from '../ui/input'
-import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
 
 export const roleRank: Record<ManagedUserRole | 'PlatformOwner', number> = {
@@ -77,7 +69,6 @@ function CreateUserForm({
 }: CreateUserCardProps) {
   const [restaurants, setRestaurants] = useState<Restaurant[]>([])
   const [restaurantsLoading, setRestaurantsLoading] = useState(false)
-  const [restaurantComboboxOpen, setRestaurantComboboxOpen] = useState(false)
 
   const form = useForm<CreateUserFormValues>({
     resolver: zodResolver(createUserSchema),
@@ -130,17 +121,6 @@ function CreateUserForm({
       active = false
     }
   }, [needsRestaurantId])
-
-  const restaurantOptions = useMemo(() => {
-    return restaurants
-      .toSorted((first, second) => first.name.localeCompare(second.name))
-      .map((restaurant) => ({
-        ...restaurant,
-        searchValue: [restaurant.name, restaurant.address, restaurant.phone, restaurant.currency, restaurant.id]
-          .filter(Boolean)
-          .join(' '),
-      }))
-  }, [restaurants])
 
   const handleSubmit = async (values: CreateUserFormValues) => {
     if (roleRank[values.role] >= currentUserRank) {
@@ -263,62 +243,14 @@ function CreateUserForm({
             render={({ field }) => (
               <FormItem>
                 <FormLabel>Restaurant</FormLabel>
-                <Popover open={restaurantComboboxOpen} onOpenChange={setRestaurantComboboxOpen}>
-                  <PopoverTrigger asChild>
-                    <FormControl>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        role="combobox"
-                        aria-expanded={restaurantComboboxOpen}
-                        className="restaurant-combobox-trigger"
-                        disabled={restaurantsLoading}
-                      >
-                        <span>
-                          {(() => {
-                            const selectedRestaurant = restaurantOptions.find(
-                              (restaurant) => restaurant.id === field.value,
-                            )
-
-                            if (selectedRestaurant) {
-                              return selectedRestaurant.name
-                            }
-
-                            return restaurantsLoading ? 'Loading restaurants...' : 'Select restaurant'
-                          })()}
-                        </span>
-                        {restaurantsLoading ? <Loader2 size={16} className="spinner" /> : <ChevronsUpDown size={16} />}
-                      </Button>
-                    </FormControl>
-                  </PopoverTrigger>
-                  <PopoverContent className="restaurant-combobox-content" align="start">
-                    <Command>
-                      <CommandInput placeholder="Search restaurants..." />
-                      <CommandList>
-                        <CommandEmpty>No restaurants found.</CommandEmpty>
-                        <CommandGroup>
-                          {restaurantOptions.map((restaurant) => (
-                            <CommandItem
-                              key={restaurant.id}
-                              value={restaurant.searchValue}
-                              data-checked={restaurant.id === field.value}
-                              onSelect={() => {
-                                field.onChange(restaurant.id)
-                                setRestaurantComboboxOpen(false)
-                              }}
-                            >
-                              <div className="restaurant-combobox-option">
-                                <strong>{restaurant.name}</strong>
-                                <span>{restaurant.address}</span>
-                                <code>{restaurant.id}</code>
-                              </div>
-                            </CommandItem>
-                          ))}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
+                <FormControl>
+                  <RestaurantCombobox
+                    value={field.value}
+                    restaurants={restaurants}
+                    loading={restaurantsLoading}
+                    onValueChange={field.onChange}
+                  />
+                </FormControl>
                 <FormMessage />
               </FormItem>
             )}

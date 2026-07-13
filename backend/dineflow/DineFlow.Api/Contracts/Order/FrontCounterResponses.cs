@@ -1,0 +1,138 @@
+namespace DineFlow.Api.Contracts.Order;
+
+public sealed class FrontCounterListRequest
+{
+    public Guid? RestaurantId { get; set; }
+
+    public string? Search { get; set; }
+}
+
+public sealed class FrontCounterTakeawayResponse
+{
+    public DateTime GeneratedAt { get; set; }
+
+    public List<AdminOrderResponse> Orders { get; set; } = [];
+}
+
+public sealed class FrontCounterTableSessionsResponse
+{
+    public DateTime GeneratedAt { get; set; }
+
+    public List<FrontCounterTableSessionSummaryResponse> Sessions { get; set; } = [];
+}
+
+public sealed class FrontCounterTablesResponse
+{
+    public DateTime GeneratedAt { get; set; }
+
+    public List<FrontCounterTableSummaryResponse> Tables { get; set; } = [];
+}
+
+public class FrontCounterTableSummaryResponse
+{
+    public Guid RestaurantId { get; set; }
+
+    public string RestaurantName { get; set; } = string.Empty;
+
+    public Guid TableId { get; set; }
+
+    public string TableNumber { get; set; } = string.Empty;
+
+    public int Capacity { get; set; }
+
+    public bool IsActive { get; set; }
+
+    public Guid? ActiveSessionId { get; set; }
+
+    public DateTime? OpenedAt { get; set; }
+
+    public string Currency { get; set; } = string.Empty;
+
+    public int ActiveOrderCount { get; set; }
+
+    public int HistoryOrderCount { get; set; }
+
+    public int ItemCount { get; set; }
+
+    public decimal TotalAmount { get; set; }
+
+    public decimal AmountDue { get; set; }
+
+    public string LatestOrderStatus { get; set; } = string.Empty;
+
+    public List<FrontCounterMergedItemResponse> MergedItems { get; set; } = [];
+
+    public List<AdminOrderResponse> ActiveOrders { get; set; } = [];
+}
+
+public sealed class FrontCounterTableDetailResponse : FrontCounterTableSummaryResponse
+{
+    public FrontCounterTableSessionDetailResponse? ActiveSession { get; set; }
+
+    public List<AdminOrderResponse> HistoryOrders { get; set; } = [];
+}
+
+public class FrontCounterTableSessionSummaryResponse
+{
+    public Guid Id { get; set; }
+
+    public Guid RestaurantId { get; set; }
+
+    public string RestaurantName { get; set; } = string.Empty;
+
+    public Guid TableId { get; set; }
+
+    public string TableNumber { get; set; } = string.Empty;
+
+    public string Status { get; set; } = string.Empty;
+
+    public DateTime OpenedAt { get; set; }
+
+    public DateTime? ClosedAt { get; set; }
+
+    public string Currency { get; set; } = string.Empty;
+
+    public int ActiveOrderCount { get; set; }
+
+    public int ItemCount { get; set; }
+
+    public decimal TotalAmount { get; set; }
+
+    public decimal AmountDue { get; set; }
+
+    public string LatestOrderStatus { get; set; } = string.Empty;
+}
+
+public sealed class FrontCounterTableSessionDetailResponse : FrontCounterTableSessionSummaryResponse
+{
+    public List<FrontCounterMergedItemResponse> MergedItems { get; set; } = [];
+
+    public List<AdminOrderResponse> Orders { get; set; } = [];
+}
+
+public sealed class FrontCounterMergedItemResponse
+{
+    public string ItemName { get; set; } = string.Empty;
+
+    public int Quantity { get; set; }
+
+    public decimal UnitPrice { get; set; }
+
+    public decimal TotalPrice { get; set; }
+
+    public string? Note { get; set; }
+
+    public List<AdminOrderItemOptionResponse> SelectedOptions { get; set; } = [];
+
+    public List<Guid> OrderItemIds { get; set; } = [];
+}
+
+public sealed class FrontCounterSettleOrderResponse
+{
+    public AdminOrderResponse Order { get; set; } = new();
+}
+
+public sealed class FrontCounterSettleTableSessionResponse
+{
+    public FrontCounterTableSessionDetailResponse TableSession { get; set; } = new();
+}

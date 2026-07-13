@@ -1,6 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Building2, Camera, ChevronDown, CreditCard, Fingerprint, KeyRound, LockKeyhole, Mail, Pencil, Save, ShieldCheck, Smartphone, Trash2, UserRound, X, type LucideIcon } from 'lucide-react'
-import { useEffect, useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
 import { useForm } from 'react-hook-form'
 import { QRCodeSVG } from 'qrcode.react'
 import { toast } from 'sonner'
@@ -18,6 +18,7 @@ import {
   sendSensitiveMfaEmailCode,
   setupEmailMfa,
   setupTotpMfa,
+  getRestaurants,
   updateMfaSettings,
   updatePasskey,
   type MfaSettings,
@@ -54,6 +55,7 @@ import {
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '../components/ui/form'
 import { Input } from '../components/ui/input'
 import { Switch } from '../components/ui/switch'
+import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip'
 import { useAppDispatch } from '../hooks'
 import googleLogo from '../assets/google-g.svg'
 
@@ -148,12 +150,22 @@ export function ProfilePage() {
   const [uploadingAvatar, setUploadingAvatar] = useState(false)
   const [editingName, setEditingName] = useState(false)
   const [editingEmail, setEditingEmail] = useState(false)
+  const [restaurantName, setRestaurantName] = useState<string | null>(null)
+  const [restaurantNameLoading, setRestaurantNameLoading] = useState(false)
   const avatarInputRef = useRef<HTMLInputElement | null>(null)
   const canRequestPasswordReset = Boolean(user?.email && user.roles.includes('Customer'))
   const canEditProfile = Boolean(user?.roles.includes('Customer'))
   const canRegisterPasskey = Boolean(user)
   const hasPassword = user?.hasPassword ?? true
   const hasGoogleLogin = Boolean(user?.externalProviders?.some((provider) => provider.toLowerCase() === 'google'))
+  const profileName = user?.fullName || 'Not set'
+  const profileEmail = user?.email || 'No email'
+  const profileRestaurant = user?.restaurantId
+    ? restaurantNameLoading
+      ? 'Loading restaurant...'
+      : restaurantName || 'Assigned restaurant'
+    : 'Platform scope'
+  const profileRoles = user?.roles.join(', ') || 'No roles'
   const profileForm = useForm<ProfileFormValues>({
     resolver: zodResolver(profileFormSchema),
     defaultValues: {
@@ -202,6 +214,42 @@ export function ProfilePage() {
   useEffect(() => {
     void loadMfaSettings()
   }, [])
+
+  useEffect(() => {
+    const restaurantId = user?.restaurantId
+
+    setRestaurantName(null)
+
+    if (!restaurantId) {
+      setRestaurantNameLoading(false)
+      return
+    }
+
+    let isCurrent = true
+    setRestaurantNameLoading(true)
+
+    getRestaurants()
+      .then((restaurants) => {
+        if (!isCurrent) return
+
+        const restaurant = restaurants.find((item) => item.id === restaurantId)
+        setRestaurantName(restaurant?.name ?? 'Assigned restaurant')
+      })
+      .catch(() => {
+        if (isCurrent) {
+          setRestaurantName('Assigned restaurant')
+        }
+      })
+      .finally(() => {
+        if (isCurrent) {
+          setRestaurantNameLoading(false)
+        }
+      })
+
+    return () => {
+      isCurrent = false
+    }
+  }, [user?.restaurantId])
 
   useEffect(() => {
     if (!passkeysOpen) {
@@ -816,7 +864,7 @@ export function ProfilePage() {
                     </form>
                   </Form>
                 ) : (
-                  <strong>{user?.fullName || 'Not set'}</strong>
+                  <OverflowTooltipValue content={profileName} className="info-row-value" />
                 )}
               </div>
               {canEditProfile && !editingName && (
@@ -831,7 +879,7 @@ export function ProfilePage() {
               <div>
                 <span>Email</span>
                 <div className="identity-line">
-                  <strong>{user?.email}</strong>
+                  <OverflowTooltipValue content={profileEmail} className="info-row-value" />
                   {hasGoogleLogin && (
                     <span className="google-linked-mark" aria-label="Google linked account" title="Google linked account">
                       <img aria-hidden="true" src={googleLogo} alt="" />
@@ -844,26 +892,29 @@ export function ProfilePage() {
               <Building2 size={20} />
               <div>
                 <span>Restaurant</span>
-                <strong>{user?.restaurantId || 'Platform scope'}</strong>
+                <OverflowTooltipValue content={profileRestaurant} className="info-row-value" />
               </div>
             </div>
             <div className="info-row">
               <ShieldCheck size={20} />
               <div>
                 <span>Roles</span>
-                <div className="badge-row">
+                <OverflowTooltipBox content={profileRoles} className="badge-row profile-roles-row">
                   {user?.roles.map((role) => (
                     <Badge key={role}>{role}</Badge>
                   ))}
-                </div>
+                </OverflowTooltipBox>
               </div>
             </div>
           </div>
         </CardContent>
       </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle>Security</CardTitle>
+      <Card className="security-card">
+        <CardHeader className="security-card-header">
+          <CardTitle className="security-card-title">
+            <ShieldCheck size={18} />
+            Security
+          </CardTitle>
           <CardDescription>Manage account sign-in and verification options.</CardDescription>
         </CardHeader>
         <CardContent className="security-grid">
@@ -923,6 +974,7 @@ export function ProfilePage() {
               <Button
                 type="button"
                 variant="secondary"
+                className="security-action-button"
                 onClick={() => setEditingEmail(true)}
                 disabled={!canEditProfile}
               >
@@ -948,6 +1000,7 @@ export function ProfilePage() {
             <Button
               type="button"
               variant="secondary"
+              className="security-action-button"
               onClick={handleResetPassword}
               disabled={!canRequestPasswordReset || sendingResetLink}
             >
@@ -967,16 +1020,16 @@ export function ProfilePage() {
                 <button type="button" className="security-copy mfa-trigger">
                   <Smartphone size={20} />
                   <div>
-                    <strong className="mfa-title">
-                      Multi-factor authentication
-                      <ChevronDown className="passkey-chevron" size={17} aria-hidden="true" />
-                    </strong>
+                    <strong className="mfa-title">Multi-factor authentication</strong>
                     <span>
                       {mfaSettings?.enabled
                         ? 'Extra verification is ready for selected account actions.'
                         : 'Add a second verification step for account protection.'}
                     </span>
                   </div>
+                  <span className="security-expand-indicator" aria-hidden="true">
+                    <ChevronDown className="passkey-chevron" size={17} />
+                  </span>
                 </button>
               </CollapsibleTrigger>
               <div className="mfa-summary">
@@ -1392,17 +1445,18 @@ export function ProfilePage() {
                 <button type="button" className="security-copy passkey-trigger">
                   <Fingerprint size={20} />
                   <div>
-                    <strong className="passkey-title">
-                      Passkeys
-                      <ChevronDown className="passkey-chevron" size={17} aria-hidden="true" />
-                    </strong>
+                    <strong className="passkey-title">Passkeys</strong>
                     <span>Use device biometrics or security keys for passwordless sign-in.</span>
                   </div>
+                  <span className="security-expand-indicator" aria-hidden="true">
+                    <ChevronDown className="passkey-chevron" size={17} />
+                  </span>
                 </button>
               </CollapsibleTrigger>
               <Button
                 type="button"
                 variant="secondary"
+                className="security-action-button"
                 onClick={handleRegisterPasskey}
                 disabled={!canRegisterPasskey || registeringPasskey}
               >
@@ -1495,6 +1549,68 @@ export function ProfilePage() {
         </CardContent>
       </Card>
     </main>
+  )
+}
+
+function OverflowTooltipValue({
+  content,
+  className,
+}: {
+  content: string
+  className?: string
+}) {
+  const triggerRef = useRef<HTMLSpanElement | null>(null)
+  const [isOpen, setIsOpen] = useState(false)
+  const [isOverflowing, setIsOverflowing] = useState(false)
+
+  const updateOverflow = () => {
+    const element = triggerRef.current
+    setIsOverflowing(Boolean(element && element.scrollWidth > element.clientWidth))
+  }
+
+  return (
+    <Tooltip open={isOpen && isOverflowing} onOpenChange={setIsOpen}>
+      <TooltipTrigger asChild>
+        <span ref={triggerRef} className={className} onPointerEnter={updateOverflow} onFocus={updateOverflow}>
+          {content}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="start" sideOffset={6} className="profile-overflow-tooltip">
+        {content}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+function OverflowTooltipBox({
+  content,
+  className,
+  children,
+}: {
+  content: string
+  className?: string
+  children: ReactNode
+}) {
+  const triggerRef = useRef<HTMLDivElement | null>(null)
+  const [isOpen, setIsOpen] = useState(false)
+  const [isOverflowing, setIsOverflowing] = useState(false)
+
+  const updateOverflow = () => {
+    const element = triggerRef.current
+    setIsOverflowing(Boolean(element && element.scrollWidth > element.clientWidth))
+  }
+
+  return (
+    <Tooltip open={isOpen && isOverflowing} onOpenChange={setIsOpen}>
+      <TooltipTrigger asChild>
+        <div ref={triggerRef} className={className} onPointerEnter={updateOverflow} onFocus={updateOverflow}>
+          {children}
+        </div>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="start" sideOffset={6} className="profile-overflow-tooltip">
+        {content}
+      </TooltipContent>
+    </Tooltip>
   )
 }
 

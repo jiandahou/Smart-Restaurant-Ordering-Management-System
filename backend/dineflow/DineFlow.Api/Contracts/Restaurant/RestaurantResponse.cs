@@ -22,6 +22,12 @@ public class RestaurantResponse
 
     public bool IsActive { get; set; }
 
+    public bool AcceptingOrders { get; set; }
+
+    public string OpeningHoursJson { get; set; } = string.Empty;
+
+    public string SpecialOpeningDaysJson { get; set; } = "[]";
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime? UpdatedAt { get; set; }

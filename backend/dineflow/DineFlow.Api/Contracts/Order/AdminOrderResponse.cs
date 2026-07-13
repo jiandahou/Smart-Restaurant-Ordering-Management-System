@@ -24,6 +24,14 @@ public sealed class AdminOrderResponse
 
     public string OrderNumber { get; set; } = string.Empty;
 
+    public DateOnly? PickupDate { get; set; }
+
+    public int? PickupNumber { get; set; }
+
+    public string PickupCode { get; set; } = string.Empty;
+
+    public Guid? TableSessionId { get; set; }
+
     public string OrderType { get; set; } = string.Empty;
 
     public string Status { get; set; } = string.Empty;

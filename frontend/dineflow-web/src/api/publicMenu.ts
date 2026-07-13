@@ -9,6 +9,13 @@ export type PublicOrderingRestaurant = {
   timezone: string
   currency: string
   paymentPolicy: 'PrepayRequired' | 'PayAtCounterAllowed'
+  acceptingOrders: boolean
+  openingHoursJson: string
+  specialOpeningDaysJson: string
+  isWithinOpeningHours: boolean
+  isOrderingAvailable: boolean
+  orderingUnavailableReason: string
+  orderingStatusMessage: string
 }
 
 export type PublicOrderingTable = {

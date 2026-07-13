@@ -3,10 +3,12 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   AlertCircle,
   ArrowRight,
+  CalendarClock,
   Check,
   ClipboardList,
   ChevronDown,
   ChevronUp,
+  Clock3,
   LayoutDashboard,
   Loader2,
   LogIn,
@@ -16,6 +18,7 @@ import {
   MinusCircle,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
   ShoppingBag,
   Store,
@@ -23,6 +26,7 @@ import {
   Utensils,
   UserPlus,
   UserRound,
+  X,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -66,6 +70,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
+import { BrandLogo } from '@/components/BrandLogo'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
@@ -97,6 +102,12 @@ import {
 } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { rememberGuestOrder } from '@/lib/guestOrders'
 import { cn } from '@/lib/utils'
 
@@ -168,6 +179,203 @@ const orderNotePresetGroups: NotePresetGroup[] = [
   },
 ]
 
+type PublicOpeningHoursWindow = {
+  opensAt: string
+  closesAt: string
+}
+
+type PublicOpeningHoursDay = {
+  dayOfWeek: number
+  isOpen: boolean
+  windows: PublicOpeningHoursWindow[]
+}
+
+type PublicSpecialOpeningDay = {
+  date: string
+  isClosed: boolean
+  note: string | null
+  windows: PublicOpeningHoursWindow[]
+}
+
+const publicOpeningDayLabels = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+const publicOpeningTimePattern = /^([01]\d|2[0-3]):[0-5]\d$/
+
+function parsePublicOpeningHours(openingHoursJson?: string | null): PublicOpeningHoursDay[] {
+  try {
+    const parsed = JSON.parse(openingHoursJson || '[]')
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+
+    return parsed
+      .map((entry) => {
+        const dayOfWeekValue = readPublicJsonValue(entry, 'dayOfWeek')
+        const isOpenValue = readPublicJsonValue(entry, 'isOpen')
+        const windowsValue = readPublicJsonValue(entry, 'windows')
+        const opensAtValue = readPublicJsonValue(entry, 'opensAt')
+        const closesAtValue = readPublicJsonValue(entry, 'closesAt')
+        const dayOfWeek = typeof dayOfWeekValue === 'number' ? dayOfWeekValue : -1
+        const windows = normalizePublicOpeningWindows(windowsValue, opensAtValue, closesAtValue)
+        const isOpen = typeof isOpenValue === 'boolean' ? isOpenValue : windows.length > 0
+
+        return {
+          dayOfWeek,
+          isOpen,
+          windows: isOpen && windows.length === 0 ? [{ opensAt: '09:00', closesAt: '21:00' }] : windows,
+        }
+      })
+      .filter((day): day is PublicOpeningHoursDay => day.dayOfWeek >= 0 && day.dayOfWeek <= 6)
+      .sort((first, second) => first.dayOfWeek - second.dayOfWeek)
+  } catch {
+    return []
+  }
+}
+
+function parsePublicSpecialOpeningDays(specialOpeningDaysJson?: string | null): PublicSpecialOpeningDay[] {
+  try {
+    const parsed = JSON.parse(specialOpeningDaysJson || '[]')
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+
+    return parsed
+      .map((entry) => {
+        const dateValue = readPublicJsonValue(entry, 'date')
+        const isClosedValue = readPublicJsonValue(entry, 'isClosed')
+        const noteValue = readPublicJsonValue(entry, 'note')
+        const windowsValue = readPublicJsonValue(entry, 'windows')
+        const opensAtValue = readPublicJsonValue(entry, 'opensAt')
+        const closesAtValue = readPublicJsonValue(entry, 'closesAt')
+
+        if (typeof dateValue !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) {
+          return null
+        }
+
+        const isClosed = typeof isClosedValue === 'boolean' ? isClosedValue : true
+        const windows = normalizePublicOpeningWindows(windowsValue, opensAtValue, closesAtValue)
+        return {
+          date: dateValue,
+          isClosed,
+          note: typeof noteValue === 'string' && noteValue.trim() ? noteValue.trim() : null,
+          windows: isClosed ? [] : (windows.length > 0 ? windows : [{ opensAt: '09:00', closesAt: '21:00' }]),
+        }
+      })
+      .filter((day): day is PublicSpecialOpeningDay => Boolean(day))
+      .sort((first, second) => first.date.localeCompare(second.date))
+  } catch {
+    return []
+  }
+}
+
+function readPublicJsonValue(value: unknown, key: string) {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+
+  const record = value as Record<string, unknown>
+  const directValue = record[key]
+  if (directValue !== undefined) {
+    return directValue
+  }
+
+  const normalizedKey = key.toLowerCase()
+  const matchedKey = Object.keys(record).find((candidate) => candidate.toLowerCase() === normalizedKey)
+  return matchedKey ? record[matchedKey] : undefined
+}
+
+function normalizePublicOpeningWindows(
+  windows: unknown,
+  legacyOpensAt?: unknown,
+  legacyClosesAt?: unknown,
+): PublicOpeningHoursWindow[] {
+  const sourceWindows = Array.isArray(windows)
+    ? windows
+    : typeof legacyOpensAt === 'string' && typeof legacyClosesAt === 'string'
+      ? [{ opensAt: legacyOpensAt, closesAt: legacyClosesAt }]
+      : []
+
+  return sourceWindows
+    .map((window) => {
+      const opensAt = readPublicJsonValue(window, 'opensAt')
+      const closesAt = readPublicJsonValue(window, 'closesAt')
+      return typeof opensAt === 'string' &&
+        typeof closesAt === 'string' &&
+        publicOpeningTimePattern.test(opensAt) &&
+        publicOpeningTimePattern.test(closesAt)
+        ? { opensAt, closesAt }
+        : null
+    })
+    .filter((window): window is PublicOpeningHoursWindow => Boolean(window))
+}
+
+function getRestaurantDateKey(timezone: string) {
+  let parts: Intl.DateTimeFormatPart[]
+  try {
+    parts = new Intl.DateTimeFormat('en-AU', {
+      timeZone: timezone || undefined,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date())
+  } catch {
+    parts = new Intl.DateTimeFormat('en-AU', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date())
+  }
+
+  const year = parts.find((part) => part.type === 'year')?.value ?? '1970'
+  const month = parts.find((part) => part.type === 'month')?.value ?? '01'
+  const day = parts.find((part) => part.type === 'day')?.value ?? '01'
+  return `${year}-${month}-${day}`
+}
+
+function getDayOfWeekFromDateKey(dateKey: string) {
+  const [year, month, day] = dateKey.split('-').map(Number)
+  return new Date(year, month - 1, day).getDay()
+}
+
+function formatPublicOpeningWindows(windows: PublicOpeningHoursWindow[]) {
+  return windows.length > 0
+    ? windows.map((window) => `${window.opensAt} to ${window.closesAt}`).join(', ')
+    : 'Closed'
+}
+
+function formatPublicSpecialDate(dateKey: string) {
+  const [year, month, day] = dateKey.split('-').map(Number)
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(new Date(year, month - 1, day))
+}
+
+function getPublicRestaurantStatus(restaurant: PublicOrderingContext['restaurant']) {
+  if (restaurant.isOrderingAvailable) {
+    return {
+      label: 'Open',
+      tone: 'open' as const,
+      description: 'Ordering is available now.',
+    }
+  }
+
+  if (!restaurant.isWithinOpeningHours) {
+    return {
+      label: 'Closed',
+      tone: 'closed' as const,
+      description: restaurant.orderingStatusMessage || 'The restaurant is outside operating hours.',
+    }
+  }
+
+  return {
+    label: 'Paused',
+    tone: 'paused' as const,
+    description: restaurant.orderingStatusMessage || 'Ordering is paused right now.',
+  }
+}
+
 function isNotePresetApplied(note: string, preset: string) {
   return note.trim().toLowerCase().includes(preset.trim().toLowerCase())
 }
@@ -189,6 +397,7 @@ export function CustomerMenuPage() {
   const navigate = useNavigate()
   const { user, logout } = useAuth()
   const [state, setState] = useState<CustomerMenuState>({ status: 'loading' })
+  const [retryKey, setRetryKey] = useState(0)
   const [search, setSearch] = useState('')
   const [activeCategoryId, setActiveCategoryId] = useState<string | 'all'>('all')
   const [addingItemId, setAddingItemId] = useState<string | null>(null)
@@ -289,6 +498,11 @@ export function CustomerMenuPage() {
           return
         }
 
+        if (!context.restaurant.isOrderingAvailable) {
+          setState({ status: 'choosing', context, menu })
+          return
+        }
+
         if (restaurantId) {
           setState({ status: 'choosing', context, menu })
           return
@@ -323,7 +537,7 @@ export function CustomerMenuPage() {
     return () => {
       cancelled = true
     }
-  }, [restaurantId, qrToken])
+  }, [restaurantId, qrToken, retryKey])
 
   useEffect(() => {
     latestCartRef.current = state.status === 'ready' ? state.cart : null
@@ -516,6 +730,11 @@ export function CustomerMenuPage() {
   const chooseOrderType = async (orderType: 'DineIn' | 'Takeaway') => {
     if (state.status !== 'choosing' || selectingOrderType) return
 
+    if (!state.context.restaurant.isOrderingAvailable) {
+      toast.error(state.context.restaurant.orderingStatusMessage)
+      return
+    }
+
     setSelectingOrderType(true)
     try {
       const cartSession = await loadOrJoinCart(
@@ -548,6 +767,11 @@ export function CustomerMenuPage() {
       return
     }
 
+    if (!state.context.restaurant.isOrderingAvailable) {
+      toast.error(state.context.restaurant.orderingStatusMessage)
+      return
+    }
+
     setSelectingOrderType(true)
     try {
       const cartSession = await loadOrJoinCart(
@@ -577,7 +801,13 @@ export function CustomerMenuPage() {
   }
 
   if (state.status === 'error') {
-    return <CustomerMenuError title={state.title} message={state.message} />
+    return (
+      <CustomerMenuError
+        title={state.title}
+        message={state.message}
+        onRetry={(restaurantId || qrToken) ? () => setRetryKey((k) => k + 1) : undefined}
+      />
+    )
   }
 
   if (state.status === 'choosing') {
@@ -898,6 +1128,12 @@ export function CustomerMenuPage() {
 
   const handleCheckout = async () => {
     if (checkingOut || clearingCart) return
+
+    if (!context.restaurant.isOrderingAvailable) {
+      toast.error(context.restaurant.orderingStatusMessage)
+      return
+    }
+
     setCheckingOut(true)
     try {
       const result = await checkoutCart(cart.id, participantToken)
@@ -978,17 +1214,20 @@ export function CustomerMenuPage() {
                   </SelectContent>
                 </Select>
               )}
-              <CartViewerButton
-                viewer={user}
-                onLogout={() => {
-                  logout()
-                  navigate('/login')
-                }}
-              />
+              <div className="flex shrink-0 items-center gap-2">
+                <RestaurantOperatingStatusButton restaurant={context.restaurant} />
+                <CartViewerButton
+                  viewer={user}
+                  onLogout={() => {
+                    logout()
+                    navigate('/login')
+                  }}
+                />
+              </div>
             </div>
             <div className="absolute inset-x-0 bottom-0 z-10 space-y-3 p-5 text-white sm:p-7">
               <div className="space-y-1">
-                <p className="text-xs font-semibold uppercase tracking-[0.22em] text-white/75">DineFlow</p>
+                <BrandLogo className="public-menu-brand-logo" />
                 <h1 className="font-heading max-w-3xl text-4xl font-semibold leading-none tracking-tight sm:text-6xl">
                   {context.restaurant.name}
                 </h1>
@@ -1035,8 +1274,18 @@ export function CustomerMenuPage() {
                       setActiveCategoryId('all')
                     }}
                     placeholder="Search dishes, drinks, or add-ons"
-                    className="h-12 rounded-xl border-muted bg-background/80 pl-10 pr-4 text-base shadow-inner shadow-black/[0.02] focus-visible:ring-2"
+                    className="h-12 rounded-xl border-muted bg-background/80 pl-10 pr-10 text-base shadow-inner shadow-black/[0.02] focus-visible:ring-2"
                   />
+                  {search && (
+                    <button
+                      type="button"
+                      aria-label="Clear search"
+                      onClick={() => { setSearch(''); setActiveCategoryId('all') }}
+                      className="absolute right-3.5 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-muted-foreground hover:text-foreground"
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
                 </div>
                 <div className="flex shrink-0 items-center justify-between gap-2 rounded-xl bg-muted/60 px-3 py-2 text-xs font-semibold text-muted-foreground sm:min-w-28 sm:justify-center">
                   <span>{visibleMenuItemCount} shown</span>
@@ -1122,6 +1371,10 @@ async function loadOrJoinCart(
   storageKeySuffix: string,
   orderType: 'DineIn' | 'Takeaway',
 ): Promise<{ cart: Cart; participantToken: string; participantId: string }> {
+  if (!context.restaurant.isOrderingAvailable) {
+    throw new Error(context.restaurant.orderingStatusMessage)
+  }
+
   const storageKey = `${cartSessionPrefix}.${storageKeySuffix}`
   const stored = readStoredCartSession(storageKey)
 
@@ -1161,6 +1414,154 @@ async function loadOrJoinCart(
     participantToken: joined.participantToken,
     participantId: joined.participantId,
   }
+}
+
+function RestaurantOperatingStatusButton({ restaurant }: { restaurant: PublicOrderingContext['restaurant'] }) {
+  const [open, setOpen] = useState(false)
+  const status = getPublicRestaurantStatus(restaurant)
+  const openingHours = parsePublicOpeningHours(restaurant.openingHoursJson)
+  const specialOpeningDays = parsePublicSpecialOpeningDays(restaurant.specialOpeningDaysJson)
+  const todayKey = getRestaurantDateKey(restaurant.timezone)
+  const todaySpecial = specialOpeningDays.find((day) => day.date === todayKey)
+  const todayRegular = openingHours.find((day) => day.dayOfWeek === getDayOfWeekFromDateKey(todayKey))
+  const todayIsOpen = todaySpecial ? !todaySpecial.isClosed : Boolean(todayRegular?.isOpen)
+  const todayWindows = todaySpecial
+    ? todaySpecial.windows
+    : todayRegular?.isOpen
+      ? todayRegular.windows
+      : []
+  const upcomingSpecialDays = specialOpeningDays
+    .filter((day) => day.date >= todayKey)
+    .slice(0, 6)
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className={cn(
+                'h-10 rounded-full border-white/50 bg-background/95 px-3 text-foreground shadow-lg backdrop-blur hover:bg-background',
+                status.tone === 'open' && 'border-emerald-200/80 text-emerald-800 dark:border-emerald-400/40 dark:text-emerald-100',
+                status.tone === 'closed' && 'border-red-200/80 text-red-700 dark:border-red-400/40 dark:text-red-100',
+                status.tone === 'paused' && 'border-amber-200/80 text-amber-800 dark:border-amber-400/40 dark:text-amber-100',
+              )}
+              onClick={() => setOpen(true)}
+            >
+              <span
+                className={cn(
+                  'size-2 rounded-full',
+                  status.tone === 'open' && 'bg-emerald-500',
+                  status.tone === 'closed' && 'bg-red-500',
+                  status.tone === 'paused' && 'bg-amber-500',
+                )}
+                aria-hidden="true"
+              />
+              <Clock3 className="size-3.5" />
+              <span>{status.label}</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" align="end" sideOffset={8}>
+            Click to view operating hours
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <CalendarClock className="size-5" />
+            Operating hours
+          </DialogTitle>
+          <DialogDescription>
+            Times use {restaurant.name}'s timezone: {restaurant.timezone}.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div
+            className={cn(
+              'rounded-xl border p-4',
+              status.tone === 'open' && 'border-emerald-200 bg-emerald-50 text-emerald-950 dark:border-emerald-400/25 dark:bg-emerald-400/10 dark:text-emerald-50',
+              status.tone === 'closed' && 'border-red-200 bg-red-50 text-red-950 dark:border-red-400/25 dark:bg-red-400/10 dark:text-red-50',
+              status.tone === 'paused' && 'border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-50',
+            )}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">Current status</p>
+                <p className="mt-1 text-2xl font-semibold">{status.label}</p>
+              </div>
+              <Badge variant={todayIsOpen ? 'secondary' : 'destructive'} className="rounded-full">
+                {todaySpecial ? 'Special today' : 'Today'}
+              </Badge>
+            </div>
+            <p className="mt-3 text-sm opacity-80">{status.description}</p>
+          </div>
+
+          <div className="rounded-xl border bg-card p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-foreground">Today</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {todaySpecial ? 'Special schedule override' : 'Weekly schedule'}
+                </p>
+              </div>
+              <p className="text-right text-sm font-semibold text-foreground">
+                {formatPublicOpeningWindows(todayWindows)}
+              </p>
+            </div>
+            {todaySpecial?.note ? (
+              <p className="mt-3 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">{todaySpecial.note}</p>
+            ) : null}
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-sm font-semibold text-foreground">Weekly hours</p>
+            <div className="overflow-hidden rounded-xl border">
+              {publicOpeningDayLabels.map((label, dayOfWeek) => {
+                const day = openingHours.find((entry) => entry.dayOfWeek === dayOfWeek)
+                return (
+                  <div key={label} className="grid grid-cols-[96px_minmax(0,1fr)] gap-3 border-b px-3 py-2.5 text-sm last:border-b-0">
+                    <span className="font-medium text-foreground">{label}</span>
+                    <span className="text-right text-muted-foreground">
+                      {day?.isOpen ? formatPublicOpeningWindows(day.windows) : 'Closed'}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-sm font-semibold text-foreground">Special days</p>
+            {upcomingSpecialDays.length > 0 ? (
+              <div className="overflow-hidden rounded-xl border">
+                {upcomingSpecialDays.map((day) => (
+                  <div key={day.date} className="grid gap-1 border-b px-3 py-2.5 text-sm last:border-b-0">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-medium text-foreground">{formatPublicSpecialDate(day.date)}</span>
+                      <span className={cn('text-right font-semibold', day.isClosed ? 'text-red-600 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300')}>
+                        {day.isClosed ? 'Closed' : formatPublicOpeningWindows(day.windows)}
+                      </span>
+                    </div>
+                    {day.note ? <span className="text-muted-foreground">{day.note}</span> : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="rounded-xl border border-dashed p-3 text-sm text-muted-foreground">
+                No upcoming special days are published.
+              </p>
+            )}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 function readStoredCartSession(storageKey: string) {
@@ -2174,7 +2575,7 @@ function CartSummaryBar({
                 <div className="min-w-0 flex-1">
                   <div className="min-w-0 space-y-1">
                     <h2 className="font-heading flex items-center gap-2 text-xl font-semibold tracking-tight">
-                      <span className="flex size-9 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                      <span className="flex size-9 items-center justify-center rounded-full border bg-muted text-foreground">
                         <ShoppingBag className="size-5" />
                       </span>
                       Cart
@@ -2332,21 +2733,22 @@ function CartSummaryBar({
 
         <Button
           type="button"
-          className="min-h-14 flex-1 justify-between rounded-2xl px-5 py-3 text-base shadow-lg shadow-black/10"
+          variant="secondary"
+          className="min-h-14 flex-1 justify-between rounded-2xl border border-border bg-card px-5 py-3 text-base text-foreground shadow-lg shadow-black/10 hover:bg-muted"
           onClick={() => onOpenChange(!open)}
         >
           <span className="flex items-center gap-3">
-            <span className="flex size-8 items-center justify-center rounded-md border border-primary-foreground/25 bg-primary-foreground/10">
+            <span className="flex size-8 items-center justify-center rounded-md border bg-muted text-foreground">
               <ShoppingBag className="size-5" />
             </span>
             <span className="font-heading text-lg font-semibold">Cart</span>
             {open ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />}
           </span>
           <span className="flex items-center gap-4">
-            <Badge variant="secondary" className="h-7 min-w-7 justify-center rounded-full bg-primary-foreground px-2 text-primary">
+            <Badge variant="secondary" className="h-7 min-w-7 justify-center rounded-full border bg-muted px-2 text-foreground">
               {cart.itemCount}
             </Badge>
-            <PriceText value={cart.total} currencyFormatter={currencyFormatter} variant="bar" />
+            <PriceText value={cart.total} currencyFormatter={currencyFormatter} variant="bar" className="text-foreground" />
           </span>
         </Button>
       </div>
@@ -2368,35 +2770,50 @@ function CartOrderNoteEditor({
   onDirtyChange?: (hasUnsavedChanges: boolean) => void
 }) {
   const [open, setOpen] = useState(false)
-  const [draft, setDraft] = useState(note)
-  const [saveError, setSaveError] = useState<string | null>(null)
+  const [draftState, setDraftState] = useState(() => ({
+    sourceNote: note,
+    draft: note,
+    saveError: null as string | null,
+  }))
+  const draft = draftState.sourceNote === note ? draftState.draft : note
+  const saveError = draftState.sourceNote === note ? draftState.saveError : null
   const normalizedNote = note.trim()
   const normalizedDraft = draft.trim()
   const hasChanges = normalizedDraft !== normalizedNote
 
   useEffect(() => {
-    setDraft(note)
-    setSaveError(null)
-  }, [note])
-
-  useEffect(() => {
     onDirtyChange?.(open && hasChanges)
   }, [hasChanges, onDirtyChange, open])
 
+  const updateDraft = (nextDraft: string) => {
+    setDraftState({
+      sourceNote: note,
+      draft: nextDraft,
+      saveError: null,
+    })
+  }
+
+  const updateSaveError = (nextSaveError: string | null) => {
+    setDraftState((current) => ({
+      sourceNote: note,
+      draft: current.sourceNote === note ? current.draft : note,
+      saveError: nextSaveError,
+    }))
+  }
+
   const handleCancel = () => {
-    setDraft(note)
-    setSaveError(null)
+    updateDraft(note)
     setOpen(false)
   }
 
   const handleSave = async () => {
-    setSaveError(null)
+    updateSaveError(null)
 
     try {
       await onSave(draft)
       setOpen(false)
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : 'Could not save order note')
+      updateSaveError(error instanceof Error ? error.message : 'Could not save order note')
     }
   }
 
@@ -2424,7 +2841,7 @@ function CartOrderNoteEditor({
             size="sm"
             className="shrink-0"
             onClick={() => {
-              setSaveError(null)
+              updateSaveError(null)
               setOpen(true)
             }}
           >
@@ -2443,8 +2860,7 @@ function CartOrderNoteEditor({
             placeholder="Please bring extra cutlery, keep all spicy dishes mild, allergy notes..."
             disabled={isReadOnly || isSaving}
             onChange={(event) => {
-              setDraft(event.target.value)
-              setSaveError(null)
+              updateDraft(event.target.value)
             }}
           />
           <QuickNotePresetGroups
@@ -2453,8 +2869,7 @@ function CartOrderNoteEditor({
             maxLength={orderNoteMaxLength}
             disabled={isReadOnly || isSaving}
             onNoteChange={(nextNote) => {
-              setDraft(nextNote)
-              setSaveError(null)
+              updateDraft(nextNote)
             }}
           />
           {hasChanges ? (
@@ -2753,7 +3168,7 @@ function CartSummaryLine({
                             </Button>
                           </span>
                         ) : optionQuantity > 1 ? (
-                          <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary">
+                          <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs font-semibold text-foreground">
                             x{optionQuantity}
                           </span>
                         ) : null}
@@ -2869,19 +3284,37 @@ function PublicOrderTypeChooser({
   loading: boolean
   onSelect: (orderType: 'DineIn' | 'Takeaway') => void
 }) {
+  const orderingUnavailable = !context.restaurant.isOrderingAvailable
+
   return (
     <main className="flex min-h-svh items-center justify-center bg-background px-4 py-10">
       <div className="w-full max-w-lg space-y-6">
         <div className="space-y-2 text-center">
           <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Public ordering</p>
           <h1 className="text-3xl font-semibold">{context.restaurant.name}</h1>
-          <p className="text-sm text-muted-foreground">How would you like to order today?</p>
+          <p className="text-sm text-muted-foreground">
+            {orderingUnavailable ? 'Ordering is currently unavailable.' : 'How would you like to order today?'}
+          </p>
         </div>
+
+        {orderingUnavailable ? (
+          <Card className="rounded-lg border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-50">
+            <CardContent className="flex gap-3 p-4">
+              <AlertCircle className="mt-0.5 size-5 shrink-0" />
+              <div>
+                <p className="font-semibold">
+                  {context.restaurant.orderingUnavailableReason === 'Paused' ? 'Ordering paused' : 'Closed for ordering'}
+                </p>
+                <p className="mt-1 text-sm opacity-80">{context.restaurant.orderingStatusMessage}</p>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
 
         <div className="grid gap-3 sm:grid-cols-2">
           {context.availableOrderTypes.includes('DineIn') ? (
             <Card><CardContent className="p-3">
-              <Button type="button" variant="ghost" className="h-auto w-full flex-col items-start gap-3 whitespace-normal p-4 text-left" disabled={loading} onClick={() => onSelect('DineIn')}>
+              <Button type="button" variant="ghost" className="h-auto w-full flex-col items-start gap-3 whitespace-normal p-4 text-left" disabled={loading || orderingUnavailable} onClick={() => onSelect('DineIn')}>
                 <span className="flex size-10 items-center justify-center rounded-full bg-muted"><Utensils className="size-5" /></span>
                 <span>
                   <strong className="block text-base">Dine in</strong>
@@ -2893,7 +3326,7 @@ function PublicOrderTypeChooser({
 
           {context.availableOrderTypes.includes('Takeaway') ? (
             <Card><CardContent className="p-3">
-              <Button type="button" variant="ghost" className="h-auto w-full flex-col items-start gap-3 whitespace-normal p-4 text-left" disabled={loading} onClick={() => onSelect('Takeaway')}>
+              <Button type="button" variant="ghost" className="h-auto w-full flex-col items-start gap-3 whitespace-normal p-4 text-left" disabled={loading || orderingUnavailable} onClick={() => onSelect('Takeaway')}>
                 <span className="flex size-10 items-center justify-center rounded-full bg-muted"><ShoppingBag className="size-5" /></span>
                 <span>
                   <strong className="block text-base">Takeaway</strong>
@@ -2924,7 +3357,7 @@ function CustomerMenuLoading() {
   )
 }
 
-function CustomerMenuError({ title, message }: { title: string; message: string }) {
+function CustomerMenuError({ title, message, onRetry }: { title: string; message: string; onRetry?: () => void }) {
   return (
     <main className="flex min-h-svh items-center justify-center bg-background p-6">
       <Card className="w-full max-w-md rounded-lg">
@@ -2936,6 +3369,12 @@ function CustomerMenuError({ title, message }: { title: string; message: string 
               <p className="text-sm text-muted-foreground">{message}</p>
             </div>
           </div>
+          {onRetry ? (
+            <Button variant="outline" className="w-full" onClick={onRetry}>
+              <RefreshCw className="size-4" />
+              Try again
+            </Button>
+          ) : null}
           <Button asChild className="w-full">
             <Link to="/login">Go to sign in</Link>
           </Button>
@@ -3101,7 +3540,7 @@ function PriceText({
         variant === 'total' &&
           'font-heading text-3xl font-semibold leading-none tracking-tight text-foreground',
         variant === 'bar' &&
-          'text-base font-semibold leading-none text-primary-foreground',
+          'text-base font-semibold leading-none text-foreground',
         className,
       )}
     >
@@ -3112,10 +3551,10 @@ function PriceText({
             part.type === 'currency' &&
               cn(
                 'mr-0.5 text-[0.7em] font-semibold',
-                variant === 'bar' ? 'text-primary-foreground/75' : 'text-amber-700 dark:text-amber-200/80',
+                variant === 'bar' ? 'text-muted-foreground' : 'text-amber-700 dark:text-amber-200/80',
               ),
             part.type === 'decimal' &&
-              cn('mx-px text-[0.85em]', variant === 'bar' ? 'text-primary-foreground/75' : 'text-amber-700 dark:text-amber-200/80'),
+              cn('mx-px text-[0.85em]', variant === 'bar' ? 'text-muted-foreground' : 'text-amber-700 dark:text-amber-200/80'),
             part.type === 'fraction' && 'text-[0.82em]',
           )}
         >

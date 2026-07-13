@@ -186,7 +186,18 @@ export function CheckoutPage() {
         {pageState.status === 'error' ? (
           <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2">
             <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
-            <p className="text-sm text-destructive">{pageState.message}</p>
+            <div className="flex-1 space-y-2">
+              <p className="text-sm text-destructive">{pageState.message}</p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setPageState({ status: 'ready' })}
+                className="h-7 border-destructive/40 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+              >
+                Dismiss and try again
+              </Button>
+            </div>
           </div>
         ) : null}
 

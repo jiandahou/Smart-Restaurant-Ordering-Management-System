@@ -30,6 +30,20 @@ public sealed class PublicOrderingRestaurantResponse
     public required string Currency { get; init; }
 
     public required string PaymentPolicy { get; init; }
+
+    public bool AcceptingOrders { get; init; }
+
+    public required string OpeningHoursJson { get; init; }
+
+    public required string SpecialOpeningDaysJson { get; init; }
+
+    public bool IsWithinOpeningHours { get; init; }
+
+    public bool IsOrderingAvailable { get; init; }
+
+    public required string OrderingUnavailableReason { get; init; }
+
+    public required string OrderingStatusMessage { get; init; }
 }
 
 public sealed class PublicOrderingTableResponse

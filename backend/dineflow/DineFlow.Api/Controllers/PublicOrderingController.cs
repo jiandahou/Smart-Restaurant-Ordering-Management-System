@@ -1,4 +1,5 @@
 using DineFlow.Api.Contracts.Ordering;
+using DineFlow.Api.Services;
 using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
@@ -10,7 +11,9 @@ namespace DineFlow.Api.Controllers;
 [ApiController]
 [AllowAnonymous]
 [Route("api/public/ordering")]
-public class PublicOrderingController(AppDbContext dbContext) : ControllerBase
+public class PublicOrderingController(
+    AppDbContext dbContext,
+    RestaurantOperatingHoursService restaurantOperatingHoursService) : ControllerBase
 {
     [HttpGet("restaurants/{restaurantId:guid}")]
     public async Task<IActionResult> GetRestaurantOrderingContext(
@@ -20,17 +23,6 @@ public class PublicOrderingController(AppDbContext dbContext) : ControllerBase
         var restaurant = await dbContext.Restaurants
             .AsNoTracking()
             .Where(item => item.Id == restaurantId && item.IsActive)
-            .Select(item => new PublicOrderingRestaurantResponse
-            {
-                Id = item.Id,
-                Name = item.Name,
-                Address = item.Address,
-                Phone = item.Phone,
-                ImageUrl = item.ImageUrl,
-                Timezone = item.Timezone,
-                Currency = item.Currency,
-                PaymentPolicy = item.PaymentPolicy.ToString()
-            })
             .FirstOrDefaultAsync(cancellationToken);
 
         if (restaurant is null)
@@ -40,7 +32,7 @@ public class PublicOrderingController(AppDbContext dbContext) : ControllerBase
 
         return Ok(new PublicOrderingContextResponse
         {
-            Restaurant = restaurant,
+            Restaurant = MapRestaurant(restaurant),
             Table = null,
             OrderType = OrderType.Takeaway.ToString(),
             AvailableOrderTypes = [OrderType.DineIn.ToString(), OrderType.Takeaway.ToString()],
@@ -63,29 +55,7 @@ public class PublicOrderingController(AppDbContext dbContext) : ControllerBase
                 join restaurant in dbContext.Restaurants.AsNoTracking()
                     on table.RestaurantId equals restaurant.Id
                 where table.QrToken == qrToken && table.IsActive && restaurant.IsActive
-                select new PublicOrderingContextResponse
-                {
-                    Restaurant = new PublicOrderingRestaurantResponse
-                    {
-                        Id = restaurant.Id,
-                        Name = restaurant.Name,
-                        Address = restaurant.Address,
-                        Phone = restaurant.Phone,
-                        ImageUrl = restaurant.ImageUrl,
-                        Timezone = restaurant.Timezone,
-                        Currency = restaurant.Currency,
-                        PaymentPolicy = restaurant.PaymentPolicy.ToString()
-                    },
-                    Table = new PublicOrderingTableResponse
-                    {
-                        Id = table.Id,
-                        TableNumber = table.TableNumber,
-                        Capacity = table.Capacity
-                    },
-                    OrderType = OrderType.DineIn.ToString(),
-                    AvailableOrderTypes = new[] { OrderType.DineIn.ToString() },
-                    MenuEntryUrl = $"/table/{table.QrToken}"
-                })
+                select new { Table = table, Restaurant = restaurant })
             .FirstOrDefaultAsync(cancellationToken);
 
         if (context is null)
@@ -93,6 +63,42 @@ public class PublicOrderingController(AppDbContext dbContext) : ControllerBase
             return NotFound(new { message = "Table QR code is invalid or unavailable." });
         }
 
-        return Ok(context);
+        return Ok(new PublicOrderingContextResponse
+        {
+            Restaurant = MapRestaurant(context.Restaurant),
+            Table = new PublicOrderingTableResponse
+            {
+                Id = context.Table.Id,
+                TableNumber = context.Table.TableNumber,
+                Capacity = context.Table.Capacity
+            },
+            OrderType = OrderType.DineIn.ToString(),
+            AvailableOrderTypes = [OrderType.DineIn.ToString()],
+            MenuEntryUrl = $"/table/{context.Table.QrToken}"
+        });
+    }
+
+    private PublicOrderingRestaurantResponse MapRestaurant(DineFlow.Infrastructure.Restaurant.Restaurant restaurant)
+    {
+        var availability = restaurantOperatingHoursService.GetAvailability(restaurant);
+
+        return new PublicOrderingRestaurantResponse
+        {
+            Id = restaurant.Id,
+            Name = restaurant.Name,
+            Address = restaurant.Address,
+            Phone = restaurant.Phone,
+            ImageUrl = restaurant.ImageUrl,
+            Timezone = restaurant.Timezone,
+            Currency = restaurant.Currency,
+            PaymentPolicy = restaurant.PaymentPolicy.ToString(),
+            AcceptingOrders = restaurant.AcceptingOrders,
+            OpeningHoursJson = restaurant.OpeningHoursJson,
+            SpecialOpeningDaysJson = restaurant.SpecialOpeningDaysJson,
+            IsWithinOpeningHours = availability.IsWithinOpeningHours,
+            IsOrderingAvailable = availability.IsOrderingAvailable,
+            OrderingUnavailableReason = availability.Reason,
+            OrderingStatusMessage = availability.Message
+        };
     }
 }

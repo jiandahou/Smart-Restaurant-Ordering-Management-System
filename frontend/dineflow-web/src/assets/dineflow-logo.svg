@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 220" fill="none">
+  <defs>
+    <linearGradient id="df-logo-green" x1="70" y1="34" x2="560" y2="192" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00856f"/>
+      <stop offset="1" stop-color="#005847"/>
+    </linearGradient>
+    <linearGradient id="df-logo-gold" x1="30" y1="78" x2="760" y2="174" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f5b51b"/>
+      <stop offset="1" stop-color="#d99600"/>
+    </linearGradient>
+  </defs>
+  <g>
+    <path d="M38 48h50" stroke="url(#df-logo-green)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M38 48v50" stroke="url(#df-logo-green)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M38 181h50" stroke="url(#df-logo-green)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M38 134v47" stroke="url(#df-logo-green)" stroke-width="14" stroke-linecap="round"/>
+    <rect x="84" y="78" width="27" height="27" rx="5" fill="url(#df-logo-gold)"/>
+    <rect x="84" y="117" width="27" height="27" rx="5" fill="url(#df-logo-green)"/>
+    <rect x="118" y="70" width="25" height="25" rx="5" fill="url(#df-logo-green)"/>
+    <rect x="118" y="164" width="25" height="25" rx="5" fill="url(#df-logo-gold)"/>
+    <circle cx="174" cy="120" r="66" stroke="url(#df-logo-green)" stroke-width="13"/>
+    <path d="M133 106c-18 10-32 29-35 51" stroke="url(#df-logo-green)" stroke-width="8" stroke-linecap="round"/>
+    <path d="M9 111h48c38 0 57 10 75 38" stroke="url(#df-logo-gold)" stroke-width="11" stroke-linecap="round"/>
+    <path d="M23 135h53c25 0 42 8 57 25" stroke="url(#df-logo-gold)" stroke-width="11" stroke-linecap="round"/>
+    <path d="M45 158h57c18 0 32 6 45 18" stroke="url(#df-logo-gold)" stroke-width="11" stroke-linecap="round"/>
+    <circle cx="15" cy="111" r="7" fill="url(#df-logo-gold)"/>
+    <circle cx="27" cy="135" r="5" fill="url(#df-logo-gold)"/>
+    <path d="M166 82v39c0 11 8 19 18 19v42" stroke="url(#df-logo-gold)" stroke-width="9" stroke-linecap="round"/>
+    <path d="M179 82v47" stroke="url(#df-logo-gold)" stroke-width="9" stroke-linecap="round"/>
+    <path d="M193 82v47" stroke="url(#df-logo-gold)" stroke-width="9" stroke-linecap="round"/>
+    <path d="M221 82c-15 10-20 24-20 43v57" stroke="url(#df-logo-gold)" stroke-width="12" stroke-linecap="round"/>
+    <path d="M221 82v100" stroke="url(#df-logo-gold)" stroke-width="12" stroke-linecap="round"/>
+  </g>
+  <text x="310" y="145" fill="url(#df-logo-green)" font-family="Plus Jakarta Sans, Inter, Arial, sans-serif" font-size="88" font-weight="800" letter-spacing="-4">Dine</text>
+  <text x="520" y="145" fill="url(#df-logo-gold)" font-family="Plus Jakarta Sans, Inter, Arial, sans-serif" font-size="88" font-weight="800" letter-spacing="-4">Flow</text>
+</svg>

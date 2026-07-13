@@ -62,8 +62,11 @@ public sealed class StaffOrdersController(
         if (!string.IsNullOrWhiteSpace(search))
         {
             var pattern = $"%{search}%";
+            var pickupSearch = search.TrimStart('#');
+            var hasPickupNumber = int.TryParse(pickupSearch, out var pickupNumber);
             query = query.Where(order =>
                 EF.Functions.ILike(order.OrderNumber, pattern) ||
+                (hasPickupNumber && order.PickupNumber == pickupNumber) ||
                 (order.Table != null && EF.Functions.ILike(order.Table.TableNumber, pattern)) ||
                 order.OrderItems.Any(item => EF.Functions.ILike(item.MenuItemNameSnapshot, pattern)));
         }

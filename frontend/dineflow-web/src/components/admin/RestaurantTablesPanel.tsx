@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { ArrowDownAZ, ArrowUpAZ, Armchair, Copy, ExternalLink, Pencil, Plus, QrCode, RefreshCw, Search, UsersRound, X } from 'lucide-react'
+import { ArrowDownAZ, ArrowUpAZ, Armchair, Copy, ExternalLink, Pencil, Plus, QrCode, RefreshCw, Search, SlidersHorizontal, UsersRound, X } from 'lucide-react'
 import { motion } from 'motion/react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useForm } from 'react-hook-form'
@@ -28,6 +28,7 @@ import {
 } from '../ui/dialog'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '../ui/form'
 import { Input } from '../ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
 import { Switch } from '../ui/switch'
 
@@ -249,9 +250,10 @@ function TableFormDialog({ restaurantId, table, onSaved }: TableFormDialogProps)
 type RestaurantTablesPanelProps = {
   restaurants: Restaurant[]
   restaurantsLoading: boolean
+  canSelectRestaurant: boolean
 }
 
-export function RestaurantTablesPanel({ restaurants, restaurantsLoading }: RestaurantTablesPanelProps) {
+export function RestaurantTablesPanel({ restaurants, restaurantsLoading, canSelectRestaurant }: RestaurantTablesPanelProps) {
   const [restaurantId, setRestaurantId] = useState('')
   const [tables, setTables] = useState<RestaurantTable[]>([])
   const [loading, setLoading] = useState(true)
@@ -329,6 +331,23 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading }: Resta
   }, [capacityFilter, qrFilter, search, sort, statusFilter, tables])
 
   const hasActiveFilters = search.trim() !== '' || statusFilter !== 'all' || capacityFilter !== 'all' || qrFilter !== 'all'
+  const activeTableDropdownFilterCount = [
+    statusFilter !== 'all',
+    capacityFilter !== 'all',
+    qrFilter !== 'all',
+  ].filter(Boolean).length
+  const selectedStatusFilterLabel = statusFilter === 'active' ? 'Active' : statusFilter === 'inactive' ? 'Inactive' : ''
+  const selectedCapacityFilterLabel =
+    capacityFilter === 'small'
+      ? '1-2 seats'
+      : capacityFilter === 'medium'
+        ? '3-4 seats'
+        : capacityFilter === 'large'
+          ? '5-6 seats'
+          : capacityFilter === 'extra-large'
+            ? '7+ seats'
+            : ''
+  const selectedQrFilterLabel = qrFilter === 'available' ? 'QR available' : qrFilter === 'missing' ? 'QR missing' : ''
   const SortIcon = sort.direction === 'asc' ? ArrowDownAZ : ArrowUpAZ
 
   const updateSort = (key: TableSortKey) => {
@@ -344,9 +363,15 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading }: Resta
     setCapacityFilter('all')
     setQrFilter('all')
   }
+  const renderTableActions = (table: RestaurantTable) => (
+    <div className="row-actions">
+      {table.qrToken ? <TablePublicAccessDialog table={table} /> : null}
+      <TableFormDialog restaurantId={table.restaurantId} table={table} onSaved={() => loadTables()} />
+    </div>
+  )
 
   return (
-    <Card>
+    <Card id="restaurant-tables">
       <CardHeader className="section-header">
         <div className="admin-page-title">
           <Armchair size={22} />
@@ -364,57 +389,155 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading }: Resta
         </div>
       </CardHeader>
       <CardContent className="restaurant-tables-content">
-        <div className="restaurant-table-tools">
-          <Select
-            value={selectedRestaurantId}
-            onValueChange={(value) => {
-              setRestaurantId(value)
-              resetFilters()
-              setLoading(true)
-              setError(null)
-            }}
-            disabled={restaurantsLoading || restaurants.length === 0}
-          >
-            <SelectTrigger><SelectValue placeholder="Select restaurant" /></SelectTrigger>
-            <SelectContent position="popper">
-              {restaurants.map((restaurant) => (
-                <SelectItem key={restaurant.id} value={restaurant.id}>{restaurant.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <div className="directory-search">
-            <Search size={16} />
-            <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filter by table number" />
+        <div className="restaurant-table-tools restaurant-table-filter-tools">
+          {canSelectRestaurant && (
+            <div className="restaurant-table-selector-row">
+              <Select
+                value={selectedRestaurantId}
+                onValueChange={(value) => {
+                  setRestaurantId(value)
+                  resetFilters()
+                  setLoading(true)
+                  setError(null)
+                }}
+                disabled={restaurantsLoading || restaurants.length === 0}
+              >
+                <SelectTrigger><SelectValue placeholder="Select restaurant" /></SelectTrigger>
+                <SelectContent position="popper">
+                  {restaurants.map((restaurant) => (
+                    <SelectItem key={restaurant.id} value={restaurant.id}>{restaurant.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="restaurant-table-context-row">
+            <div className="directory-search">
+              <Search size={16} />
+              <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filter by table number" />
+            </div>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button type="button" variant="outline" size="icon" className="restaurant-filter-trigger" aria-label="Filter tables">
+                  <SlidersHorizontal size={16} />
+                  {activeTableDropdownFilterCount > 0 && (
+                    <span className="restaurant-filter-count">{activeTableDropdownFilterCount}</span>
+                  )}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="restaurant-filter-popover" align="end">
+                <div className="restaurant-filter-popover-header">
+                  <strong>Filters</strong>
+                  <Button type="button" variant="ghost" size="xs" onClick={resetFilters} disabled={!hasActiveFilters}>
+                    <X size={13} />
+                    Clear all
+                  </Button>
+                </div>
+                <div className="restaurant-filter-fields">
+                  <div className="restaurant-filter-field">
+                    <span>Status</span>
+                    <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as TableStatusFilter)}>
+                      <SelectTrigger><SelectValue placeholder="Status" /></SelectTrigger>
+                      <SelectContent position="popper">
+                        <SelectItem value="all">All statuses</SelectItem>
+                        <SelectItem value="active">Active</SelectItem>
+                        <SelectItem value="inactive">Inactive</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="restaurant-filter-field">
+                    <span>Capacity</span>
+                    <Select value={capacityFilter} onValueChange={(value) => setCapacityFilter(value as CapacityFilter)}>
+                      <SelectTrigger><SelectValue placeholder="Capacity" /></SelectTrigger>
+                      <SelectContent position="popper">
+                        <SelectItem value="all">All capacities</SelectItem>
+                        <SelectItem value="small">1-2 seats</SelectItem>
+                        <SelectItem value="medium">3-4 seats</SelectItem>
+                        <SelectItem value="large">5-6 seats</SelectItem>
+                        <SelectItem value="extra-large">7+ seats</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="restaurant-filter-field">
+                    <span>QR status</span>
+                    <Select value={qrFilter} onValueChange={(value) => setQrFilter(value as QrFilter)}>
+                      <SelectTrigger><SelectValue placeholder="QR status" /></SelectTrigger>
+                      <SelectContent position="popper">
+                        <SelectItem value="all">All QR statuses</SelectItem>
+                        <SelectItem value="available">QR available</SelectItem>
+                        <SelectItem value="missing">QR missing</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
-          <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as TableStatusFilter)}>
-            <SelectTrigger><SelectValue placeholder="Status" /></SelectTrigger>
-            <SelectContent position="popper">
-              <SelectItem value="all">All statuses</SelectItem>
-              <SelectItem value="active">Active</SelectItem>
-              <SelectItem value="inactive">Inactive</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select value={capacityFilter} onValueChange={(value) => setCapacityFilter(value as CapacityFilter)}>
-            <SelectTrigger><SelectValue placeholder="Capacity" /></SelectTrigger>
-            <SelectContent position="popper">
-              <SelectItem value="all">All capacities</SelectItem>
-              <SelectItem value="small">1-2 seats</SelectItem>
-              <SelectItem value="medium">3-4 seats</SelectItem>
-              <SelectItem value="large">5-6 seats</SelectItem>
-              <SelectItem value="extra-large">7+ seats</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select value={qrFilter} onValueChange={(value) => setQrFilter(value as QrFilter)}>
-            <SelectTrigger><SelectValue placeholder="QR status" /></SelectTrigger>
-            <SelectContent position="popper">
-              <SelectItem value="all">All QR statuses</SelectItem>
-              <SelectItem value="available">QR available</SelectItem>
-              <SelectItem value="missing">QR missing</SelectItem>
-            </SelectContent>
-          </Select>
-          <Button type="button" variant="ghost" size="icon" onClick={resetFilters} disabled={!hasActiveFilters} title="Clear filters" aria-label="Clear table filters">
-            <X size={16} />
-          </Button>
+
+          <div className="restaurant-table-inline-filters">
+            <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as TableStatusFilter)}>
+              <SelectTrigger><SelectValue placeholder="Status" /></SelectTrigger>
+              <SelectContent position="popper">
+                <SelectItem value="all">All statuses</SelectItem>
+                <SelectItem value="active">Active</SelectItem>
+                <SelectItem value="inactive">Inactive</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={capacityFilter} onValueChange={(value) => setCapacityFilter(value as CapacityFilter)}>
+              <SelectTrigger><SelectValue placeholder="Capacity" /></SelectTrigger>
+              <SelectContent position="popper">
+                <SelectItem value="all">All capacities</SelectItem>
+                <SelectItem value="small">1-2 seats</SelectItem>
+                <SelectItem value="medium">3-4 seats</SelectItem>
+                <SelectItem value="large">5-6 seats</SelectItem>
+                <SelectItem value="extra-large">7+ seats</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={qrFilter} onValueChange={(value) => setQrFilter(value as QrFilter)}>
+              <SelectTrigger><SelectValue placeholder="QR status" /></SelectTrigger>
+              <SelectContent position="popper">
+                <SelectItem value="all">All QR statuses</SelectItem>
+                <SelectItem value="available">QR available</SelectItem>
+                <SelectItem value="missing">QR missing</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button type="button" variant="ghost" size="icon" onClick={resetFilters} disabled={!hasActiveFilters} title="Clear filters" aria-label="Clear table filters">
+              <X size={16} />
+            </Button>
+          </div>
+
+          {hasActiveFilters && (
+            <div className="restaurant-filter-chips" aria-label="Active table filters">
+              {search.trim() && (
+                <button type="button" className="restaurant-filter-chip" onClick={() => setSearch('')} title={`Search: ${search.trim()}`}>
+                  <span>Search: {search.trim()}</span>
+                  <X size={13} />
+                </button>
+              )}
+              {statusFilter !== 'all' && (
+                <button type="button" className="restaurant-filter-chip" onClick={() => setStatusFilter('all')} title={`Status: ${selectedStatusFilterLabel}`}>
+                  <span>Status: {selectedStatusFilterLabel}</span>
+                  <X size={13} />
+                </button>
+              )}
+              {capacityFilter !== 'all' && (
+                <button type="button" className="restaurant-filter-chip" onClick={() => setCapacityFilter('all')} title={`Capacity: ${selectedCapacityFilterLabel}`}>
+                  <span>Capacity: {selectedCapacityFilterLabel}</span>
+                  <X size={13} />
+                </button>
+              )}
+              {qrFilter !== 'all' && (
+                <button type="button" className="restaurant-filter-chip" onClick={() => setQrFilter('all')} title={`QR: ${selectedQrFilterLabel}`}>
+                  <span>QR: {selectedQrFilterLabel}</span>
+                  <X size={13} />
+                </button>
+              )}
+              <button type="button" className="restaurant-filter-chip restaurant-filter-chip-clear" onClick={resetFilters}>
+                <X size={13} />
+                <span>Clear all</span>
+              </button>
+            </div>
+          )}
         </div>
 
         {selectedRestaurant && <p className="restaurant-table-scope">Showing tables for <strong>{selectedRestaurant.name}</strong></p>}
@@ -427,7 +550,8 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading }: Resta
             Loading restaurant tables...
           </div>
         ) : (
-          <div className="table-wrap">
+          <>
+          <div className="table-wrap restaurant-tables-table-wrap">
             <table className="data-table restaurant-tables-table">
               <thead>
                 <tr>
@@ -452,10 +576,7 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading }: Resta
                     </td>
                     <td>{table.updatedAt ? formatDate(table.updatedAt) : 'Not updated'}</td>
                     <td>
-                      <div className="row-actions">
-                        {table.qrToken ? <TablePublicAccessDialog table={table} /> : null}
-                        <TableFormDialog restaurantId={table.restaurantId} table={table} onSaved={() => loadTables()} />
-                      </div>
+                      {renderTableActions(table)}
                     </td>
                   </tr>
                 ))}
@@ -469,6 +590,54 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading }: Resta
               </tbody>
             </table>
           </div>
+          <div className="restaurant-mobile-list restaurant-table-mobile-list" aria-label="Restaurant tables">
+            {filteredTables.map((table) => (
+              <article className="restaurant-mobile-card restaurant-table-mobile-card" key={table.id}>
+                <header className="restaurant-mobile-card-header">
+                  <span className="restaurant-mobile-avatar">
+                    <Armchair size={18} />
+                  </span>
+                  <div className="restaurant-mobile-primary">
+                    <strong title={`Table ${table.tableNumber}`}>Table {table.tableNumber}</strong>
+                    <span>{table.capacity} seats</span>
+                  </div>
+                  <Badge variant={table.isActive ? 'secondary' : 'destructive'}>{table.isActive ? 'Active' : 'Inactive'}</Badge>
+                </header>
+                <div className="restaurant-mobile-meta-grid">
+                  <div className="restaurant-mobile-meta">
+                    <UsersRound size={15} />
+                    <div>
+                      <span>Capacity</span>
+                      <strong>{table.capacity} seats</strong>
+                    </div>
+                  </div>
+                  <div className="restaurant-mobile-meta">
+                    <QrCode size={15} />
+                    <div>
+                      <span>QR</span>
+                      <strong title={table.qrToken ?? undefined}>{table.qrToken ? 'Available' : 'Not configured'}</strong>
+                    </div>
+                  </div>
+                  <div className="restaurant-mobile-meta">
+                    <RefreshCw size={15} />
+                    <div>
+                      <span>Updated</span>
+                      <strong>{table.updatedAt ? formatDate(table.updatedAt) : 'Not updated'}</strong>
+                    </div>
+                  </div>
+                </div>
+                <div className="restaurant-mobile-actions">
+                  {renderTableActions(table)}
+                </div>
+              </article>
+            ))}
+            {filteredTables.length === 0 && (
+              <div className="restaurant-mobile-empty">
+                {!selectedRestaurantId ? 'Select a restaurant to view its tables.' : hasActiveFilters ? 'No tables match the current filters.' : 'This restaurant has no tables yet.'}
+              </div>
+            )}
+          </div>
+          </>
         )}
       </CardContent>
     </Card>

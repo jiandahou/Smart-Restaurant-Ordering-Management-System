@@ -50,15 +50,18 @@ public class RestaurantController : ControllerBase
     private readonly AppDbContext _dbContext;
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly ReportLogWriter _reportLogWriter;
+    private readonly RestaurantOperatingHoursService _restaurantOperatingHoursService;
 
     public RestaurantController(
         AppDbContext dbContext,
         UserManager<ApplicationUser> userManager,
-        ReportLogWriter reportLogWriter)
+        ReportLogWriter reportLogWriter,
+        RestaurantOperatingHoursService restaurantOperatingHoursService)
     {
         _dbContext = dbContext;
         _userManager = userManager;
         _reportLogWriter = reportLogWriter;
+        _restaurantOperatingHoursService = restaurantOperatingHoursService;
     }
 
     [HttpGet]
@@ -135,6 +138,9 @@ public class RestaurantController : ControllerBase
             Currency = restaurant.Currency,
             PaymentPolicy = restaurant.PaymentPolicy.ToString(),
             IsActive = restaurant.IsActive,
+            AcceptingOrders = restaurant.AcceptingOrders,
+            OpeningHoursJson = restaurant.OpeningHoursJson,
+            SpecialOpeningDaysJson = restaurant.SpecialOpeningDaysJson,
             CreatedAt = restaurant.CreatedAt,
             UpdatedAt = restaurant.UpdatedAt
         });
@@ -198,6 +204,22 @@ public class RestaurantController : ControllerBase
             return BadRequest(new { message = validationError });
         }
 
+        if (!_restaurantOperatingHoursService.TryNormalizeOpeningHoursJson(
+            request.OpeningHoursJson,
+            out var openingHoursJson,
+            out var openingHoursError))
+        {
+            return BadRequest(new { message = openingHoursError });
+        }
+
+        if (!_restaurantOperatingHoursService.TryNormalizeSpecialOpeningDaysJson(
+            request.SpecialOpeningDaysJson,
+            out var specialOpeningDaysJson,
+            out var specialOpeningDaysError))
+        {
+            return BadRequest(new { message = specialOpeningDaysError });
+        }
+
         var restaurant = new Restaurant
         {
             Id = Guid.NewGuid(),
@@ -210,6 +232,9 @@ public class RestaurantController : ControllerBase
             Currency = request.Currency.Trim().ToUpperInvariant(),
             PaymentPolicy = Enum.Parse<RestaurantPaymentPolicy>(request.PaymentPolicy, true),
             IsActive = request.IsActive,
+            AcceptingOrders = request.AcceptingOrders,
+            OpeningHoursJson = openingHoursJson,
+            SpecialOpeningDaysJson = specialOpeningDaysJson,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = null
         };
@@ -243,6 +268,22 @@ public class RestaurantController : ControllerBase
             return BadRequest(new { message = validationError });
         }
 
+        if (!_restaurantOperatingHoursService.TryNormalizeOpeningHoursJson(
+            request.OpeningHoursJson,
+            out var openingHoursJson,
+            out var openingHoursError))
+        {
+            return BadRequest(new { message = openingHoursError });
+        }
+
+        if (!_restaurantOperatingHoursService.TryNormalizeSpecialOpeningDaysJson(
+            request.SpecialOpeningDaysJson,
+            out var specialOpeningDaysJson,
+            out var specialOpeningDaysError))
+        {
+            return BadRequest(new { message = specialOpeningDaysError });
+        }
+
         var restaurant = await _dbContext.Restaurants.FirstOrDefaultAsync(r => r.Id == id);
 
         if (restaurant is null)
@@ -261,6 +302,9 @@ public class RestaurantController : ControllerBase
         restaurant.Currency = request.Currency.Trim().ToUpperInvariant();
         restaurant.PaymentPolicy = Enum.Parse<RestaurantPaymentPolicy>(request.PaymentPolicy, true);
         restaurant.IsActive = request.IsActive;
+        restaurant.AcceptingOrders = request.AcceptingOrders;
+        restaurant.OpeningHoursJson = openingHoursJson;
+        restaurant.SpecialOpeningDaysJson = specialOpeningDaysJson;
         restaurant.UpdatedAt = DateTime.UtcNow;
 
         _reportLogWriter.AddAudit(
@@ -276,6 +320,46 @@ public class RestaurantController : ControllerBase
         return Ok(new
         {
             message = "Restaurant updated successfully.",
+            restaurant = MapToResponse(restaurant)
+        });
+    }
+
+    [HttpPatch("{id:guid}/ordering-status")]
+    public async Task<IActionResult> UpdateOrderingStatus(
+        Guid id,
+        [FromBody] RestaurantOrderingStatusRequest request)
+    {
+        if (!await CanAccessRestaurantAsync(id))
+        {
+            return Forbid();
+        }
+
+        var restaurant = await _dbContext.Restaurants.FirstOrDefaultAsync(r => r.Id == id);
+
+        if (restaurant is null)
+        {
+            return NotFound(new { message = "Restaurant not found." });
+        }
+
+        var beforeRestaurant = SnapshotRestaurant(restaurant);
+        restaurant.AcceptingOrders = request.AcceptingOrders;
+        restaurant.UpdatedAt = DateTime.UtcNow;
+
+        _reportLogWriter.AddAudit(
+            request.AcceptingOrders ? "Restaurant.OrderingResumed" : "Restaurant.OrderingPaused",
+            "Restaurant",
+            restaurant.Id.ToString(),
+            restaurant.Id,
+            request.AcceptingOrders
+                ? $"Resumed ordering for {restaurant.Name}."
+                : $"Paused ordering for {restaurant.Name}.",
+            beforeRestaurant,
+            SnapshotRestaurant(restaurant));
+        await _dbContext.SaveChangesAsync();
+
+        return Ok(new
+        {
+            message = request.AcceptingOrders ? "Restaurant is accepting orders." : "Restaurant ordering is paused.",
             restaurant = MapToResponse(restaurant)
         });
     }
@@ -411,6 +495,9 @@ public class RestaurantController : ControllerBase
             Currency = restaurant.Currency,
             PaymentPolicy = restaurant.PaymentPolicy.ToString(),
             IsActive = restaurant.IsActive,
+            AcceptingOrders = restaurant.AcceptingOrders,
+            OpeningHoursJson = restaurant.OpeningHoursJson,
+            SpecialOpeningDaysJson = restaurant.SpecialOpeningDaysJson,
             CreatedAt = restaurant.CreatedAt,
             UpdatedAt = restaurant.UpdatedAt
         };
@@ -427,7 +514,10 @@ public class RestaurantController : ControllerBase
         restaurant.Timezone,
         restaurant.Currency,
         PaymentPolicy = restaurant.PaymentPolicy.ToString(),
-        restaurant.IsActive
+        restaurant.IsActive,
+        restaurant.AcceptingOrders,
+        restaurant.OpeningHoursJson,
+        restaurant.SpecialOpeningDaysJson
     };
 
     private static string NormalizeCountryCode(string? countryCode)

@@ -14,6 +14,12 @@ public class OrderResponse
 
     public string OrderNumber { get; set; } = string.Empty;
 
+    public DateOnly? PickupDate { get; set; }
+
+    public int? PickupNumber { get; set; }
+
+    public string PickupCode { get; set; } = string.Empty;
+
     public string Currency { get; set; } = string.Empty;
 
     public int OrderType { get; set; }

@@ -4,7 +4,7 @@ import { Pencil, Trash2 } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
 import { z } from 'zod'
-import { deleteUser, updateUser, type ManagedUserRole, type UserListItem } from '../../api/auth'
+import { deleteUser, updateUser, type ManagedUserRole, type Restaurant, type UserListItem } from '../../api/auth'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -29,6 +29,7 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '
 import { Input } from '../ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
 import { roleRank } from './CreateUserCard'
+import { RestaurantCombobox } from './RestaurantCombobox'
 
 const managedRoles = ['RestaurantOwner', 'Admin', 'Staff', 'Customer'] as const satisfies readonly ManagedUserRole[]
 
@@ -60,6 +61,7 @@ type UserRowActionsProps = {
   currentUserRank: number
   isPlatformOwner: boolean
   availableRoles: ManagedUserRole[]
+  restaurants: Restaurant[]
   onUsersChanged: () => Promise<void> | void
 }
 
@@ -78,6 +80,7 @@ export function UserRowActions({
   currentUserRank,
   isPlatformOwner,
   availableRoles,
+  restaurants,
   onUsersChanged,
 }: UserRowActionsProps) {
   const [updateOpen, setUpdateOpen] = useState(false)
@@ -128,7 +131,7 @@ export function UserRowActions({
 
     if (needsRestaurantId && !values.restaurantId.trim()) {
       form.setError('restaurantId', {
-        message: 'Restaurant ID is required for restaurant users.',
+        message: 'Restaurant is required for restaurant users.',
       })
       return
     }
@@ -257,9 +260,13 @@ export function UserRowActions({
                   name="restaurantId"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Restaurant ID</FormLabel>
+                      <FormLabel>Restaurant</FormLabel>
                       <FormControl>
-                        <Input placeholder="00000000-0000-0000-0000-000000000000" {...field} />
+                        <RestaurantCombobox
+                          value={field.value}
+                          restaurants={restaurants}
+                          onValueChange={field.onChange}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>

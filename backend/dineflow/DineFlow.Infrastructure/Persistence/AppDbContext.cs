@@ -25,6 +25,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<MenuItemOptionGroup> MenuItemOptionGroups => Set<MenuItemOptionGroup>();
     public DbSet<MenuItemOption> MenuItemOptions => Set<MenuItemOption>();
     public DbSet<RestaurantTable> RestaurantTables => Set<RestaurantTable>();
+    public DbSet<TableSession> TableSessions => Set<TableSession>();
     public DbSet<RestaurantEntity> Restaurants => Set<RestaurantEntity>();
 
     public DbSet<Payment> Payments => Set<Payment>();
@@ -93,6 +94,17 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(restaurant => restaurant.CountryCode)
                 .HasMaxLength(2)
                 .HasDefaultValue("AU")
+                .IsRequired();
+
+            entity.Property(restaurant => restaurant.AcceptingOrders)
+                .HasDefaultValue(true);
+
+            entity.Property(restaurant => restaurant.OpeningHoursJson)
+                .HasDefaultValue("[{\"dayOfWeek\":0,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":1,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":2,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":3,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":4,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":5,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":6,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]}]")
+                .IsRequired();
+
+            entity.Property(restaurant => restaurant.SpecialOpeningDaysJson)
+                .HasDefaultValue("[]")
                 .IsRequired();
         });
 
@@ -165,6 +177,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
 
             entity.HasIndex(cart => cart.RestaurantId);
             entity.HasIndex(cart => cart.TableId);
+            entity.HasIndex(cart => cart.TableSessionId);
             entity.HasIndex(cart => cart.OrderId)
                 .IsUnique();
             entity.HasIndex(cart => cart.ExpiresAt);
@@ -198,6 +211,11 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasOne(cart => cart.Table)
                 .WithMany()
                 .HasForeignKey(cart => cart.TableId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(cart => cart.TableSession)
+                .WithMany()
+                .HasForeignKey(cart => cart.TableSessionId)
                 .OnDelete(DeleteBehavior.Restrict);
 
             entity.HasOne(cart => cart.Order)
@@ -281,15 +299,27 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
 
             entity.HasIndex(order => order.RestaurantId);
             entity.HasIndex(order => order.CustomerId);
+            entity.HasIndex(order => order.TableSessionId);
 
             entity.HasIndex(order => order.OrderNumber)
                 .IsUnique();
+
+            entity.HasIndex(order => new { order.RestaurantId, order.PickupDate, order.PickupNumber })
+                .IsUnique()
+                .HasDatabaseName("IX_Orders_RestaurantId_PickupDate_PickupNumber")
+                .HasFilter("\"RestaurantId\" IS NOT NULL AND \"PickupDate\" IS NOT NULL AND \"PickupNumber\" IS NOT NULL");
 
             entity.ToTable(table =>
             {
                 table.HasCheckConstraint(
                     "CK_Orders_PaymentMethod",
                     "\"PaymentMethod\" IN (0, 1)");
+                table.HasCheckConstraint(
+                    "CK_Orders_PickupNumber",
+                    "\"PickupNumber\" IS NULL OR \"PickupNumber\" > 0");
+                table.HasCheckConstraint(
+                    "CK_Orders_PickupPair",
+                    "(\"PickupDate\" IS NULL AND \"PickupNumber\" IS NULL) OR (\"PickupDate\" IS NOT NULL AND \"PickupNumber\" IS NOT NULL)");
             });
 
             entity.HasOne(order => order.Restaurant)
@@ -300,6 +330,11 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasOne(order => order.Table)
                 .WithMany()
                 .HasForeignKey(order => order.TableId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(order => order.TableSession)
+                .WithMany(session => session.Orders)
+                .HasForeignKey(order => order.TableSessionId)
                 .OnDelete(DeleteBehavior.Restrict);
 
             entity.HasOne(order => order.Customer)
@@ -315,6 +350,39 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .WithOne(payment => payment.Order)
                 .HasForeignKey(payment => payment.OrderId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TableSession>(entity =>
+        {
+            entity.HasKey(session => session.Id);
+
+            entity.HasIndex(session => session.RestaurantId);
+            entity.HasIndex(session => session.TableId);
+            entity.HasIndex(session => session.Status);
+            entity.HasIndex(session => new { session.TableId, session.Status })
+                .IsUnique()
+                .HasDatabaseName("IX_TableSessions_TableId_Open")
+                .HasFilter("\"Status\" = 0");
+
+            entity.ToTable(table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_TableSessions_Status",
+                    "\"Status\" IN (0, 1)");
+                table.HasCheckConstraint(
+                    "CK_TableSessions_ClosedAt",
+                    "\"ClosedAt\" IS NULL OR \"ClosedAt\" >= \"OpenedAt\"");
+            });
+
+            entity.HasOne(session => session.Restaurant)
+                .WithMany()
+                .HasForeignKey(session => session.RestaurantId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(session => session.Table)
+                .WithMany()
+                .HasForeignKey(session => session.TableId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         builder.Entity<OrderItem>(entity =>

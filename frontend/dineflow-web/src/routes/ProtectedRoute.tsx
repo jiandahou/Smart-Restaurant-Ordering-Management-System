@@ -1,3 +1,4 @@
+import { Loader2 } from 'lucide-react'
 import { Navigate, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 
@@ -10,7 +11,11 @@ export function ProtectedRoute({ roles }: ProtectedRouteProps) {
   const location = useLocation()
 
   if (loading) {
-    return <main className="app-shell">Loading...</main>
+    return (
+      <main className="flex min-h-svh items-center justify-center">
+        <Loader2 className="size-8 animate-spin text-muted-foreground" />
+      </main>
+    )
   }
 
   if (!token) {

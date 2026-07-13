@@ -18,6 +18,11 @@ public class Order
 
     public string OrderNumber { get; set; } = string.Empty;
 
+    public DateOnly? PickupDate { get; set; }
+
+    public int? PickupNumber { get; set; }
+
+    public Guid? TableSessionId { get; set; }
 
     public OrderType OrderType { get; set; } = OrderType.DineIn;
 
@@ -48,6 +53,8 @@ public class Order
     public ApplicationUser? Customer { get; set; }
 
     public RestaurantTable? Table { get; set; }
+
+    public TableSession? TableSession { get; set; }
 
     public Restaurant.Restaurant? Restaurant { get; set; }
 }

@@ -120,8 +120,11 @@ public class AdminOrdersController : ControllerBase
         if (!string.IsNullOrWhiteSpace(search))
         {
             var pattern = $"%{search}%";
+            var pickupSearch = search.TrimStart('#');
+            var hasPickupNumber = int.TryParse(pickupSearch, out var pickupNumber);
             query = query.Where(order =>
                 EF.Functions.ILike(order.OrderNumber, pattern) ||
+                (hasPickupNumber && order.PickupNumber == pickupNumber) ||
                 (order.Restaurant != null && EF.Functions.ILike(order.Restaurant.Name, pattern)) ||
                 (order.Customer != null && order.Customer.FullName != null && EF.Functions.ILike(order.Customer.FullName, pattern)) ||
                 (order.Customer != null && order.Customer.Email != null && EF.Functions.ILike(order.Customer.Email, pattern)) ||
@@ -692,6 +695,10 @@ public class AdminOrdersController : ControllerBase
             CustomerName = order.Customer?.FullName,
             CustomerEmail = order.Customer?.Email,
             OrderNumber = order.OrderNumber,
+            PickupDate = order.PickupDate,
+            PickupNumber = order.PickupNumber,
+            PickupCode = OrderPickupNumberService.FormatPickupCode(order.PickupNumber),
+            TableSessionId = order.TableSessionId,
             OrderType = order.OrderType.ToString(),
             Status = order.Status.ToString(),
             PaymentStatus = order.PaymentStatus.ToString(),

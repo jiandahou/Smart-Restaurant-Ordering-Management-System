@@ -12,6 +12,8 @@ public class Cart
 
     public Guid? TableId { get; set; }
 
+    public Guid? TableSessionId { get; set; }
+
     public Guid? OrderId { get; set; }
 
     public OrderType OrderType { get; set; } = OrderType.Takeaway;
@@ -29,6 +31,8 @@ public class Cart
     public RestaurantEntity? Restaurant { get; set; }
 
     public RestaurantTable? Table { get; set; }
+
+    public TableSession? TableSession { get; set; }
 
     public Order? Order { get; set; }
 

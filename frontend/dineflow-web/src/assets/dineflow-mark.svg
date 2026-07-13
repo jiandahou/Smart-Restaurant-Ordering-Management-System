@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" fill="none">
+  <defs>
+    <linearGradient id="df-green" x1="50" y1="40" x2="190" y2="205" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00856f"/>
+      <stop offset="1" stop-color="#005847"/>
+    </linearGradient>
+    <linearGradient id="df-gold" x1="20" y1="80" x2="180" y2="180" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f5b51b"/>
+      <stop offset="1" stop-color="#d99600"/>
+    </linearGradient>
+    <filter id="df-soft-shadow" x="-10" y="-10" width="260" height="260" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#002f27" flood-opacity=".18"/>
+    </filter>
+  </defs>
+  <g filter="url(#df-soft-shadow)">
+    <path d="M37 52h46" stroke="url(#df-green)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M37 52v46" stroke="url(#df-green)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M37 188h46" stroke="url(#df-green)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M37 142v46" stroke="url(#df-green)" stroke-width="14" stroke-linecap="round"/>
+    <rect x="84" y="78" width="26" height="26" rx="5" fill="url(#df-gold)"/>
+    <rect x="84" y="118" width="26" height="26" rx="5" fill="url(#df-green)"/>
+    <rect x="119" y="70" width="24" height="24" rx="5" fill="url(#df-green)"/>
+    <rect x="119" y="164" width="24" height="24" rx="5" fill="url(#df-gold)"/>
+    <circle cx="132" cy="120" r="63" stroke="url(#df-green)" stroke-width="13"/>
+    <path d="M90 108c-17 10-31 28-34 49" stroke="url(#df-green)" stroke-width="8" stroke-linecap="round"/>
+    <path d="M13 112h22c36 0 52 10 66 36" stroke="url(#df-gold)" stroke-width="11" stroke-linecap="round"/>
+    <path d="M22 135h31c24 0 39 8 51 25" stroke="url(#df-gold)" stroke-width="11" stroke-linecap="round"/>
+    <path d="M43 158h34c17 0 29 6 39 18" stroke="url(#df-gold)" stroke-width="11" stroke-linecap="round"/>
+    <circle cx="17" cy="112" r="7" fill="url(#df-gold)"/>
+    <circle cx="28" cy="135" r="5" fill="url(#df-gold)"/>
+    <path d="M124 82v39c0 11 8 19 18 19v42" stroke="url(#df-gold)" stroke-width="9" stroke-linecap="round"/>
+    <path d="M137 82v47" stroke="url(#df-gold)" stroke-width="9" stroke-linecap="round"/>
+    <path d="M151 82v47" stroke="url(#df-gold)" stroke-width="9" stroke-linecap="round"/>
+    <path d="M180 82c-15 10-20 24-20 43v57" stroke="url(#df-gold)" stroke-width="12" stroke-linecap="round"/>
+    <path d="M180 82v100" stroke="url(#df-gold)" stroke-width="12" stroke-linecap="round"/>
+  </g>
+</svg>

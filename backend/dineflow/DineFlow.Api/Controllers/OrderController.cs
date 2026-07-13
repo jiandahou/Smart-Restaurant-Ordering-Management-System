@@ -6,6 +6,7 @@ using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
+using DineFlow.Infrastructure.Restaurant;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -19,18 +20,24 @@ public class OrderController : ControllerBase
     private const int MaximumGuestOrderLookupCount = 50;
     private readonly AppDbContext _dbContext;
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
+    private readonly OrderPickupNumberService _orderPickupNumberService;
     private readonly ReportLogWriter _reportLogWriter;
+    private readonly TableSessionService _tableSessionService;
     private readonly ILogger<OrderController> _logger;
 
     public OrderController(
         AppDbContext dbContext,
         OrderRealtimeNotifier orderRealtimeNotifier,
+        OrderPickupNumberService orderPickupNumberService,
         ReportLogWriter reportLogWriter,
+        TableSessionService tableSessionService,
         ILogger<OrderController> logger)
     {
         _dbContext = dbContext;
         _orderRealtimeNotifier = orderRealtimeNotifier;
+        _orderPickupNumberService = orderPickupNumberService;
         _reportLogWriter = reportLogWriter;
+        _tableSessionService = tableSessionService;
         _logger = logger;
     }
 
@@ -311,11 +318,47 @@ public class OrderController : ControllerBase
             ? GenerateOrderNumber()
             : request.OrderNumber.Trim();
 
+        var restaurant = await _dbContext.Restaurants
+            .AsNoTracking()
+            .FirstOrDefaultAsync(
+                item => item.Id == request.RestaurantId && item.IsActive,
+                cancellationToken);
+
+        if (restaurant is null)
+        {
+            return NotFound(new { message = "Restaurant is not available." });
+        }
+
+        TableSession? tableSession = null;
+        if (request.TableId.HasValue)
+        {
+            var tableIsActive = await _dbContext.RestaurantTables
+                .AsNoTracking()
+                .AnyAsync(
+                    table =>
+                        table.Id == request.TableId.Value &&
+                        table.RestaurantId == request.RestaurantId &&
+                        table.IsActive,
+                    cancellationToken);
+
+            if (!tableIsActive)
+            {
+                return Conflict(new { message = "Table is not available for this restaurant." });
+            }
+
+            tableSession = await _tableSessionService.GetOrCreateOpenSessionAsync(
+                request.RestaurantId,
+                request.TableId.Value,
+                now,
+                cancellationToken);
+        }
+
         var order = new Order
         {
             Id = Guid.NewGuid(),
             RestaurantId = request.RestaurantId,
             TableId = request.TableId,
+            TableSessionId = tableSession?.Id,
             CustomerId = request.CustomerId,
             OrderNumber = orderNumber,
             OrderType = (OrderType)request.OrderType,
@@ -327,6 +370,8 @@ public class OrderController : ControllerBase
             ScheduledTime = request.ScheduledTime,
             CreatedAt = now
         };
+
+        await _orderPickupNumberService.AssignPickupNumberAsync(order, restaurant, now, cancellationToken);
 
         foreach (var orderItem in buildResult.OrderItems)
         {
@@ -672,6 +717,9 @@ public class OrderController : ControllerBase
         TableNumber = order.Table?.TableNumber,
         CustomerId = order.CustomerId,
         OrderNumber = order.OrderNumber,
+        PickupDate = order.PickupDate,
+        PickupNumber = order.PickupNumber,
+        PickupCode = OrderPickupNumberService.FormatPickupCode(order.PickupNumber),
         Currency = string.IsNullOrWhiteSpace(order.Restaurant?.Currency) ? "AUD" : order.Restaurant.Currency,
         OrderType = (int)order.OrderType,
         Status = (int)order.Status,

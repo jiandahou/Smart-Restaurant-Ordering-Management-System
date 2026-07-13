@@ -19,4 +19,15 @@ public class RestaurantRequest
     public string PaymentPolicy { get; set; } = "PayAtCounterAllowed";
 
     public bool IsActive { get; set; } = true;
+
+    public bool AcceptingOrders { get; set; } = true;
+
+    public string? OpeningHoursJson { get; set; }
+
+    public string? SpecialOpeningDaysJson { get; set; }
+}
+
+public class RestaurantOrderingStatusRequest
+{
+    public bool AcceptingOrders { get; set; }
 }

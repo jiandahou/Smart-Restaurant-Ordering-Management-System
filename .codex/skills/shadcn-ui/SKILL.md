@@ -13,19 +13,33 @@ When a task asks for shadcn/ui components, or an existing UI should be converted
    - Check `components.json`, package manager files, path aliases, and existing `src/components/ui/*` components.
    - Confirm whether the requested component already exists.
 
-2. If the component is missing, install the official shadcn component before editing app code:
+2. Use native shadcn components directly when they exist locally:
+   - Prefer the component's official API and composition model.
+   - Do not block, wrap, or replace native shadcn primitives just because they are generic.
+   - Keep local className overrides small and token-based.
+
+3. If the component is missing, install the official shadcn component before editing app code:
    - Prefer the project's package manager and existing shadcn setup.
    - Use the shadcn CLI/registry command, for example `npx shadcn@latest add select` or the repo's equivalent.
    - If network or sandbox restrictions block the install, request escalation instead of hand-writing the component.
 
-3. Only hand-write a component when:
+4. Only hand-write a component when:
    - The official shadcn install is impossible after escalation or the user explicitly asks for a custom component.
    - The project already has a deliberate local fork pattern and the change follows that pattern.
+   - The required UI is application-specific and has no practical shadcn primitive.
 
-4. After installing or changing components:
+5. After installing or changing components:
    - Replace native controls like `<select>` with the installed shadcn component API.
    - Remove stale custom CSS that only existed for the native control.
    - Run the relevant build/typecheck.
+
+## Native Shadcn Policy
+
+- Native shadcn is the default, not a restricted fallback.
+- Do not create lookalike buttons, dialogs, selects, tabs, drawers, forms, popovers, badges, cards, or toasts when the official component is available.
+- Prefer fixing theme tokens, spacing, responsive layout, or component composition over forking a shadcn component.
+- If a local `src/components/ui/*` component differs from upstream, treat it as the project's shadcn instance and keep changes compatible with its existing API.
+- Keep destructive/error states mapped to shadcn `destructive` tokens and project aliases; do not hard-code neutral colors for errors.
 
 ## Toast Feedback
 

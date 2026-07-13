@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { KeyRound } from 'lucide-react'
+import { KeyRound, Loader2 } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { exchangeOAuthCode } from '../auth/authSlice'
@@ -77,7 +77,9 @@ export function OAuthCallbackPage() {
         </CardHeader>
         <CardContent className="form-grid">
           <div className={`confirm-status ${state}`}>
-            <KeyRound size={22} />
+            {state === 'checking'
+              ? <Loader2 size={22} className="animate-spin" />
+              : <KeyRound size={22} />}
             <span>{state === 'checking' ? 'Checking code' : state === 'success' ? 'Signed in' : 'Needs attention'}</span>
           </div>
           <Button asChild disabled={state === 'checking'}>

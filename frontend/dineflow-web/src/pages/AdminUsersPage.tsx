@@ -1,6 +1,21 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowDownAZ, ArrowUpAZ, ChevronLeft, ChevronRight, RefreshCw, Search, UsersRound, X } from 'lucide-react'
+import {
+  ArrowDownAZ,
+  ArrowUpAZ,
+  Building2,
+  ChevronLeft,
+  ChevronRight,
+  Mail,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  SlidersHorizontal,
+  UserPlus,
+  UsersRound,
+  X,
+} from 'lucide-react'
 import { toast } from 'sonner'
+import { useSearchParams } from 'react-router-dom'
 import {
   getRestaurantUserPage,
   getRestaurantUsers,
@@ -17,6 +32,7 @@ import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Input } from '../components/ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Separator } from '../components/ui/separator'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
@@ -24,10 +40,17 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 type SortKey = 'name' | 'email' | 'restaurant' | 'roles'
 type SortDirection = 'asc' | 'desc'
 type ScopeFilter = 'all' | 'platform' | 'restaurant'
+type UserSection = 'users' | 'create' | 'email' | 'permissions'
 const manageableRoles = ['RestaurantOwner', 'Admin', 'Staff', 'Customer'] as const satisfies readonly ManagedUserRole[]
+const userSections = ['users', 'create', 'email', 'permissions'] as const satisfies readonly UserSection[]
+
+function getUserSection(value: string | null): UserSection {
+  return userSections.includes(value as UserSection) ? (value as UserSection) : 'users'
+}
 
 export function AdminUsersPage() {
   const { user } = useAuth()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [users, setUsers] = useState<UserListItem[]>([])
   const [emailUsers, setEmailUsers] = useState<UserListItem[]>([])
   const [restaurants, setRestaurants] = useState<Restaurant[]>([])
@@ -64,6 +87,10 @@ export function AdminUsersPage() {
   const roleOptions = ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff', 'Customer']
   const pageStart = totalItems === 0 ? 0 : (page - 1) * pageSize + 1
   const pageEnd = Math.min(page * pageSize, totalItems)
+  const restaurantNameById = useMemo(
+    () => new Map(restaurants.map((restaurant) => [restaurant.id, restaurant.name])),
+    [restaurants],
+  )
 
   const hasActiveFilters =
     search.trim() !== '' || roleFilter !== 'all' || restaurantFilter !== 'all' || scopeFilter !== 'all'
@@ -157,15 +184,59 @@ export function AdminUsersPage() {
     restaurantId: user?.restaurantId,
     onUserCreated: refreshUserData,
   }
+  const getRestaurantLabel = (restaurantId?: string | null) => {
+    if (!restaurantId) {
+      return 'Platform scope'
+    }
+
+    return restaurantNameById.get(restaurantId) ?? restaurantId
+  }
+  const activeDropdownFilterCount = [
+    roleFilter !== 'all',
+    restaurantFilter !== 'all',
+    scopeFilter !== 'all',
+  ].filter(Boolean).length
+  const selectedRestaurantFilterLabel = restaurantFilter === 'all' ? '' : getRestaurantLabel(restaurantFilter)
+  const selectedScopeFilterLabel =
+    scopeFilter === 'platform' ? 'Platform scope' : scopeFilter === 'restaurant' ? 'Restaurant scope' : ''
+  const activeSection = getUserSection(searchParams.get('section'))
+
+  const setActiveSection = (value: string) => {
+    const section = getUserSection(value)
+
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+
+      if (section === 'users') {
+        next.delete('section')
+      } else {
+        next.set('section', section)
+      }
+
+      return next
+    }, { replace: true })
+  }
 
   return (
     <main className="content-grid">
-      <Tabs defaultValue="users" orientation="vertical" className="admin-tabs">
+      <Tabs value={activeSection} onValueChange={setActiveSection} orientation="horizontal" className="admin-tabs">
         <TabsList className="admin-tabs-list" aria-label="Admin sections">
-          <TabsTrigger value="users">Admin User Center</TabsTrigger>
-          <TabsTrigger value="create">Create User</TabsTrigger>
-          <TabsTrigger value="email">Email</TabsTrigger>
-          <TabsTrigger value="permissions">Permission Guard</TabsTrigger>
+          <TabsTrigger value="users">
+            <UsersRound size={16} />
+            <span>Users</span>
+          </TabsTrigger>
+          <TabsTrigger value="create">
+            <UserPlus size={16} />
+            <span>Create</span>
+          </TabsTrigger>
+          <TabsTrigger value="email">
+            <Mail size={16} />
+            <span>Email</span>
+          </TabsTrigger>
+          <TabsTrigger value="permissions">
+            <ShieldCheck size={16} />
+            <span>Permissions</span>
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="users">
@@ -188,66 +259,204 @@ export function AdminUsersPage() {
               {loading ? (
                 <p>Loading users...</p>
               ) : (
-                <div className="directory-stack">
-                  <div className="directory-tools">
-                    <div className="directory-search">
-                      <Search size={16} />
-                      <Input
-                        value={search}
-                        onChange={(event) => { setPage(1); setSearch(event.target.value) }}
-                        placeholder="Filter by name, email, or role"
-                      />
+                <div className="directory-stack user-directory-stack">
+                  <div className="directory-tools user-directory-tools">
+                    <div className="user-directory-search-row">
+                      <div className="directory-search">
+                        <Search size={16} />
+                        <Input
+                          value={search}
+                          onChange={(event) => { setPage(1); setSearch(event.target.value) }}
+                          placeholder="Filter by name, email, or role"
+                        />
+                      </div>
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            className="user-directory-filter-trigger"
+                            aria-label="Filter users"
+                          >
+                            <SlidersHorizontal size={16} />
+                            {activeDropdownFilterCount > 0 && (
+                              <span className="user-directory-filter-count">{activeDropdownFilterCount}</span>
+                            )}
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent className="user-directory-filter-popover" align="end">
+                          <div className="user-directory-filter-popover-header">
+                            <strong>Filters</strong>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="xs"
+                              onClick={resetFilters}
+                              disabled={!hasActiveFilters}
+                            >
+                              <X size={13} />
+                              Clear all
+                            </Button>
+                          </div>
+                          <div className="user-directory-filter-fields">
+                            <div className="user-directory-filter-field">
+                              <span>Role</span>
+                              <Select value={roleFilter} onValueChange={(value) => { setPage(1); setRoleFilter(value) }}>
+                                <SelectTrigger className="filter-select">
+                                  <SelectValue placeholder="Role" />
+                                </SelectTrigger>
+                                <SelectContent position="popper">
+                                  <SelectItem value="all">All roles</SelectItem>
+                                  {roleOptions.map((role) => (
+                                    <SelectItem key={role} value={role}>
+                                      {role}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div className="user-directory-filter-field">
+                              <span>Restaurant</span>
+                              <Select value={restaurantFilter} onValueChange={updateRestaurantFilter}>
+                                <SelectTrigger className="filter-select">
+                                  <SelectValue placeholder="Restaurant" />
+                                </SelectTrigger>
+                                <SelectContent position="popper">
+                                  <SelectItem value="all">All restaurants</SelectItem>
+                                  {restaurants.map((restaurant) => (
+                                    <SelectItem key={restaurant.id} value={restaurant.id}>
+                                      {restaurant.name}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div className="user-directory-filter-field">
+                              <span>Scope</span>
+                              <Select value={scopeFilter} onValueChange={(value) => { setPage(1); setScopeFilter(value as ScopeFilter) }}>
+                                <SelectTrigger className="filter-select">
+                                  <SelectValue placeholder="Scope" />
+                                </SelectTrigger>
+                                <SelectContent position="popper">
+                                  <SelectItem value="all">All scopes</SelectItem>
+                                  <SelectItem value="platform">Platform scope</SelectItem>
+                                  <SelectItem value="restaurant">Restaurant scope</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
                     </div>
-                    <Select value={roleFilter} onValueChange={(value) => { setPage(1); setRoleFilter(value) }}>
-                      <SelectTrigger className="filter-select">
-                        <SelectValue placeholder="Role" />
-                      </SelectTrigger>
-                      <SelectContent position="popper">
-                        <SelectItem value="all">All roles</SelectItem>
-                        {roleOptions.map((role) => (
-                          <SelectItem key={role} value={role}>
-                            {role}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Select value={restaurantFilter} onValueChange={updateRestaurantFilter}>
-                      <SelectTrigger className="filter-select">
-                        <SelectValue placeholder="Restaurant" />
-                      </SelectTrigger>
-                      <SelectContent position="popper">
-                        <SelectItem value="all">All restaurants</SelectItem>
-                        {restaurants.map((restaurant) => (
-                          <SelectItem key={restaurant.id} value={restaurant.id}>
-                            {restaurant.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Select value={scopeFilter} onValueChange={(value) => { setPage(1); setScopeFilter(value as ScopeFilter) }}>
-                      <SelectTrigger className="filter-select">
-                        <SelectValue placeholder="Scope" />
-                      </SelectTrigger>
-                      <SelectContent position="popper">
-                        <SelectItem value="all">All scopes</SelectItem>
-                        <SelectItem value="platform">Platform scope</SelectItem>
-                        <SelectItem value="restaurant">Restaurant scope</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      onClick={resetFilters}
-                      disabled={!hasActiveFilters}
-                      title="Clear filters"
-                      aria-label="Clear filters"
-                    >
-                      <X size={16} />
-                    </Button>
+
+                    <div className="user-directory-inline-filters">
+                      <Select value={roleFilter} onValueChange={(value) => { setPage(1); setRoleFilter(value) }}>
+                        <SelectTrigger className="filter-select">
+                          <SelectValue placeholder="Role" />
+                        </SelectTrigger>
+                        <SelectContent position="popper">
+                          <SelectItem value="all">All roles</SelectItem>
+                          {roleOptions.map((role) => (
+                            <SelectItem key={role} value={role}>
+                              {role}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Select value={restaurantFilter} onValueChange={updateRestaurantFilter}>
+                        <SelectTrigger className="filter-select">
+                          <SelectValue placeholder="Restaurant" />
+                        </SelectTrigger>
+                        <SelectContent position="popper">
+                          <SelectItem value="all">All restaurants</SelectItem>
+                          {restaurants.map((restaurant) => (
+                            <SelectItem key={restaurant.id} value={restaurant.id}>
+                              {restaurant.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Select value={scopeFilter} onValueChange={(value) => { setPage(1); setScopeFilter(value as ScopeFilter) }}>
+                        <SelectTrigger className="filter-select">
+                          <SelectValue placeholder="Scope" />
+                        </SelectTrigger>
+                        <SelectContent position="popper">
+                          <SelectItem value="all">All scopes</SelectItem>
+                          <SelectItem value="platform">Platform scope</SelectItem>
+                          <SelectItem value="restaurant">Restaurant scope</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={resetFilters}
+                        disabled={!hasActiveFilters}
+                        className="directory-clear-filter"
+                        title="Clear filters"
+                        aria-label="Clear filters"
+                      >
+                        <X size={16} />
+                        <span>Clear</span>
+                      </Button>
+                    </div>
+
+                    {hasActiveFilters && (
+                      <div className="user-filter-chips" aria-label="Active filters">
+                        {search.trim() && (
+                          <button
+                            type="button"
+                            className="user-filter-chip"
+                            onClick={() => { setPage(1); setSearch('') }}
+                            title={`Search: ${search.trim()}`}
+                          >
+                            <span>Search: {search.trim()}</span>
+                            <X size={13} />
+                          </button>
+                        )}
+                        {roleFilter !== 'all' && (
+                          <button
+                            type="button"
+                            className="user-filter-chip"
+                            onClick={() => { setPage(1); setRoleFilter('all') }}
+                            title={`Role: ${roleFilter}`}
+                          >
+                            <span>Role: {roleFilter}</span>
+                            <X size={13} />
+                          </button>
+                        )}
+                        {restaurantFilter !== 'all' && (
+                          <button
+                            type="button"
+                            className="user-filter-chip"
+                            onClick={() => { setPage(1); setRestaurantFilter('all') }}
+                            title={`Restaurant: ${selectedRestaurantFilterLabel}`}
+                          >
+                            <span>Restaurant: {selectedRestaurantFilterLabel}</span>
+                            <X size={13} />
+                          </button>
+                        )}
+                        {scopeFilter !== 'all' && (
+                          <button
+                            type="button"
+                            className="user-filter-chip"
+                            onClick={() => { setPage(1); setScopeFilter('all') }}
+                            title={`Scope: ${selectedScopeFilterLabel}`}
+                          >
+                            <span>Scope: {selectedScopeFilterLabel}</span>
+                            <X size={13} />
+                          </button>
+                        )}
+                        <button type="button" className="user-filter-chip user-filter-chip-clear" onClick={resetFilters}>
+                          <X size={13} />
+                          <span>Clear all</span>
+                        </button>
+                      </div>
+                    )}
                   </div>
 
-                  <div className="table-wrap">
+                  <div className="table-wrap user-directory-table-wrap">
                     <table className="data-table">
                       <thead>
                         <tr>
@@ -288,7 +497,7 @@ export function AdminUsersPage() {
                               </span>
                             </td>
                             <td>{directoryUser.email}</td>
-                            <td>{directoryUser.restaurantId || 'Platform scope'}</td>
+                            <td>{getRestaurantLabel(directoryUser.restaurantId)}</td>
                             <td>
                               <div className="badge-row">
                                 {directoryUser.roles.map((role) => (
@@ -303,6 +512,7 @@ export function AdminUsersPage() {
                                 currentUserRank={currentUserRank}
                                 isPlatformOwner={isPlatformOwner}
                                 availableRoles={manageableRoleOptions}
+                                restaurants={restaurants}
                                 onUsersChanged={refreshUserData}
                               />
                             </td>
@@ -318,9 +528,73 @@ export function AdminUsersPage() {
                       </tbody>
                     </table>
                   </div>
-                  <div className="pagination-bar">
-                    <span>
-                      Showing {pageStart}-{pageEnd} of {totalItems}
+                  <div className="user-mobile-list" aria-label="Users">
+                    {users.map((directoryUser) => {
+                      const emailLabel = directoryUser.email ?? 'No email'
+                      const restaurantLabel = getRestaurantLabel(directoryUser.restaurantId)
+
+                      return (
+                        <article className="user-mobile-card" key={directoryUser.id}>
+                          <header className="user-mobile-card-header">
+                            <span className="user-mobile-avatar">
+                              <UsersRound size={18} />
+                            </span>
+                            <div className="user-mobile-primary">
+                              <strong title={directoryUser.fullName || 'Not set'}>
+                                {directoryUser.fullName || 'Not set'}
+                              </strong>
+                              <span title={emailLabel}>{emailLabel}</span>
+                            </div>
+                            <div className="user-mobile-actions">
+                              <UserRowActions
+                                user={directoryUser}
+                                currentUserId={user?.id}
+                                currentUserRank={currentUserRank}
+                                isPlatformOwner={isPlatformOwner}
+                                availableRoles={manageableRoleOptions}
+                                restaurants={restaurants}
+                                onUsersChanged={refreshUserData}
+                              />
+                            </div>
+                          </header>
+
+                          <div className="user-mobile-meta-grid">
+                            <div className="user-mobile-meta">
+                              <Building2 size={15} />
+                              <div>
+                                <span>Restaurant</span>
+                                <strong title={restaurantLabel}>{restaurantLabel}</strong>
+                              </div>
+                            </div>
+                            <div className="user-mobile-meta">
+                              <ShieldCheck size={15} />
+                              <div>
+                                <span>Roles</span>
+                                <div className="badge-row user-mobile-role-row">
+                                  {directoryUser.roles.map((role) => (
+                                    <Badge key={role}>{role}</Badge>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </article>
+                      )
+                    })}
+                    {users.length === 0 && (
+                      <div className="user-mobile-empty">
+                        No users match the current filters.
+                      </div>
+                    )}
+                  </div>
+                  <div className="pagination-bar user-directory-pagination">
+                    <span className="pagination-range">
+                      <span className="pagination-full">
+                        Showing {pageStart}-{pageEnd} of {totalItems}
+                      </span>
+                      <span className="pagination-compact">
+                        {pageStart}-{pageEnd} / {totalItems}
+                      </span>
                     </span>
                     <div className="pagination-actions">
                       <Select value={String(pageSize)} onValueChange={(value) => { setPage(1); setPageSize(Number(value)) }}>
@@ -333,8 +607,13 @@ export function AdminUsersPage() {
                           <SelectItem value="50">50 / page</SelectItem>
                         </SelectContent>
                       </Select>
-                      <span>
-                        Page {totalPages === 0 ? 0 : page} of {totalPages}
+                      <span className="pagination-page">
+                        <span className="pagination-full">
+                          Page {totalPages === 0 ? 0 : page} of {totalPages}
+                        </span>
+                        <span className="pagination-compact">
+                          {totalPages === 0 ? 0 : page} / {totalPages}
+                        </span>
                       </span>
                       <Button
                         type="button"

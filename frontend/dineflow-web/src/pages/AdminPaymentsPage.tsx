@@ -1,17 +1,22 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  Building2,
+  CalendarClock,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CreditCard,
   ExternalLink,
   ReceiptText,
   RefreshCw,
   Search,
+  SlidersHorizontal,
   Undo2,
+  UserRound,
   X,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -30,6 +35,7 @@ import {
   type AdminRefundRequestStatus,
   type AdminRefundSummary,
 } from '../api/auth'
+import { useAuth } from '../auth/AuthContext'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
 import { OrderRefundDialog } from '../components/orders/OrderRefundDialog'
 import { OrderStatusBadge, getOrderStatusLabel, orderStatusOptions } from '../components/orders/OrderStatusBadge'
@@ -47,6 +53,7 @@ import {
   DialogTitle,
 } from '../components/ui/dialog'
 import { Input } from '../components/ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover'
 import {
   Select,
   SelectContent,
@@ -54,6 +61,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Textarea } from '../components/ui/textarea'
 import { HorizontalTableScroll } from '../components/HorizontalTableScroll'
 import { getOrderStats, isOrderPayable } from '../lib/orderStats'
@@ -83,6 +91,8 @@ const refundRequestStatusClasses: Partial<Record<AdminRefundRequestStatus, strin
   Approved: 'border-emerald-300 bg-emerald-100 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200',
   Rejected: 'border-red-300 bg-red-100 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200',
 }
+
+type PaymentTab = 'orders' | 'requests' | 'history'
 
 function formatMoney(amount: number, currencyCode?: string | null) {
   return new Intl.NumberFormat(undefined, {
@@ -141,6 +151,7 @@ function SortHeader({
 }
 
 export function AdminPaymentsPage() {
+  const { user } = useAuth()
   const [orders, setOrders] = useState<AdminOrder[]>([])
   const [refundSummary, setRefundSummary] = useState<AdminRefundSummary>({
     total: 0,
@@ -182,6 +193,9 @@ export function AdminPaymentsPage() {
   const [refundRequestPageSize, setRefundRequestPageSize] = useState(10)
   const [refundRequestTotalItems, setRefundRequestTotalItems] = useState(0)
   const [refundRequestTotalPages, setRefundRequestTotalPages] = useState(0)
+  const [activeTab, setActiveTab] = useState<PaymentTab>('orders')
+  const [paymentSummaryExpanded, setPaymentSummaryExpanded] = useState(false)
+  const [refundSummaryExpanded, setRefundSummaryExpanded] = useState(false)
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null)
   const tableWrapRef = useRef<HTMLDivElement | null>(null)
   const [tableViewportWidth, setTableViewportWidth] = useState<number | null>(null)
@@ -189,6 +203,7 @@ export function AdminPaymentsPage() {
     key: 'createdAt',
     direction: 'desc',
   })
+  const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
 
   const restaurantOptions = useMemo(() => {
     return Array.from(
@@ -215,13 +230,31 @@ export function AdminPaymentsPage() {
   const refundPageEnd = Math.min(refundPage * refundPageSize, refundTotalItems)
   const refundRequestPageStart = refundRequestTotalItems === 0 ? 0 : (refundRequestPage - 1) * refundRequestPageSize + 1
   const refundRequestPageEnd = Math.min(refundRequestPage * refundRequestPageSize, refundRequestTotalItems)
+  const currentPage = totalPages === 0 ? 0 : page
+  const currentRefundPage = refundTotalPages === 0 ? 0 : refundPage
+  const currentRefundRequestPage = refundRequestTotalPages === 0 ? 0 : refundRequestPage
+  const selectedRestaurantFilterLabel = restaurantOptions.find((restaurant) => restaurant.value === restaurantFilter)?.label ?? restaurantFilter
+  const selectedPaymentFilterLabel = paymentFilter === 'all' ? '' : getPaymentStatusLabel(paymentFilter)
+  const selectedOrderStatusFilterLabel = orderStatusFilter === 'all' ? '' : getOrderStatusLabel(orderStatusFilter)
+  const selectedOrderTypeFilterLabel = orderTypeFilter === 'all' ? '' : getOrderTypeLabel(orderTypeFilter)
+  const selectedPayableFilterLabel = payableOnly === 'yes' ? 'Payable only' : 'All orders'
+  const activeDropdownFilterCount = activeTab === 'orders'
+    ? [
+        paymentFilter !== 'all',
+        orderStatusFilter !== 'all',
+        orderTypeFilter !== 'all',
+        payableOnly !== 'yes',
+      ].filter(Boolean).length
+    : activeTab === 'requests'
+      ? (refundRequestStatusFilter !== 'Pending' ? 1 : 0)
+      : (refundStatusFilter !== 'all' ? 1 : 0)
 
   const hasActiveFilters =
     search.trim() !== ''
     || paymentFilter !== 'all'
     || orderStatusFilter !== 'all'
     || orderTypeFilter !== 'all'
-    || restaurantFilter !== 'all'
+    || (isPlatformOwner && restaurantFilter !== 'all')
     || payableOnly !== 'yes'
     || refundStatusFilter !== 'all'
     || refundRequestStatusFilter !== 'Pending'
@@ -239,7 +272,7 @@ export function AdminPaymentsPage() {
         status: orderStatusFilter === 'all' ? undefined : orderStatusFilter,
         paymentStatus: paymentFilter === 'all' ? undefined : paymentFilter,
         orderType: orderTypeFilter === 'all' ? undefined : orderTypeFilter,
-        restaurantId: restaurantFilter === 'all' ? undefined : restaurantFilter,
+        restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
         payableOnly: payableOnly === 'yes' ? true : undefined,
       })
       setOrders(response.items)
@@ -256,14 +289,14 @@ export function AdminPaymentsPage() {
     } finally {
       setLoading(false)
     }
-  }, [orderStatusFilter, orderTypeFilter, page, pageSize, payableOnly, paymentFilter, restaurantFilter, search, sort])
+  }, [isPlatformOwner, orderStatusFilter, orderTypeFilter, page, pageSize, payableOnly, paymentFilter, restaurantFilter, search, sort])
 
   const loadRefundSummary = useCallback(async (showToast = false) => {
     setRefundSummaryLoading(true)
 
     try {
       const summary = await getAdminRefundSummary({
-        restaurantId: restaurantFilter === 'all' ? undefined : restaurantFilter,
+        restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
         search: search.trim() || undefined,
       })
       setRefundSummary(summary)
@@ -278,7 +311,7 @@ export function AdminPaymentsPage() {
     } finally {
       setRefundSummaryLoading(false)
     }
-  }, [restaurantFilter, search])
+  }, [isPlatformOwner, restaurantFilter, search])
 
   const loadRefunds = useCallback(async (showToast = false) => {
     setRefundsLoading(true)
@@ -288,7 +321,7 @@ export function AdminPaymentsPage() {
         page: refundPage,
         pageSize: refundPageSize,
         search: search.trim() || undefined,
-        restaurantId: restaurantFilter === 'all' ? undefined : restaurantFilter,
+        restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
         status: refundStatusFilter === 'all' ? undefined : refundStatusFilter,
         sortBy: 'createdAt',
         sortDirection: 'desc',
@@ -307,7 +340,7 @@ export function AdminPaymentsPage() {
     } finally {
       setRefundsLoading(false)
     }
-  }, [refundPage, refundPageSize, refundStatusFilter, restaurantFilter, search])
+  }, [isPlatformOwner, refundPage, refundPageSize, refundStatusFilter, restaurantFilter, search])
 
   const loadRefundRequests = useCallback(async (showToast = false) => {
     setRefundRequestsLoading(true)
@@ -317,7 +350,7 @@ export function AdminPaymentsPage() {
         page: refundRequestPage,
         pageSize: refundRequestPageSize,
         search: search.trim() || undefined,
-        restaurantId: restaurantFilter === 'all' ? undefined : restaurantFilter,
+        restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
         status: refundRequestStatusFilter === 'all' ? undefined : refundRequestStatusFilter,
         sortBy: 'createdAt',
         sortDirection: 'desc',
@@ -336,7 +369,7 @@ export function AdminPaymentsPage() {
     } finally {
       setRefundRequestsLoading(false)
     }
-  }, [refundRequestPage, refundRequestPageSize, refundRequestStatusFilter, restaurantFilter, search])
+  }, [isPlatformOwner, refundRequestPage, refundRequestPageSize, refundRequestStatusFilter, restaurantFilter, search])
 
   useEffect(() => {
     void Promise.resolve().then(() => loadOrders())
@@ -501,9 +534,173 @@ export function AdminPaymentsPage() {
     }
   }
 
+  const toggleOrderExpansion = (orderId: string) => {
+    setExpandedOrderId((current) => (current === orderId ? null : orderId))
+  }
+
+  const renderPaymentAction = (order: AdminOrder) => {
+    const payable = isOrderPayable(order)
+    const refundable = canRefundOrder(order)
+    const submitting = submittingOrderId === order.id
+
+    if (payable) {
+      return (
+        <Button
+          type="button"
+          size="sm"
+          className="payment-checkout-button"
+          onClick={(event) => {
+            event.stopPropagation()
+            void handleCheckout(order)
+          }}
+          disabled={loading || submittingOrderId !== null || refundingOrderId !== null}
+        >
+          <ExternalLink size={16} />
+          {submitting ? 'Opening' : 'Checkout'}
+        </Button>
+      )
+    }
+
+    if (refundable) {
+      return (
+        <Button
+          type="button"
+          size="sm"
+          variant="destructive"
+          onClick={(event) => {
+            event.stopPropagation()
+            setRefundReason('')
+            setPendingRefundOrder(order)
+          }}
+          disabled={loading || submittingOrderId !== null || refundingOrderId !== null}
+        >
+          <Undo2 size={16} />
+          {refundingOrderId === order.id ? 'Refunding' : 'Refund'}
+        </Button>
+      )
+    }
+
+    return (
+      <span className="muted-action">
+        {order.latestPayment?.hasPendingRefund
+          ? 'Refund pending'
+          : order.paymentStatus === 'Paid'
+            ? 'Already paid'
+            : 'Not payable'}
+      </span>
+    )
+  }
+
+  const renderPaymentDetailPanel = (
+    order: AdminOrder,
+    options?: { className?: string; style?: CSSProperties },
+  ) => (
+    <div
+      className={['order-detail-panel', options?.className].filter(Boolean).join(' ')}
+      style={options?.style}
+      aria-live="polite"
+    >
+      <section className="order-detail-section order-detail-section-wide">
+        <div className="order-detail-heading">
+          <ReceiptText size={16} />
+          <strong>Order items</strong>
+        </div>
+        <div className="order-item-list">
+          {order.items.map((item) => (
+            <div key={item.id} className="order-item-line">
+              <div className="order-item-line-copy">
+                <strong>{item.itemNameSnapshot || 'Menu item'}</strong>
+                <span>
+                  {item.quantity} x {formatMoney(item.unitPrice, order.currency)}
+                </span>
+                <OrderItemOptionBadges options={item.selectedOptions} currency={order.currency} />
+                {item.note && <small>{item.note}</small>}
+              </div>
+              <strong>{formatMoney(item.totalPrice, order.currency)}</strong>
+            </div>
+          ))}
+        </div>
+        {order.customerNote && (
+          <div className="order-note">
+            <strong>Order note</strong>
+            <span>{order.customerNote}</span>
+          </div>
+        )}
+      </section>
+
+      <section className="order-detail-section">
+        <div className="order-detail-heading">
+          <CreditCard size={16} />
+          <strong>Payment context</strong>
+        </div>
+        <div className="order-payment-grid">
+          <span>Status</span>
+          <strong>{getPaymentStatusLabel(order.paymentStatus)}</strong>
+          <span>Method</span>
+          <strong>{order.paymentMethod === 'PayAtCounter' ? 'Pay at counter' : 'Online'}</strong>
+          <span>Order amount</span>
+          <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
+          <span>Refunded</span>
+          <strong>
+            {order.latestPayment
+              ? formatMoney(order.latestPayment.refundedAmountCents / 100, order.latestPayment.currency)
+              : formatMoney(0, order.currency)}
+          </strong>
+          <span>Refundable</span>
+          <strong>
+            {order.latestPayment
+              ? formatMoney(order.latestPayment.refundableAmountCents / 100, order.latestPayment.currency)
+              : formatMoney(0, order.currency)}
+          </strong>
+          <span>Latest session</span>
+          <strong>{order.latestPayment?.providerCheckoutSessionId || 'No checkout session yet'}</strong>
+          <span>Created</span>
+          <strong>{formatDate(order.createdAt)}</strong>
+        </div>
+        <PaymentRefundHistory payment={order.latestPayment} fallbackCurrency={order.currency} />
+      </section>
+    </div>
+  )
+
+  const renderRefundRequestActions = (refundRequest: AdminRefundRequest) => {
+    const isPendingRequest = refundRequest.status === 'Pending'
+    const isReviewing = reviewingRefundRequestId === refundRequest.id
+
+    if (!isPendingRequest) {
+      return <span className="muted-action">Reviewed</span>
+    }
+
+    return (
+      <div className="refund-request-actions">
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => void approveRefundRequest(refundRequest)}
+          disabled={reviewingRefundRequestId !== null}
+        >
+          {isReviewing ? <RefreshCw className="animate-spin" /> : <CheckCircle2 />}
+          Approve
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="destructive"
+          onClick={() => {
+            setRefundRequestRejectNote('')
+            setRejectingRefundRequest(refundRequest)
+          }}
+          disabled={reviewingRefundRequestId !== null}
+        >
+          <X size={16} />
+          Reject
+        </Button>
+      </div>
+    )
+  }
+
   return (
     <main className="content-grid">
-      <Card>
+      <Card id="payment-orders">
         <CardHeader>
           <div className="section-header">
             <div className="admin-page-title">
@@ -532,120 +729,265 @@ export function AdminPaymentsPage() {
           </div>
         </CardHeader>
         <CardContent className="directory-stack">
-          <div className="placeholder-grid order-summary-grid">
-            <div className="placeholder-item">
-              <strong>Visible orders</strong>
-              <span>{totalItems}</span>
+          <Tabs
+            value={activeTab}
+            onValueChange={(value) => setActiveTab(value as PaymentTab)}
+            className="admin-payments-tabs"
+          >
+            <TabsList className="admin-payments-tabs-list" aria-label="Payment views">
+              <TabsTrigger value="orders">Payment orders</TabsTrigger>
+              <TabsTrigger value="requests">Refund requests</TabsTrigger>
+              <TabsTrigger value="history">Refund history</TabsTrigger>
+            </TabsList>
+
+            {activeTab === 'orders' && (
+              <section className="admin-payments-summary-panel" aria-label="Payment order summary">
+                <button
+                  type="button"
+                  className="admin-payments-summary-toggle"
+                  aria-expanded={paymentSummaryExpanded}
+                  onClick={() => setPaymentSummaryExpanded((current) => !current)}
+                >
+                  <span className="admin-payments-summary-title">
+                    <ReceiptText size={16} />
+                    Payment summary
+                  </span>
+                  <span className="admin-payments-summary-meta">
+                    {totalItems} visible / {totals.payable} ready
+                  </span>
+                  {paymentSummaryExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                </button>
+
+                {paymentSummaryExpanded && (
+                  <div className="placeholder-grid order-summary-grid admin-payments-summary-grid">
+                    <div className="placeholder-item">
+                      <strong>Visible orders</strong>
+                      <span>{totalItems}</span>
+                    </div>
+                    <div className="placeholder-item">
+                      <strong>Ready to pay this page</strong>
+                      <span>{totals.payable}</span>
+                    </div>
+                    <div className="placeholder-item">
+                      <strong>Paid this page</strong>
+                      <span>{totals.paid}</span>
+                    </div>
+                    <div className="placeholder-item">
+                      <strong>Failed this page</strong>
+                      <span>{totals.failedPayment}</span>
+                    </div>
+                  </div>
+                )}
+              </section>
+            )}
+
+          <div className="directory-tools admin-payments-tools restaurant-filter-tools">
+            {isPlatformOwner && (
+              <div className="admin-payments-restaurant-row restaurant-table-selector-row">
+                <Select
+                  value={restaurantFilter}
+                  onValueChange={(value) => {
+                    setPage(1)
+                    setRefundPage(1)
+                    setRefundRequestPage(1)
+                    setRestaurantFilter(value)
+                  }}
+                >
+                  <SelectTrigger className="filter-select">
+                    <SelectValue placeholder="All restaurants" />
+                  </SelectTrigger>
+                  <SelectContent position="popper">
+                    <SelectItem value="all">All restaurants</SelectItem>
+                    {restaurantOptions.map((restaurant) => (
+                      <SelectItem key={restaurant.value} value={restaurant.value}>
+                        {restaurant.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
+            <div className="admin-payments-filter-row">
+              <div className="restaurant-filter-search-row admin-payments-search-row">
+                <div className="directory-search">
+                  <Search size={16} />
+                  <Input
+                    value={search}
+                    onChange={(event) => { setPage(1); setRefundPage(1); setRefundRequestPage(1); setSearch(event.target.value) }}
+                    placeholder="Search order, customer, restaurant, table, or payment ids"
+                  />
+                </div>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="restaurant-filter-trigger"
+                      aria-label="Filter payments"
+                    >
+                      <SlidersHorizontal size={16} />
+                      {activeDropdownFilterCount > 0 && (
+                        <span className="restaurant-filter-count">{activeDropdownFilterCount}</span>
+                      )}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="restaurant-filter-popover admin-payments-filter-popover" align="end">
+                    <div className="restaurant-filter-popover-header">
+                      <strong>Filters</strong>
+                      <Button type="button" variant="ghost" size="xs" onClick={resetFilters} disabled={!hasActiveFilters}>
+                        <X size={13} />
+                        Clear all
+                      </Button>
+                    </div>
+                    <div className="restaurant-filter-fields">
+                      {activeTab === 'orders' && (
+                        <>
+                          <div className="restaurant-filter-field">
+                            <span>Payment</span>
+                            <Select value={paymentFilter} onValueChange={(value) => { setPage(1); setPaymentFilter(value) }}>
+                              <SelectTrigger className="filter-select"><SelectValue placeholder="All payment status" /></SelectTrigger>
+                              <SelectContent position="popper">
+                                <SelectItem value="all">All payment status</SelectItem>
+                                {paymentStatusOptions.map((status) => (
+                                  <SelectItem key={status} value={status}>{getPaymentStatusLabel(status)}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="restaurant-filter-field">
+                            <span>Order status</span>
+                            <Select value={orderStatusFilter} onValueChange={(value) => { setPage(1); setOrderStatusFilter(value) }}>
+                              <SelectTrigger className="filter-select"><SelectValue placeholder="All order status" /></SelectTrigger>
+                              <SelectContent position="popper">
+                                <SelectItem value="all">All order status</SelectItem>
+                                {orderStatusOptions.map((status) => (
+                                  <SelectItem key={status} value={status}>{getOrderStatusLabel(status)}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="restaurant-filter-field">
+                            <span>Order type</span>
+                            <Select value={orderTypeFilter} onValueChange={(value) => { setPage(1); setOrderTypeFilter(value) }}>
+                              <SelectTrigger className="filter-select"><SelectValue placeholder="All order types" /></SelectTrigger>
+                              <SelectContent position="popper">
+                                <SelectItem value="all">All order types</SelectItem>
+                                {orderTypeOptions.map((orderType) => (
+                                  <SelectItem key={orderType} value={orderType}>{getOrderTypeLabel(orderType)}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="restaurant-filter-field">
+                            <span>Payable</span>
+                            <Select value={payableOnly} onValueChange={(value) => { setPage(1); setPayableOnly(value) }}>
+                              <SelectTrigger className="filter-select"><SelectValue placeholder="Payable only" /></SelectTrigger>
+                              <SelectContent position="popper">
+                                <SelectItem value="yes">Payable only</SelectItem>
+                                <SelectItem value="no">All orders</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </>
+                      )}
+                      {activeTab === 'requests' && (
+                        <div className="restaurant-filter-field">
+                          <span>Request status</span>
+                          <Select value={refundRequestStatusFilter} onValueChange={(value) => { setRefundRequestPage(1); setRefundRequestStatusFilter(value as typeof refundRequestStatusFilter) }}>
+                            <SelectTrigger className="filter-select"><SelectValue placeholder="Request status" /></SelectTrigger>
+                            <SelectContent position="popper">
+                              <SelectItem value="all">All request status</SelectItem>
+                              {refundRequestStatusOptions.map((status) => (
+                                <SelectItem key={status} value={status}>{status}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+                      {activeTab === 'history' && (
+                        <div className="restaurant-filter-field">
+                          <span>Refund status</span>
+                          <Select value={refundStatusFilter} onValueChange={(value) => { setRefundPage(1); setRefundStatusFilter(value as typeof refundStatusFilter) }}>
+                            <SelectTrigger className="filter-select"><SelectValue placeholder="All refund status" /></SelectTrigger>
+                            <SelectContent position="popper">
+                              <SelectItem value="all">All refund status</SelectItem>
+                              {refundStatusOptions.map((status) => (
+                                <SelectItem key={status} value={status}>{status}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              </div>
             </div>
-            <div className="placeholder-item">
-              <strong>Ready to pay this page</strong>
-              <span>{totals.payable}</span>
-            </div>
-            <div className="placeholder-item">
-              <strong>Paid this page</strong>
-              <span>{totals.paid}</span>
-            </div>
-            <div className="placeholder-item">
-              <strong>Failed this page</strong>
-              <span>{totals.failedPayment}</span>
-            </div>
+
+            {hasActiveFilters && (
+              <div className="restaurant-filter-chips admin-payments-filter-chips" aria-label="Active payment filters">
+                {search.trim() && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setRefundPage(1); setRefundRequestPage(1); setSearch('') }} title={`Search: ${search.trim()}`}>
+                    <span>Search: {search.trim()}</span>
+                    <X size={13} />
+                  </button>
+                )}
+                {isPlatformOwner && restaurantFilter !== 'all' && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setRefundPage(1); setRefundRequestPage(1); setRestaurantFilter('all') }} title={`Restaurant: ${selectedRestaurantFilterLabel}`}>
+                    <span>Restaurant: {selectedRestaurantFilterLabel}</span>
+                    <X size={13} />
+                  </button>
+                )}
+                {paymentFilter !== 'all' && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setPaymentFilter('all') }} title={`Payment: ${selectedPaymentFilterLabel}`}>
+                    <span>Payment: {selectedPaymentFilterLabel}</span>
+                    <X size={13} />
+                  </button>
+                )}
+                {orderStatusFilter !== 'all' && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setOrderStatusFilter('all') }} title={`Order: ${selectedOrderStatusFilterLabel}`}>
+                    <span>Order: {selectedOrderStatusFilterLabel}</span>
+                    <X size={13} />
+                  </button>
+                )}
+                {orderTypeFilter !== 'all' && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setOrderTypeFilter('all') }} title={`Type: ${selectedOrderTypeFilterLabel}`}>
+                    <span>Type: {selectedOrderTypeFilterLabel}</span>
+                    <X size={13} />
+                  </button>
+                )}
+                {payableOnly !== 'yes' && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setPayableOnly('yes') }} title={`Payable: ${selectedPayableFilterLabel}`}>
+                    <span>Payable: {selectedPayableFilterLabel}</span>
+                    <X size={13} />
+                  </button>
+                )}
+                {refundRequestStatusFilter !== 'Pending' && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => { setRefundRequestPage(1); setRefundRequestStatusFilter('Pending') }} title={`Request: ${refundRequestStatusFilter}`}>
+                    <span>Request: {refundRequestStatusFilter}</span>
+                    <X size={13} />
+                  </button>
+                )}
+                {refundStatusFilter !== 'all' && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => { setRefundPage(1); setRefundStatusFilter('all') }} title={`Refund: ${refundStatusFilter}`}>
+                    <span>Refund: {refundStatusFilter}</span>
+                    <X size={13} />
+                  </button>
+                )}
+                <button type="button" className="restaurant-filter-chip restaurant-filter-chip-clear" onClick={resetFilters}>
+                  <X size={13} />
+                  <span>Clear all</span>
+                </button>
+              </div>
+            )}
           </div>
 
-          <div className="directory-tools admin-payments-tools">
-            <div className="directory-search">
-              <Search size={16} />
-              <Input
-                value={search}
-                onChange={(event) => { setPage(1); setRefundPage(1); setRefundRequestPage(1); setSearch(event.target.value) }}
-                placeholder="Search order, customer, restaurant, table, or payment ids"
-              />
-            </div>
-
-            <Select value={paymentFilter} onValueChange={(value) => { setPage(1); setPaymentFilter(value) }}>
-              <SelectTrigger className="filter-select">
-                <SelectValue placeholder="All payment status" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All payment status</SelectItem>
-                {paymentStatusOptions.map((status) => (
-                  <SelectItem key={status} value={status}>
-                    {getPaymentStatusLabel(status)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <Select value={orderStatusFilter} onValueChange={(value) => { setPage(1); setOrderStatusFilter(value) }}>
-              <SelectTrigger className="filter-select">
-                <SelectValue placeholder="All order status" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All order status</SelectItem>
-                {orderStatusOptions.map((status) => (
-                  <SelectItem key={status} value={status}>
-                    {getOrderStatusLabel(status)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <Select value={orderTypeFilter} onValueChange={(value) => { setPage(1); setOrderTypeFilter(value) }}>
-              <SelectTrigger className="filter-select">
-                <SelectValue placeholder="All order types" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All order types</SelectItem>
-                {orderTypeOptions.map((orderType) => (
-                  <SelectItem key={orderType} value={orderType}>
-                    {getOrderTypeLabel(orderType)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <Select value={restaurantFilter} onValueChange={(value) => { setPage(1); setRefundPage(1); setRefundRequestPage(1); setRestaurantFilter(value) }}>
-              <SelectTrigger className="filter-select">
-                <SelectValue placeholder="All restaurants" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All restaurants</SelectItem>
-                {restaurantOptions.map((restaurant) => (
-                  <SelectItem key={restaurant.value} value={restaurant.value}>
-                    {restaurant.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <Select value={payableOnly} onValueChange={(value) => { setPage(1); setPayableOnly(value) }}>
-              <SelectTrigger className="filter-select">
-                <SelectValue placeholder="Payable only" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="yes">Payable only</SelectItem>
-                <SelectItem value="no">All orders</SelectItem>
-              </SelectContent>
-            </Select>
-
-            <Button type="button" variant="ghost" size="icon" onClick={resetFilters} disabled={!hasActiveFilters}>
-              <X size={18} />
-            </Button>
-          </div>
-
-          <div className="payment-test-note">
-            <ReceiptText size={20} />
-            <div>
-              <strong>This page now works from real orders, not a one-off payment test picker.</strong>
-              <span>
-                Stripe checkout can only be launched for orders that are not paid and are not cancelled or rejected.
-                If Stripe returns a 400, the toast now includes the backend detail so we can see the actual checkout
-                failure reason.
-              </span>
-            </div>
-          </div>
-
-          <HorizontalTableScroll ref={tableWrapRef} topScrollLabel="Scroll payment orders table horizontally">
-            <table className="data-table payment-orders-table admin-payments-table">
+            <TabsContent value="orders" className="payment-tab-content admin-payment-orders-tab">
+              <div className="admin-payments-table-wrap">
+                <HorizontalTableScroll ref={tableWrapRef} topScrollLabel="Scroll payment orders table horizontally">
+                  <table className="data-table payment-orders-table admin-payments-table">
               <colgroup>
                 <col className="payment-col-order" />
                 <col className="payment-col-restaurant" />
@@ -712,9 +1054,6 @@ export function AdminPaymentsPage() {
               </thead>
               <tbody>
                 {filteredOrders.map((order) => {
-                  const payable = isOrderPayable(order)
-                  const refundable = canRefundOrder(order)
-                  const submitting = submittingOrderId === order.id
                   const isExpanded = expandedOrderId === order.id
 
                   return (
@@ -722,7 +1061,7 @@ export function AdminPaymentsPage() {
                       <tr
                         className="expandable-table-row"
                         aria-expanded={isExpanded}
-                        onClick={() => setExpandedOrderId((current) => (current === order.id ? null : order.id))}
+                        onClick={() => toggleOrderExpansion(order.id)}
                       >
                         <td>
                           <span className="table-name">
@@ -734,7 +1073,7 @@ export function AdminPaymentsPage() {
                               aria-label={isExpanded ? 'Collapse order payment details' : 'Expand order payment details'}
                               onClick={(event) => {
                                 event.stopPropagation()
-                                setExpandedOrderId((current) => (current === order.id ? null : order.id))
+                                toggleOrderExpansion(order.id)
                               }}
                             >
                               {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
@@ -781,114 +1120,15 @@ export function AdminPaymentsPage() {
                         </td>
                         <td>{formatDate(order.createdAt)}</td>
                         <td className="payment-action-cell">
-                          {payable ? (
-                            <Button
-                              type="button"
-                              size="sm"
-                              className="payment-checkout-button"
-                              onClick={(event) => {
-                                event.stopPropagation()
-                                void handleCheckout(order)
-                              }}
-                              disabled={loading || submittingOrderId !== null || refundingOrderId !== null}
-                            >
-                              <ExternalLink size={16} />
-                              {submitting ? 'Opening' : 'Checkout'}
-                            </Button>
-                          ) : refundable ? (
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="destructive"
-                              onClick={(event) => {
-                                event.stopPropagation()
-                                setRefundReason('')
-                                setPendingRefundOrder(order)
-                              }}
-                              disabled={loading || submittingOrderId !== null || refundingOrderId !== null}
-                            >
-                              <Undo2 size={16} />
-                              {refundingOrderId === order.id ? 'Refunding' : 'Refund'}
-                            </Button>
-                          ) : (
-                            <span className="muted-action">
-                              {order.latestPayment?.hasPendingRefund
-                                ? 'Refund pending'
-                                : order.paymentStatus === 'Paid'
-                                  ? 'Already paid'
-                                  : 'Not payable'}
-                            </span>
-                          )}
+                          {renderPaymentAction(order)}
                         </td>
                       </tr>
                       {isExpanded && (
                         <tr className="order-detail-row">
                           <td colSpan={8}>
-                            <div
-                              className="order-detail-panel"
-                              style={tableViewportWidth ? { width: `${tableViewportWidth}px` } : undefined}
-                              aria-live="polite"
-                            >
-                              <section className="order-detail-section order-detail-section-wide">
-                                <div className="order-detail-heading">
-                                  <ReceiptText size={16} />
-                                  <strong>Order items</strong>
-                                </div>
-                                <div className="order-item-list">
-                                  {order.items.map((item) => (
-                                    <div key={item.id} className="order-item-line">
-                                      <div className="order-item-line-copy">
-                                        <strong>{item.itemNameSnapshot || 'Menu item'}</strong>
-                                        <span>
-                                          {item.quantity} x {formatMoney(item.unitPrice, order.currency)}
-                                        </span>
-                                        <OrderItemOptionBadges options={item.selectedOptions} currency={order.currency} />
-                                        {item.note && <small>{item.note}</small>}
-                                      </div>
-                                      <strong>{formatMoney(item.totalPrice, order.currency)}</strong>
-                                    </div>
-                                  ))}
-                                </div>
-                                {order.customerNote && (
-                                  <div className="order-note">
-                                    <strong>Order note</strong>
-                                    <span>{order.customerNote}</span>
-                                  </div>
-                                )}
-                              </section>
-
-                              <section className="order-detail-section">
-                                <div className="order-detail-heading">
-                                  <CreditCard size={16} />
-                                  <strong>Payment context</strong>
-                                </div>
-                                <div className="order-payment-grid">
-                                  <span>Status</span>
-                                  <strong>{getPaymentStatusLabel(order.paymentStatus)}</strong>
-                                  <span>Method</span>
-                                  <strong>{order.paymentMethod === 'PayAtCounter' ? 'Pay at counter' : 'Online'}</strong>
-                                  <span>Order amount</span>
-                                  <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
-                                  <span>Refunded</span>
-                                  <strong>
-                                    {order.latestPayment
-                                      ? formatMoney(order.latestPayment.refundedAmountCents / 100, order.latestPayment.currency)
-                                      : formatMoney(0, order.currency)}
-                                  </strong>
-                                  <span>Refundable</span>
-                                  <strong>
-                                    {order.latestPayment
-                                      ? formatMoney(order.latestPayment.refundableAmountCents / 100, order.latestPayment.currency)
-                                      : formatMoney(0, order.currency)}
-                                  </strong>
-                                  <span>Latest session</span>
-                                  <strong>{order.latestPayment?.providerCheckoutSessionId || 'No checkout session yet'}</strong>
-                                  <span>Created</span>
-                                  <strong>{formatDate(order.createdAt)}</strong>
-                                </div>
-                                <PaymentRefundHistory payment={order.latestPayment} fallbackCurrency={order.currency} />
-                              </section>
-                            </div>
+                            {renderPaymentDetailPanel(order, {
+                              style: tableViewportWidth ? { width: `${tableViewportWidth}px` } : undefined,
+                            })}
                           </td>
                         </tr>
                       )}
@@ -907,57 +1147,154 @@ export function AdminPaymentsPage() {
                   </tr>
                 )}
               </tbody>
-            </table>
-          </HorizontalTableScroll>
-          <div className="pagination-bar">
-            <span>{pageStart}-{pageEnd} of {totalItems}</span>
-            <div className="pagination-actions">
-              <Select value={String(pageSize)} onValueChange={(value) => { setPage(1); setPageSize(Number(value)) }}>
-                <SelectTrigger className="page-size-select" aria-label="Payment orders per page">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {[10, 20, 50, 100].map((size) => <SelectItem key={size} value={String(size)}>{size} per page</SelectItem>)}
-                </SelectContent>
-              </Select>
-              <Button type="button" variant="outline" size="sm" onClick={() => setPage((current) => current - 1)} disabled={loading || page <= 1}>Previous</Button>
-              <span>Page {totalPages === 0 ? 0 : page} of {totalPages}</span>
-              <Button type="button" variant="outline" size="sm" onClick={() => setPage((current) => current + 1)} disabled={loading || page >= totalPages}>Next</Button>
-            </div>
-          </div>
+                  </table>
+                </HorizontalTableScroll>
+              </div>
 
-          <section className="refund-records-section refund-requests-section">
-            <div className="section-header">
-              <div className="admin-page-title">
-                <Undo2 size={22} />
-                <div>
-                  <h3>Refund requests</h3>
-                  <p>Customer-submitted requests waiting for an admin decision.</p>
+              <div className="restaurant-mobile-list admin-payment-mobile-list" aria-label="Payment orders">
+                {filteredOrders.map((order) => {
+                  const isExpanded = expandedOrderId === order.id
+                  const customerLabel = order.customerName || order.customerEmail || 'Guest / unknown'
+                  const paymentAttemptLabel = order.paymentMethod === 'PayAtCounter'
+                    ? 'Pay at counter'
+                    : order.paymentAttempts > 0
+                      ? `${order.paymentAttempts} payment attempt${order.paymentAttempts === 1 ? '' : 's'}`
+                      : 'No payment attempts yet'
+                  const latestPaymentLabel = order.latestPayment
+                    ? getPaymentStatusLabel(order.latestPayment.status)
+                    : 'No payment yet'
+
+                  return (
+                    <article className="restaurant-mobile-card admin-payment-mobile-card" key={order.id}>
+                      <header className="restaurant-mobile-card-header admin-payment-mobile-card-header">
+                        <span className="restaurant-mobile-avatar">
+                          <ReceiptText size={18} />
+                        </span>
+                        <div className="restaurant-mobile-primary">
+                          <strong title={order.orderNumber}>{order.orderNumber}</strong>
+                          <span title={`${order.tableNumber ? `Table ${order.tableNumber}` : getOrderTypeLabel(order.orderType)} - ${order.items.length} item${order.items.length === 1 ? '' : 's'}`}>
+                            {order.tableNumber ? `Table ${order.tableNumber}` : getOrderTypeLabel(order.orderType)}
+                            {' - '}
+                            {order.items.length} item{order.items.length === 1 ? '' : 's'}
+                          </span>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="admin-payment-card-toggle"
+                          aria-label={isExpanded ? 'Collapse payment details' : 'Expand payment details'}
+                          aria-expanded={isExpanded}
+                          onClick={() => toggleOrderExpansion(order.id)}
+                        >
+                          {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                        </Button>
+                      </header>
+
+                      <div className="admin-payment-mobile-status-row">
+                        <div>
+                          <OrderStatusBadge status={order.status} />
+                          <PaymentStatusBadge status={order.paymentStatus} />
+                        </div>
+                        <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
+                      </div>
+
+                      <div className="restaurant-mobile-meta-grid admin-payment-mobile-meta-grid">
+                        <div className="restaurant-mobile-meta">
+                          <Building2 size={15} />
+                          <div>
+                            <span>Restaurant</span>
+                            <strong title={order.restaurantName || undefined}>{order.restaurantName || 'Unknown restaurant'}</strong>
+                            <small title={getOrderTypeLabel(order.orderType)}>{getOrderTypeLabel(order.orderType)}</small>
+                          </div>
+                        </div>
+                        <div className="restaurant-mobile-meta">
+                          <UserRound size={15} />
+                          <div>
+                            <span>Customer</span>
+                            <strong title={customerLabel}>{customerLabel}</strong>
+                            <small title={order.customerEmail || order.customerId || undefined}>{order.customerEmail || order.customerId || 'No customer account'}</small>
+                          </div>
+                        </div>
+                        <div className="restaurant-mobile-meta">
+                          <CreditCard size={15} />
+                          <div>
+                            <span>Payment</span>
+                            <strong title={paymentAttemptLabel}>{paymentAttemptLabel}</strong>
+                            <small title={order.latestPayment?.providerCheckoutSessionId || undefined}>{latestPaymentLabel}</small>
+                          </div>
+                        </div>
+                        <div className="restaurant-mobile-meta">
+                          <CalendarClock size={15} />
+                          <div>
+                            <span>Created</span>
+                            <strong>{formatDate(order.createdAt)}</strong>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="restaurant-mobile-actions admin-payment-mobile-actions">
+                        {renderPaymentAction(order)}
+                      </div>
+
+                      {isExpanded && (
+                        <div className="admin-payment-mobile-detail">
+                          {renderPaymentDetailPanel(order, { className: 'admin-payment-mobile-detail-panel' })}
+                        </div>
+                      )}
+                    </article>
+                  )
+                })}
+                {filteredOrders.length === 0 && (
+                  <div className="restaurant-mobile-empty">
+                    {loading
+                      ? 'Loading payment records...'
+                      : hasActiveFilters
+                        ? 'No orders match the current payment filters.'
+                        : 'No orders found.'}
+                  </div>
+                )}
+              </div>
+
+              <div className="pagination-bar compact-pagination admin-payments-pagination">
+                <span className="pagination-range">
+                  <span className="pagination-full">Showing {pageStart}-{pageEnd} of {totalItems}</span>
+                  <span className="pagination-compact">{pageStart}-{pageEnd} / {totalItems}</span>
+                </span>
+                <div className="pagination-actions">
+                  <Select value={String(pageSize)} onValueChange={(value) => { setPage(1); setPageSize(Number(value)) }}>
+                    <SelectTrigger className="page-size-select" aria-label="Payment orders per page">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent position="popper">
+                      {[10, 20, 50, 100].map((size) => <SelectItem key={size} value={String(size)}>{size} / page</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  <span className="pagination-page">
+                    <span className="pagination-full">Page {currentPage} of {totalPages}</span>
+                    <span className="pagination-compact">{currentPage} / {totalPages}</span>
+                  </span>
+                  <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={loading || page <= 1} aria-label="Previous payment orders page"><ChevronLeft size={16} /></Button>
+                  <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={loading || page >= totalPages} aria-label="Next payment orders page"><ChevronRight size={16} /></Button>
                 </div>
               </div>
-              <Select
-                value={refundRequestStatusFilter}
-                onValueChange={(value) => {
-                  setRefundRequestPage(1)
-                  setRefundRequestStatusFilter(value as typeof refundRequestStatusFilter)
-                }}
-              >
-                <SelectTrigger className="filter-select">
-                  <SelectValue placeholder="Request status" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All request status</SelectItem>
-                  {refundRequestStatusOptions.map((status) => (
-                    <SelectItem key={status} value={status}>
-                      {status}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            </TabsContent>
 
-            <HorizontalTableScroll topScrollLabel="Scroll refund requests table horizontally">
-              <table className="data-table payment-orders-table refund-records-table refund-requests-table">
+            <TabsContent value="requests" className="payment-tab-content refund-requests-tab">
+              <section id="refund-requests" className="refund-records-section refund-requests-section">
+                <div className="section-header">
+                  <div className="admin-page-title">
+                    <Undo2 size={22} />
+                    <div>
+                      <h3>Refund requests</h3>
+                      <p>Customer-submitted requests waiting for an admin decision.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="refund-requests-table-wrap">
+                  <HorizontalTableScroll topScrollLabel="Scroll refund requests table horizontally">
+                    <table className="data-table payment-orders-table refund-records-table refund-requests-table">
                 <thead>
                   <tr>
                     <th>Request</th>
@@ -972,9 +1309,6 @@ export function AdminPaymentsPage() {
                 </thead>
                 <tbody>
                   {refundRequests.map((refundRequest) => {
-                    const isPendingRequest = refundRequest.status === 'Pending'
-                    const isReviewing = reviewingRefundRequestId === refundRequest.id
-
                     return (
                       <tr key={refundRequest.id}>
                         <td>
@@ -1014,36 +1348,7 @@ export function AdminPaymentsPage() {
                         <td>
                           {formatDate(refundRequest.reviewedAt || refundRequest.updatedAt || refundRequest.createdAt)}
                         </td>
-                        <td>
-                          {isPendingRequest ? (
-                            <div className="refund-request-actions">
-                              <Button
-                                type="button"
-                                size="sm"
-                                onClick={() => void approveRefundRequest(refundRequest)}
-                                disabled={reviewingRefundRequestId !== null}
-                              >
-                                {isReviewing ? <RefreshCw className="animate-spin" /> : <CheckCircle2 />}
-                                Approve
-                              </Button>
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="destructive"
-                                onClick={() => {
-                                  setRefundRequestRejectNote('')
-                                  setRejectingRefundRequest(refundRequest)
-                                }}
-                                disabled={reviewingRefundRequestId !== null}
-                              >
-                                <X size={16} />
-                                Reject
-                              </Button>
-                            </div>
-                          ) : (
-                            <span className="muted-action">Reviewed</span>
-                          )}
-                        </td>
+                        <td>{renderRefundRequestActions(refundRequest)}</td>
                       </tr>
                     )
                   })}
@@ -1057,90 +1362,167 @@ export function AdminPaymentsPage() {
                     </tr>
                   )}
                 </tbody>
-              </table>
-            </HorizontalTableScroll>
-
-            <div className="pagination-bar">
-              <span>{refundRequestPageStart}-{refundRequestPageEnd} of {refundRequestTotalItems}</span>
-              <div className="pagination-actions">
-                <Select value={String(refundRequestPageSize)} onValueChange={(value) => { setRefundRequestPage(1); setRefundRequestPageSize(Number(value)) }}>
-                  <SelectTrigger className="page-size-select" aria-label="Refund requests per page">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {[10, 20, 50, 100].map((size) => <SelectItem key={size} value={String(size)}>{size} per page</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                <Button type="button" variant="outline" size="sm" onClick={() => setRefundRequestPage((current) => current - 1)} disabled={refundRequestsLoading || refundRequestPage <= 1}>Previous</Button>
-                <span>Page {refundRequestTotalPages === 0 ? 0 : refundRequestPage} of {refundRequestTotalPages}</span>
-                <Button type="button" variant="outline" size="sm" onClick={() => setRefundRequestPage((current) => current + 1)} disabled={refundRequestsLoading || refundRequestPage >= refundRequestTotalPages}>Next</Button>
-              </div>
-            </div>
-          </section>
-
-          <section className="refund-records-section">
-            <div className="section-header">
-              <div className="admin-page-title">
-                <Undo2 size={22} />
-                <div>
-                  <h3>Refund records</h3>
-                  <p>Refunds from the refund table, linked back to orders and Stripe refund ids.</p>
+                    </table>
+                  </HorizontalTableScroll>
                 </div>
-              </div>
-              <Select
-                value={refundStatusFilter}
-                onValueChange={(value) => {
-                  setRefundPage(1)
-                  setRefundStatusFilter(value as typeof refundStatusFilter)
-                }}
-              >
-                <SelectTrigger className="filter-select">
-                  <SelectValue placeholder="All refund status" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All refund status</SelectItem>
-                  {refundStatusOptions.map((status) => (
-                    <SelectItem key={status} value={status}>
-                      {status}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
 
-            <div className="refund-summary-panel">
-              <div className="refund-summary-title">
-                <Undo2 size={20} />
-                <div>
-                  <strong>Refunds from refund table</strong>
-                  <span>
-                    {refundSummaryLoading
-                      ? 'Loading refund records...'
-                      : `${refundSummary.total} refund record${refundSummary.total === 1 ? '' : 's'} visible`}
+                <div className="restaurant-mobile-list refund-request-mobile-list" aria-label="Refund requests">
+                  {refundRequests.map((refundRequest) => {
+                    const customerLabel = refundRequest.customerName || refundRequest.customerEmail || 'Guest / unknown'
+
+                    return (
+                      <article className="restaurant-mobile-card refund-mobile-card" key={refundRequest.id}>
+                        <header className="restaurant-mobile-card-header refund-mobile-card-header">
+                          <span className="restaurant-mobile-avatar">
+                            <Undo2 size={18} />
+                          </span>
+                          <div className="restaurant-mobile-primary">
+                            <strong title={refundRequest.id}>{refundRequest.orderNumber || refundRequest.id}</strong>
+                            <span title={refundRequest.paymentRefundId || undefined}>
+                              {refundRequest.paymentRefundId ? `Refund ${refundRequest.paymentRefundId}` : 'No refund transaction yet'}
+                            </span>
+                          </div>
+                          <Badge
+                            variant={refundRequest.status === 'Rejected' ? 'destructive' : refundRequest.status === 'Approved' ? 'secondary' : 'outline'}
+                            className={refundRequestStatusClasses[refundRequest.status]}
+                          >
+                            {refundRequest.status}
+                          </Badge>
+                        </header>
+
+                        <div className="refund-mobile-amount-row">
+                          <span>Requested</span>
+                          <strong>{formatMoney(refundRequest.requestedAmountCents / 100, refundRequest.currency)}</strong>
+                        </div>
+
+                        <div className="restaurant-mobile-meta-grid refund-mobile-meta-grid">
+                          <div className="restaurant-mobile-meta">
+                            <Building2 size={15} />
+                            <div>
+                              <span>Restaurant</span>
+                              <strong title={refundRequest.restaurantName || undefined}>{refundRequest.restaurantName || 'Unknown restaurant'}</strong>
+                            </div>
+                          </div>
+                          <div className="restaurant-mobile-meta">
+                            <UserRound size={15} />
+                            <div>
+                              <span>Customer</span>
+                              <strong title={customerLabel}>{customerLabel}</strong>
+                              <small title={refundRequest.customerEmail || undefined}>{refundRequest.customerEmail || 'No customer email'}</small>
+                            </div>
+                          </div>
+                          <div className="restaurant-mobile-meta refund-mobile-meta-wide">
+                            <ReceiptText size={15} />
+                            <div>
+                              <span>Reason</span>
+                              <strong title={refundRequest.reason || undefined}>{refundRequest.reason || 'No customer reason'}</strong>
+                              {refundRequest.adminNote && <small title={refundRequest.adminNote}>{refundRequest.adminNote}</small>}
+                            </div>
+                          </div>
+                          <div className="restaurant-mobile-meta">
+                            <CalendarClock size={15} />
+                            <div>
+                              <span>Updated</span>
+                              <strong>{formatDate(refundRequest.reviewedAt || refundRequest.updatedAt || refundRequest.createdAt)}</strong>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="restaurant-mobile-actions refund-mobile-actions">
+                          {renderRefundRequestActions(refundRequest)}
+                        </div>
+                      </article>
+                    )
+                  })}
+                  {refundRequests.length === 0 && (
+                    <div className="restaurant-mobile-empty">
+                      {refundRequestsLoading
+                        ? 'Loading refund requests...'
+                        : 'No refund requests match the current filters.'}
+                    </div>
+                  )}
+                </div>
+
+                <div className="pagination-bar compact-pagination admin-payments-pagination">
+                  <span className="pagination-range">
+                    <span className="pagination-full">Showing {refundRequestPageStart}-{refundRequestPageEnd} of {refundRequestTotalItems}</span>
+                    <span className="pagination-compact">{refundRequestPageStart}-{refundRequestPageEnd} / {refundRequestTotalItems}</span>
                   </span>
+                  <div className="pagination-actions">
+                    <Select value={String(refundRequestPageSize)} onValueChange={(value) => { setRefundRequestPage(1); setRefundRequestPageSize(Number(value)) }}>
+                      <SelectTrigger className="page-size-select" aria-label="Refund requests per page">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent position="popper">
+                        {[10, 20, 50, 100].map((size) => <SelectItem key={size} value={String(size)}>{size} / page</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                    <span className="pagination-page">
+                      <span className="pagination-full">Page {currentRefundRequestPage} of {refundRequestTotalPages}</span>
+                      <span className="pagination-compact">{currentRefundRequestPage} / {refundRequestTotalPages}</span>
+                    </span>
+                    <Button type="button" variant="outline" size="icon" onClick={() => setRefundRequestPage((current) => Math.max(1, current - 1))} disabled={refundRequestsLoading || refundRequestPage <= 1} aria-label="Previous refund requests page"><ChevronLeft size={16} /></Button>
+                    <Button type="button" variant="outline" size="icon" onClick={() => setRefundRequestPage((current) => Math.min(refundRequestTotalPages, current + 1))} disabled={refundRequestsLoading || refundRequestPage >= refundRequestTotalPages} aria-label="Next refund requests page"><ChevronRight size={16} /></Button>
+                  </div>
                 </div>
-              </div>
-              <div className="refund-summary-grid">
-                <div className="refund-summary-item">
-                  <span>Succeeded</span>
-                  <strong>{refundSummary.succeeded}</strong>
-                  <small>{formatCurrencyBreakdown(refundSummary.amountsByCurrency, 'succeededAmountCents')}</small>
-                </div>
-                <div className="refund-summary-item">
-                  <span>Pending</span>
-                  <strong>{refundSummary.pending}</strong>
-                  <small>{formatCurrencyBreakdown(refundSummary.amountsByCurrency, 'pendingAmountCents')}</small>
-                </div>
-                <div className="refund-summary-item">
-                  <span>Failed</span>
-                  <strong>{refundSummary.failed}</strong>
-                  <small>{formatCurrencyBreakdown(refundSummary.amountsByCurrency, 'failedAmountCents')}</small>
-                </div>
-              </div>
-            </div>
+              </section>
+            </TabsContent>
 
-            <HorizontalTableScroll topScrollLabel="Scroll refund records table horizontally">
-              <table className="data-table payment-orders-table refund-records-table">
+            <TabsContent value="history" className="payment-tab-content refund-history-tab">
+              <section id="refund-records" className="refund-records-section">
+                <div className="section-header">
+                  <div className="admin-page-title">
+                    <Undo2 size={22} />
+                    <div>
+                      <h3>Refund records</h3>
+                      <p>Refunds from the refund table, linked back to orders and Stripe refund ids.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <section className="refund-summary-panel is-collapsible" aria-label="Refund summary">
+                  <button
+                    type="button"
+                    className="refund-summary-toggle"
+                    aria-expanded={refundSummaryExpanded}
+                    onClick={() => setRefundSummaryExpanded((current) => !current)}
+                  >
+                    <span className="refund-summary-toggle-title">
+                      <Undo2 size={16} />
+                      Refund summary
+                    </span>
+                    <span className="refund-summary-toggle-meta">
+                      {refundSummaryLoading
+                        ? 'Loading refund records...'
+                        : `${refundSummary.total} records / ${refundSummary.succeeded} succeeded`}
+                    </span>
+                    {refundSummaryExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                  </button>
+
+                  {refundSummaryExpanded && (
+                    <div className="refund-summary-grid">
+                      <div className="refund-summary-item">
+                        <span>Succeeded</span>
+                        <strong>{refundSummary.succeeded}</strong>
+                        <small>{formatCurrencyBreakdown(refundSummary.amountsByCurrency, 'succeededAmountCents')}</small>
+                      </div>
+                      <div className="refund-summary-item">
+                        <span>Pending</span>
+                        <strong>{refundSummary.pending}</strong>
+                        <small>{formatCurrencyBreakdown(refundSummary.amountsByCurrency, 'pendingAmountCents')}</small>
+                      </div>
+                      <div className="refund-summary-item">
+                        <span>Failed</span>
+                        <strong>{refundSummary.failed}</strong>
+                        <small>{formatCurrencyBreakdown(refundSummary.amountsByCurrency, 'failedAmountCents')}</small>
+                      </div>
+                    </div>
+                  )}
+                </section>
+
+                <div className="refund-records-table-wrap">
+                  <HorizontalTableScroll topScrollLabel="Scroll refund records table horizontally">
+                    <table className="data-table payment-orders-table refund-records-table">
                 <thead>
                   <tr>
                     <th>Refund</th>
@@ -1200,26 +1582,113 @@ export function AdminPaymentsPage() {
                     </tr>
                   )}
                 </tbody>
-              </table>
-            </HorizontalTableScroll>
+                    </table>
+                  </HorizontalTableScroll>
+                </div>
 
-            <div className="pagination-bar">
-              <span>{refundPageStart}-{refundPageEnd} of {refundTotalItems}</span>
-              <div className="pagination-actions">
-                <Select value={String(refundPageSize)} onValueChange={(value) => { setRefundPage(1); setRefundPageSize(Number(value)) }}>
-                  <SelectTrigger className="page-size-select" aria-label="Refund records per page">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {[10, 20, 50, 100].map((size) => <SelectItem key={size} value={String(size)}>{size} per page</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                <Button type="button" variant="outline" size="sm" onClick={() => setRefundPage((current) => current - 1)} disabled={refundsLoading || refundPage <= 1}>Previous</Button>
-                <span>Page {refundTotalPages === 0 ? 0 : refundPage} of {refundTotalPages}</span>
-                <Button type="button" variant="outline" size="sm" onClick={() => setRefundPage((current) => current + 1)} disabled={refundsLoading || refundPage >= refundTotalPages}>Next</Button>
-              </div>
-            </div>
-          </section>
+                <div className="restaurant-mobile-list refund-record-mobile-list" aria-label="Refund history">
+                  {refunds.map((refund) => {
+                    const customerLabel = refund.customerName || refund.customerEmail || 'Guest / unknown'
+
+                    return (
+                      <article className="restaurant-mobile-card refund-mobile-card" key={refund.id}>
+                        <header className="restaurant-mobile-card-header refund-mobile-card-header">
+                          <span className="restaurant-mobile-avatar">
+                            <Undo2 size={18} />
+                          </span>
+                          <div className="restaurant-mobile-primary">
+                            <strong title={refund.providerRefundId || refund.id}>{refund.providerRefundId || refund.id}</strong>
+                            <span title={refund.providerPaymentIntentId || undefined}>{refund.providerPaymentIntentId || 'No payment intent'}</span>
+                          </div>
+                          <Badge
+                            variant={refund.status === 'Failed' ? 'destructive' : refund.status === 'Succeeded' ? 'secondary' : 'outline'}
+                            className={refundStatusClasses[refund.status]}
+                          >
+                            {refund.status}
+                          </Badge>
+                        </header>
+
+                        <div className="refund-mobile-amount-row">
+                          <span>Refunded</span>
+                          <strong>{formatMoney(refund.amountCents / 100, refund.currency)}</strong>
+                        </div>
+
+                        <div className="restaurant-mobile-meta-grid refund-mobile-meta-grid">
+                          <div className="restaurant-mobile-meta">
+                            <ReceiptText size={15} />
+                            <div>
+                              <span>Order</span>
+                              <strong title={refund.orderNumber || undefined}>{refund.orderNumber || 'Unknown order'}</strong>
+                            </div>
+                          </div>
+                          <div className="restaurant-mobile-meta">
+                            <Building2 size={15} />
+                            <div>
+                              <span>Restaurant</span>
+                              <strong title={refund.restaurantName || undefined}>{refund.restaurantName || 'Unknown restaurant'}</strong>
+                            </div>
+                          </div>
+                          <div className="restaurant-mobile-meta">
+                            <UserRound size={15} />
+                            <div>
+                              <span>Customer</span>
+                              <strong title={customerLabel}>{customerLabel}</strong>
+                              <small title={refund.customerEmail || undefined}>{refund.customerEmail || 'No customer email'}</small>
+                            </div>
+                          </div>
+                          <div className="restaurant-mobile-meta refund-mobile-meta-wide">
+                            <CreditCard size={15} />
+                            <div>
+                              <span>Reason</span>
+                              <strong title={refund.reason || undefined}>{refund.reason || 'No reason recorded'}</strong>
+                              {refund.failureReason && <small className="text-destructive" title={refund.failureReason}>{refund.failureReason}</small>}
+                            </div>
+                          </div>
+                          <div className="restaurant-mobile-meta">
+                            <CalendarClock size={15} />
+                            <div>
+                              <span>Updated</span>
+                              <strong>{formatDate(refund.refundedAt || refund.failedAt || refund.updatedAt || refund.createdAt)}</strong>
+                            </div>
+                          </div>
+                        </div>
+                      </article>
+                    )
+                  })}
+                  {refunds.length === 0 && (
+                    <div className="restaurant-mobile-empty">
+                      {refundsLoading
+                        ? 'Loading refund records...'
+                        : 'No refund records match the current filters.'}
+                    </div>
+                  )}
+                </div>
+
+                <div className="pagination-bar compact-pagination admin-payments-pagination">
+                  <span className="pagination-range">
+                    <span className="pagination-full">Showing {refundPageStart}-{refundPageEnd} of {refundTotalItems}</span>
+                    <span className="pagination-compact">{refundPageStart}-{refundPageEnd} / {refundTotalItems}</span>
+                  </span>
+                  <div className="pagination-actions">
+                    <Select value={String(refundPageSize)} onValueChange={(value) => { setRefundPage(1); setRefundPageSize(Number(value)) }}>
+                      <SelectTrigger className="page-size-select" aria-label="Refund records per page">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent position="popper">
+                        {[10, 20, 50, 100].map((size) => <SelectItem key={size} value={String(size)}>{size} / page</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                    <span className="pagination-page">
+                      <span className="pagination-full">Page {currentRefundPage} of {refundTotalPages}</span>
+                      <span className="pagination-compact">{currentRefundPage} / {refundTotalPages}</span>
+                    </span>
+                    <Button type="button" variant="outline" size="icon" onClick={() => setRefundPage((current) => Math.max(1, current - 1))} disabled={refundsLoading || refundPage <= 1} aria-label="Previous refund records page"><ChevronLeft size={16} /></Button>
+                    <Button type="button" variant="outline" size="icon" onClick={() => setRefundPage((current) => Math.min(refundTotalPages, current + 1))} disabled={refundsLoading || refundPage >= refundTotalPages} aria-label="Next refund records page"><ChevronRight size={16} /></Button>
+                  </div>
+                </div>
+              </section>
+            </TabsContent>
+          </Tabs>
         </CardContent>
       </Card>
 

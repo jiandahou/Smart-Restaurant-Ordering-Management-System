@@ -1,5 +1,5 @@
 import { zodResolver } from '@hookform/resolvers/zod'
-import { UserPlus } from 'lucide-react'
+import { Check, UserPlus, X } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -10,6 +10,7 @@ import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '../components/ui/form'
 import { Input } from '../components/ui/input'
+import { cn } from '../lib/utils'
 
 const registerCustomerSchema = z
   .object({
@@ -115,15 +116,60 @@ export function RegisterCustomerPage() {
               <FormField
                 control={form.control}
                 name="password"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Password</FormLabel>
-                    <FormControl>
-                      <Input type="password" autoComplete="new-password" placeholder="ChangeMe123!" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
+                render={({ field }) => {
+                  const rules = [
+                    { label: 'At least 6 characters', met: field.value.length >= 6 },
+                    { label: 'One number (0–9)', met: /[0-9]/.test(field.value) },
+                    { label: 'One lowercase letter', met: /[a-z]/.test(field.value) },
+                    { label: 'One uppercase letter', met: /[A-Z]/.test(field.value) },
+                    { label: 'One symbol (!@#…)', met: /[^a-zA-Z0-9]/.test(field.value) },
+                  ]
+                  const score = rules.filter((r) => r.met).length
+                  return (
+                    <FormItem>
+                      <FormLabel>Password</FormLabel>
+                      <FormControl>
+                        <Input type="password" autoComplete="new-password" placeholder="ChangeMe123!" {...field} />
+                      </FormControl>
+                      {field.value.length > 0 && (
+                        <div className="space-y-2">
+                          <div className="flex gap-1">
+                            {rules.map((_, i) => (
+                              <div
+                                key={i}
+                                className={cn(
+                                  'h-1 flex-1 rounded-full transition-colors duration-300',
+                                  i < score
+                                    ? score <= 2
+                                      ? 'bg-destructive'
+                                      : score <= 3
+                                        ? 'bg-yellow-500'
+                                        : 'bg-green-500'
+                                    : 'bg-muted',
+                                )}
+                              />
+                            ))}
+                          </div>
+                          <ul className="space-y-0.5">
+                            {rules.map((rule) => (
+                              <li
+                                key={rule.label}
+                                className={cn(
+                                  'flex items-center gap-1.5 text-xs transition-colors',
+                                  rule.met ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground',
+                                )}
+                              >
+                                {rule.met ? <Check className="size-3 shrink-0" /> : <X className="size-3 shrink-0" />}
+                                {rule.label}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      <FormMessage />
+                    </FormItem>
+                  )
+                }}
               />
               <FormField
                 control={form.control}

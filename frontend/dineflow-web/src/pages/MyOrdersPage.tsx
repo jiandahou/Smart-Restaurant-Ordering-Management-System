@@ -15,7 +15,7 @@ import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { PaymentStatusBadge } from '../components/orders/PaymentStatusBadge'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import {
   Dialog,
   DialogContent,
@@ -184,7 +184,7 @@ export function MyOrdersPage() {
   return (
     <main className="content-grid">
       <Card>
-        <CardHeader className="section-header">
+        <CardHeader className="my-orders-header">
           <div className="admin-page-title">
             <ClipboardList size={22} />
             <div>
@@ -192,7 +192,7 @@ export function MyOrdersPage() {
               <CardDescription>{sourceDescription}</CardDescription>
             </div>
           </div>
-          <div className="row-actions">
+          <CardAction className="my-orders-header-action">
             {isGuestView ? (
               <Button type="button" variant="outline" asChild>
                 <Link to="/login">Log in to sync</Link>
@@ -202,7 +202,7 @@ export function MyOrdersPage() {
               <RefreshCw size={18} />
               Refresh
             </Button>
-          </div>
+          </CardAction>
         </CardHeader>
         <CardContent className="directory-stack">
           {isGuestView ? (
@@ -218,12 +218,24 @@ export function MyOrdersPage() {
           ) : null}
 
           {loading && orders.length === 0 ? (
-            <p>Loading your orders...</p>
+            <div className="flex items-center justify-center py-10">
+              <Loader2 className="size-6 animate-spin text-muted-foreground" />
+            </div>
           ) : orders.length === 0 ? (
             <div className="dashboard-empty-state">
-              {isGuestView
-                ? 'No orders are saved on this browser yet.'
-                : 'You have not placed any orders yet.'}
+              <div className="flex flex-col items-center gap-3 py-4 text-center">
+                <ClipboardList className="size-8 opacity-40" />
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">
+                    {isGuestView ? 'No saved orders' : 'No orders yet'}
+                  </p>
+                  <p className="text-sm">
+                    {isGuestView
+                      ? 'Your order history will appear here after placing an order.'
+                      : 'When you place orders, they will appear here.'}
+                  </p>
+                </div>
+              </div>
             </div>
           ) : (
             <div className="my-orders-list">
@@ -268,34 +280,6 @@ export function MyOrdersPage() {
                           <CreditCard size={12} />
                           {order.paymentMethod === 'PayAtCounter' ? 'Pay at counter' : 'Online'}
                         </Badge>
-                        {showContinuePayment ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            className="my-order-continue-payment"
-                            disabled={isPaying}
-                            onClick={() => void handleContinuePayment(order)}
-                          >
-                            {isPaying ? <Loader2 className="animate-spin" /> : <CreditCard />}
-                            {isPaying ? 'Opening checkout...' : getContinuePaymentLabel(order)}
-                          </Button>
-                        ) : null}
-                        {showRequestRefund ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="my-order-refund-button"
-                            disabled={isRequestingRefund}
-                            onClick={() => {
-                              setRefundReason('')
-                              setRefundOrder(order)
-                            }}
-                          >
-                            {isRequestingRefund ? <Loader2 className="animate-spin" /> : <Undo2 />}
-                            Request refund
-                          </Button>
-                        ) : null}
                       </div>
                     </div>
 
@@ -345,6 +329,37 @@ export function MyOrdersPage() {
                       </span>
                       <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
                     </div>
+
+                    {showContinuePayment || showRequestRefund ? (
+                      <div className="my-order-action-bar">
+                        {showContinuePayment ? (
+                          <Button
+                            type="button"
+                            className="my-order-continue-payment"
+                            disabled={isPaying}
+                            onClick={() => void handleContinuePayment(order)}
+                          >
+                            {isPaying ? <Loader2 className="animate-spin" /> : <CreditCard />}
+                            {isPaying ? 'Opening checkout...' : getContinuePaymentLabel(order)}
+                          </Button>
+                        ) : null}
+                        {showRequestRefund ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="my-order-refund-button"
+                            disabled={isRequestingRefund}
+                            onClick={() => {
+                              setRefundReason('')
+                              setRefundOrder(order)
+                            }}
+                          >
+                            {isRequestingRefund ? <Loader2 className="animate-spin" /> : <Undo2 />}
+                            Request refund
+                          </Button>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </article>
                 )
               })}

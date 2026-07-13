@@ -32,7 +32,10 @@ public class PublicCartsController(
     CartAccessService cartAccessService,
     CartRealtimeNotifier cartRealtimeNotifier,
     OrderRealtimeNotifier orderRealtimeNotifier,
+    OrderPickupNumberService orderPickupNumberService,
     ReportLogWriter reportLogWriter,
+    RestaurantOperatingHoursService restaurantOperatingHoursService,
+    TableSessionService tableSessionService,
     IStripeClient stripeClient,
     IOptions<StripeOptions> stripeOptions,
     ILogger<PublicCartsController> logger) : ControllerBase
@@ -97,15 +100,21 @@ public class PublicCartsController(
                 return NotFound(new { message = "Table QR code is invalid or unavailable." });
             }
 
-            var restaurantIsActive = await dbContext.Restaurants
+            var restaurant = await dbContext.Restaurants
                 .AsNoTracking()
-                .AnyAsync(
+                .FirstOrDefaultAsync(
                     restaurant => restaurant.Id == table.RestaurantId && restaurant.IsActive,
                     cancellationToken);
 
-            if (!restaurantIsActive)
+            if (restaurant is null)
             {
                 return NotFound(new { message = "Restaurant is not available for ordering." });
+            }
+
+            var unavailableResult = EnsureRestaurantCanAcceptOrders(restaurant);
+            if (unavailableResult is not null)
+            {
+                return unavailableResult;
             }
 
             var activeCart = await dbContext.Carts
@@ -121,11 +130,18 @@ public class PublicCartsController(
                 activeCart = null;
             }
 
+            var tableSession = await tableSessionService.GetOrCreateOpenSessionAsync(
+                table.RestaurantId,
+                table.Id,
+                now,
+                cancellationToken);
+
             cart = activeCart ?? new Cart
             {
                 Id = Guid.NewGuid(),
                 RestaurantId = table.RestaurantId,
                 TableId = table.Id,
+                TableSessionId = tableSession.Id,
                 OrderType = OrderType.DineIn,
                 Status = CartStatus.Active,
                 ExpiresAt = now.Add(DineInCartLifetime),
@@ -136,19 +152,30 @@ public class PublicCartsController(
             {
                 await dbContext.Carts.AddAsync(cart, cancellationToken);
             }
+            else if (activeCart.TableSessionId != tableSession.Id)
+            {
+                activeCart.TableSessionId = tableSession.Id;
+                activeCart.UpdatedAt = now;
+            }
         }
         else
         {
             var restaurantId = request.RestaurantId!.Value;
-            var restaurantIsActive = await dbContext.Restaurants
+            var restaurant = await dbContext.Restaurants
                 .AsNoTracking()
-                .AnyAsync(
+                .FirstOrDefaultAsync(
                     restaurant => restaurant.Id == restaurantId && restaurant.IsActive,
                     cancellationToken);
 
-            if (!restaurantIsActive)
+            if (restaurant is null)
             {
                 return NotFound(new { message = "Restaurant is not available for ordering." });
+            }
+
+            var unavailableResult = EnsureRestaurantCanAcceptOrders(restaurant);
+            if (unavailableResult is not null)
+            {
+                return unavailableResult;
             }
 
             cart = new Cart
@@ -590,6 +617,36 @@ public class PublicCartsController(
             return Conflict(new { message = "Restaurant or table is no longer available for ordering." });
         }
 
+        var unavailableResult = EnsureRestaurantCanAcceptOrders(restaurant);
+        if (unavailableResult is not null)
+        {
+            return unavailableResult;
+        }
+
+        TableSession? tableSession = null;
+        if (cart.TableId.HasValue)
+        {
+            if (cart.TableSessionId.HasValue)
+            {
+                tableSession = await dbContext.TableSessions
+                    .FirstOrDefaultAsync(
+                        session =>
+                            session.Id == cart.TableSessionId.Value &&
+                            session.RestaurantId == cart.RestaurantId &&
+                            session.TableId == cart.TableId.Value &&
+                            session.Status == TableSessionStatus.Open,
+                        cancellationToken);
+            }
+
+            tableSession ??= await tableSessionService.GetOrCreateOpenSessionAsync(
+                cart.RestaurantId,
+                cart.TableId.Value,
+                DateTime.UtcNow,
+                cancellationToken);
+
+            cart.TableSessionId = tableSession.Id;
+        }
+
         var cartItems = await dbContext.CartItems
             .Where(item => item.CartId == cartId)
             .OrderBy(item => item.CreatedAt)
@@ -619,6 +676,7 @@ public class PublicCartsController(
             Id = Guid.NewGuid(),
             RestaurantId = cart.RestaurantId,
             TableId = cart.TableId,
+            TableSessionId = tableSession?.Id,
             CustomerId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? access.Participant?.CustomerId,
             OrderNumber = await GenerateOrderNumberAsync(cancellationToken),
             OrderType = cart.OrderType,
@@ -689,6 +747,7 @@ public class PublicCartsController(
         }
 
         order.TotalAmount = PricingCalculator.CalculateTotal(order.OrderItems.Select(item => (item.Quantity, item.UnitPrice)));
+        await orderPickupNumberService.AssignPickupNumberAsync(order, restaurant, now, cancellationToken);
         cart.Status = CartStatus.Submitted;
         cart.OrderId = order.Id;
         cart.UpdatedAt = now;
@@ -846,9 +905,9 @@ public class PublicCartsController(
             };
         }
 
-        var restaurantIsActive = await dbContext.Restaurants
+        var restaurant = await dbContext.Restaurants
             .AsNoTracking()
-            .AnyAsync(
+            .FirstOrDefaultAsync(
                 restaurant => restaurant.Id == access.Cart.RestaurantId && restaurant.IsActive,
                 cancellationToken);
 
@@ -858,7 +917,7 @@ public class PublicCartsController(
                 table => table.Id == access.Cart.TableId.Value && table.IsActive,
                 cancellationToken);
 
-        if (!restaurantIsActive || !tableIsActive)
+        if (restaurant is null || !tableIsActive)
         {
             return access with
             {
@@ -866,7 +925,29 @@ public class PublicCartsController(
             };
         }
 
+        var unavailableResult = EnsureRestaurantCanAcceptOrders(restaurant);
+        if (unavailableResult is not null)
+        {
+            return access with
+            {
+                ErrorResult = unavailableResult
+            };
+        }
+
         return access;
+    }
+
+    private IActionResult? EnsureRestaurantCanAcceptOrders(Restaurant restaurant)
+    {
+        var availability = restaurantOperatingHoursService.GetAvailability(restaurant);
+
+        return availability.IsOrderingAvailable
+            ? null
+            : Conflict(new
+            {
+                message = availability.Message,
+                reason = availability.Reason
+            });
     }
 
     private async Task<CartAccessResult> AuthorizeCartAsync(
@@ -989,6 +1070,9 @@ public class PublicCartsController(
             TableNumber = order.Table?.TableNumber,
             CustomerId = order.CustomerId,
             OrderNumber = order.OrderNumber,
+            PickupDate = order.PickupDate,
+            PickupNumber = order.PickupNumber,
+            PickupCode = OrderPickupNumberService.FormatPickupCode(order.PickupNumber),
             Currency = string.IsNullOrWhiteSpace(order.Restaurant?.Currency) ? "AUD" : order.Restaurant.Currency,
             OrderType = (int)order.OrderType,
             Status = (int)order.Status,

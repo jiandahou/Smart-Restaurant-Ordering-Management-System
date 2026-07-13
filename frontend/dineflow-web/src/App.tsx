@@ -15,6 +15,7 @@ import { ConfirmEmailPage } from './pages/ConfirmEmailPage'
 import { CheckoutPage } from './pages/CheckoutPage'
 import { CustomerMenuPage } from './pages/CustomerMenuPage'
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
+import { FrontCounterPage } from './pages/FrontCounterPage'
 import { LoginPage } from './pages/LoginPage'
 import { MagicLinkLoginPage } from './pages/MagicLinkLoginPage'
 import { MyOrdersPage } from './pages/MyOrdersPage'
@@ -52,6 +53,7 @@ function App() {
             <Route element={<ProtectedRoute roles={['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']} />}>
               <Route element={<ProtectedRoute roles={['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']} />}>
                 <Route path="/staff/orders" element={<StaffOrdersPage />} />
+                <Route path="/staff/front-counter" element={<FrontCounterPage />} />
               </Route>
               <Route path="/admin" element={<AdminDashboardPage />} />
               <Route path="/admin/orders" element={<AdminOrdersPage />} />

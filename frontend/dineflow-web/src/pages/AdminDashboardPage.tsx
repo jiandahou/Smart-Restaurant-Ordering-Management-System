@@ -7,6 +7,7 @@ import {
   CreditCard,
   ExternalLink,
   LayoutDashboard,
+  Power,
   QrCode,
   RefreshCw,
   Store,
@@ -20,6 +21,7 @@ import {
   getAdminOrderSummary,
   getRestaurants,
   getRestaurantTables,
+  updateRestaurantOrderingStatus,
   type AdminOrder,
   type AdminOrderSummary,
   type AuthUser,
@@ -43,7 +45,7 @@ import {
 } from '../components/ui/dialog'
 import { buildTablePublicUrl, buildTakeawayPublicUrl } from '../lib/publicUrls'
 
-type DashboardRestaurant = Pick<Restaurant, 'id' | 'name' | 'isActive' | 'currency'>
+type DashboardRestaurant = Pick<Restaurant, 'id' | 'name' | 'isActive' | 'currency' | 'acceptingOrders'>
 
 function formatMoney(amount: number, currencyCode?: string | null) {
   return new Intl.NumberFormat(undefined, {
@@ -75,6 +77,7 @@ function getScopedRestaurantFromOrders(user: AuthUser | null, orders: AdminOrder
     name: matchingOrder?.restaurantName || 'Assigned restaurant',
     isActive: true,
     currency: matchingOrder?.currency || 'AUD',
+    acceptingOrders: true,
   }
 }
 
@@ -142,6 +145,9 @@ function PublicMenuCard({
             <strong>{restaurant.name}</strong>
             <Badge variant={restaurant.isActive ? 'secondary' : 'outline'}>
               {restaurant.isActive ? 'Active' : 'Inactive'}
+            </Badge>
+            <Badge variant={restaurant.acceptingOrders ? 'outline' : 'destructive'}>
+              {restaurant.acceptingOrders ? 'Accepting' : 'Paused'}
             </Badge>
           </div>
           <code>{url}</code>
@@ -243,10 +249,20 @@ function QrCodeDialogButton({
   )
 }
 
-function MetricCard({ label, value, detail }: { label: string; value: string | number; detail: string }) {
+function MetricCard({
+  label,
+  value,
+  detail,
+  tone,
+}: {
+  label: string
+  value: string | number
+  detail: string
+  tone: 'orders' | 'kitchen' | 'paid' | 'payment'
+}) {
   return (
-    <div className="dashboard-metric">
-      <span>{label}</span>
+    <div className={`dashboard-metric dashboard-metric-${tone}`}>
+      <span className="dashboard-metric-label">{label}</span>
       <strong>{value}</strong>
       <small>{detail}</small>
     </div>
@@ -268,6 +284,7 @@ export function AdminDashboardPage() {
   const [restaurants, setRestaurants] = useState<DashboardRestaurant[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [orderingBusy, setOrderingBusy] = useState(false)
 
   const isPlatformOwner = hasRole(user, 'PlatformOwner')
   const isStaff = hasRole(user, 'Staff') && !hasRole(user, 'Admin') && !hasRole(user, 'RestaurantOwner') && !isPlatformOwner
@@ -318,17 +335,63 @@ export function AdminDashboardPage() {
   )
 
   const scopedCurrency = activeRestaurants[0]?.currency || orders[0]?.currency || 'AUD'
+  const primaryRestaurant = activeRestaurants[0] ?? null
   const recentOrders = orders.slice(0, 5)
+  const dashboardRoleLabel = isPlatformOwner
+    ? 'Platform owner'
+    : isStaff
+      ? 'Staff workspace'
+      : hasRole(user, 'RestaurantOwner')
+        ? 'Restaurant owner'
+        : 'Admin workspace'
+
+  const toggleOrderingStatus = async () => {
+    if (!primaryRestaurant || orderingBusy) {
+      return
+    }
+
+    const nextAcceptingOrders = !primaryRestaurant.acceptingOrders
+    setOrderingBusy(true)
+
+    try {
+      const response = await updateRestaurantOrderingStatus(primaryRestaurant.id, nextAcceptingOrders)
+      setRestaurants((current) =>
+        current.map((restaurant) =>
+          restaurant.id === response.restaurant.id
+            ? {
+                ...restaurant,
+                acceptingOrders: response.restaurant.acceptingOrders,
+                isActive: response.restaurant.isActive,
+                currency: response.restaurant.currency,
+                name: response.restaurant.name,
+              }
+            : restaurant,
+        ),
+      )
+      toast.success(nextAcceptingOrders ? 'Ordering resumed' : 'Ordering paused', {
+        description: response.message,
+      })
+    } catch (toggleError) {
+      toast.error('Could not update ordering status', {
+        description: toggleError instanceof Error ? toggleError.message : 'The request failed.',
+      })
+    } finally {
+      setOrderingBusy(false)
+    }
+  }
 
   return (
     <main className="content-grid dashboard-page">
-      <Card>
+      <Card id="dashboard-summary" className="dashboard-hero-card">
         <CardHeader>
           <div className="section-header">
-            <div className="admin-page-title">
+            <div className="admin-page-title dashboard-hero-title">
               <LayoutDashboard size={22} />
               <div>
-                <CardTitle>Dashboard</CardTitle>
+                <div className="dashboard-title-row">
+                  <CardTitle>Dashboard</CardTitle>
+                  <Badge variant="outline">{dashboardRoleLabel}</Badge>
+                </div>
                 <CardDescription>
                   {isPlatformOwner
                     ? 'Platform shortcuts, restaurant access, and live operations.'
@@ -338,25 +401,49 @@ export function AdminDashboardPage() {
                 </CardDescription>
               </div>
             </div>
-            <Button type="button" variant="secondary" onClick={() => void loadDashboard(true)} disabled={loading}>
-              <RefreshCw size={18} />
-              {loading ? 'Refreshing' : 'Refresh'}
-            </Button>
+            <div className="dashboard-hero-actions">
+              {primaryRestaurant && canLoadRestaurantDirectory ? (
+                <Button
+                  type="button"
+                  variant={primaryRestaurant.acceptingOrders ? 'outline' : 'secondary'}
+                  className="dashboard-ordering-toggle"
+                  onClick={() => void toggleOrderingStatus()}
+                  disabled={orderingBusy || loading}
+                >
+                  <Power size={18} />
+                  {orderingBusy
+                    ? 'Updating'
+                    : primaryRestaurant.acceptingOrders
+                      ? 'Pause orders'
+                      : 'Resume orders'}
+                </Button>
+              ) : null}
+              <Button
+                type="button"
+                variant="secondary"
+                className="dashboard-refresh-button"
+                onClick={() => void loadDashboard(true)}
+                disabled={loading}
+              >
+                <RefreshCw size={18} />
+                {loading ? 'Refreshing' : 'Refresh'}
+              </Button>
+            </div>
           </div>
         </CardHeader>
-        <CardContent className="dashboard-stack">
+        <CardContent className="dashboard-stack dashboard-hero-content">
           {error && <p className="form-error">{error}</p>}
           <div className="dashboard-metrics-grid">
-            <MetricCard label="Orders" value={stats.total} detail="Visible to this role" />
-            <MetricCard label="Kitchen active" value={stats.activeKitchen} detail="Pending through ready" />
-            <MetricCard label="Paid" value={stats.paid} detail={formatMoney(stats.revenue, scopedCurrency)} />
-            <MetricCard label="Awaiting payment" value={stats.pendingPayment} detail={`${stats.payable} payable`} />
+            <MetricCard label="Orders" value={stats.total} detail="Visible to this role" tone="orders" />
+            <MetricCard label="Kitchen active" value={stats.activeKitchen} detail="Pending through ready" tone="kitchen" />
+            <MetricCard label="Paid" value={stats.paid} detail={formatMoney(stats.revenue, scopedCurrency)} tone="paid" />
+            <MetricCard label="Awaiting payment" value={stats.pendingPayment} detail={`${stats.payable} payable`} tone="payment" />
           </div>
         </CardContent>
       </Card>
 
       <div className="dashboard-two-column">
-        <Card>
+        <Card id="dashboard-access" className="dashboard-panel-card">
           <CardHeader>
             <div className="admin-page-title">
               <Utensils size={22} />
@@ -386,7 +473,7 @@ export function AdminDashboardPage() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id="dashboard-orders" className="dashboard-panel-card">
           <CardHeader>
             <div className="admin-page-title">
               <ClipboardList size={22} />
@@ -406,8 +493,11 @@ export function AdminDashboardPage() {
                 <div key={order.id} className="dashboard-order-row">
                   <div className="dashboard-order-copy">
                     <strong>{order.orderNumber}</strong>
-                    <span>{order.restaurantName || 'Assigned restaurant'} - {order.tableNumber ? `Table ${order.tableNumber}` : order.orderType}</span>
+                    <span>
+                      {order.restaurantName || 'Assigned restaurant'} · {order.tableNumber ? `Table ${order.tableNumber}` : order.orderType}
+                    </span>
                   </div>
+                  <strong className="dashboard-order-total">{formatMoney(order.totalAmount, order.currency)}</strong>
                   <div className="dashboard-order-state">
                     <OrderStatusBadge status={order.status} />
                     <PaymentStatusBadge status={order.paymentStatus} />

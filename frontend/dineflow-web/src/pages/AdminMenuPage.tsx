@@ -15,6 +15,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  SlidersHorizontal,
   Trash2,
   Utensils,
   X,
@@ -79,6 +80,7 @@ import {
 } from '../components/ui/dialog'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '../components/ui/form'
 import { Input } from '../components/ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Switch } from '../components/ui/switch'
 import { Textarea } from '../components/ui/textarea'
@@ -1472,6 +1474,7 @@ function ItemFormDialog({
                       onChange={(event) => handleImageChange(event.target.files?.[0])}
                     />
                     <span>{imageFile?.name ?? (displayedImageUrl ? 'Current image will be kept.' : 'No image selected.')}</span>
+                    <span className="text-xs text-muted-foreground">JPG, PNG or WebP · Max 8 MB</span>
                   </div>
                 </div>
                 {imageError && <p className="menu-image-error">{imageError}</p>}
@@ -1684,7 +1687,8 @@ function CategoryMenuSection({
         {loading ? (
           <div className="menu-items-loading"><motion.span animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 0.9, ease: 'linear' }}><RefreshCw size={18} /></motion.span>Loading menu items...</div>
         ) : (
-          <div className="table-wrap">
+          <>
+          <div className="table-wrap menu-items-table-wrap">
             <table className="data-table menu-items-table">
               <thead><tr><th>Reorder</th><th>Item</th><th>Price</th><th>Available</th><th>Sold out</th><th>Order</th><th>Actions</th></tr></thead>
               <tbody>
@@ -1787,6 +1791,160 @@ function CategoryMenuSection({
               </tbody>
             </table>
           </div>
+          <div className="restaurant-mobile-list menu-item-mobile-list" aria-label={`${category.name} menu items`}>
+            {filteredItems.map((item) => {
+              const imageUrl = resolvePublicAssetUrl(item.imageUrl)
+              const optionGroupCount = item.optionGroups.length
+              const optionCount = item.optionGroups.reduce((total, group) => total + group.options.length, 0)
+              const reorderTitle = search.trim()
+                ? 'Clear search to reorder menu items.'
+                : orderedItems.length < 2
+                  ? 'Add more items to reorder this category.'
+                  : 'Drag to reorder items.'
+
+              return (
+                <article
+                  key={item.id}
+                  className={[
+                    'restaurant-mobile-card',
+                    'menu-item-mobile-card',
+                    !isReorderDisabled ? 'is-draggable' : '',
+                    draggedItemId === item.id ? 'is-dragging' : '',
+                    dropTargetItemId === item.id ? 'is-drop-target' : '',
+                  ].filter(Boolean).join(' ')}
+                  draggable={!isReorderDisabled}
+                  onDragStart={() => setDraggedItemId(item.id)}
+                  onDragEnter={() => {
+                    if (!isReorderDisabled && draggedItemId && draggedItemId !== item.id) {
+                      setDropTargetItemId(item.id)
+                    }
+                  }}
+                  onDragOver={(event) => {
+                    if (!isReorderDisabled) {
+                      event.preventDefault()
+                    }
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault()
+                    void handleDrop(item.id)
+                  }}
+                  onDragEnd={resetDragState}
+                >
+                  <header className="restaurant-mobile-card-header menu-item-mobile-card-header">
+                    <span className="menu-item-mobile-image">
+                      {imageUrl ? <img src={imageUrl} alt="" /> : <ImageIcon size={18} />}
+                    </span>
+                    <div className="restaurant-mobile-primary">
+                      <strong title={item.name}>{item.name}</strong>
+                      <span title={item.description || undefined}>{item.description || 'No description'}</span>
+                    </div>
+                    <Badge variant={item.isAvailable && !item.isSoldOut ? 'secondary' : item.isSoldOut ? 'destructive' : 'outline'}>
+                      {item.isSoldOut ? 'Sold out' : item.isAvailable ? 'Live' : 'Hidden'}
+                    </Badge>
+                  </header>
+
+                  <div className="restaurant-mobile-meta-grid menu-item-mobile-meta-grid">
+                    <div className="restaurant-mobile-meta">
+                      <CircleDollarSign size={15} />
+                      <div>
+                        <span>Price</span>
+                        <strong>{money.format(item.price)}</strong>
+                      </div>
+                    </div>
+                    <div className="restaurant-mobile-meta">
+                      <Layers3 size={15} />
+                      <div>
+                        <span>Options</span>
+                        <strong>{optionGroupCount} group{optionGroupCount === 1 ? '' : 's'}</strong>
+                        <small>{optionCount} option{optionCount === 1 ? '' : 's'}</small>
+                      </div>
+                    </div>
+                    <div className="restaurant-mobile-meta">
+                      <Utensils size={15} />
+                      <div>
+                        <span>Available</span>
+                        <Switch checked={item.isAvailable} onCheckedChange={(value) => void toggleAvailability(item, value)} aria-label={`${item.name} availability`} />
+                      </div>
+                    </div>
+                    <div className="restaurant-mobile-meta">
+                      <Archive size={15} />
+                      <div>
+                        <span>Sold out</span>
+                        <Switch checked={item.isSoldOut} onCheckedChange={(value) => void toggleSoldOut(item, value)} aria-label={`${item.name} sold out status`} />
+                      </div>
+                    </div>
+                  </div>
+
+                  <MenuItemOptionSummary item={item} money={money} onChanged={() => loadItems()} />
+
+                  <div className="restaurant-mobile-actions menu-item-mobile-actions">
+                    <div className="menu-order-controls">
+                      <button
+                        type="button"
+                        className="menu-reorder-handle"
+                        disabled={isReorderDisabled}
+                        aria-label={`Reorder ${item.name}`}
+                        title={reorderTitle}
+                      >
+                        <GripVertical size={16} />
+                      </button>
+                      <span>{item.displayOrder}</span>
+                      <div className="menu-order-buttons">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          disabled={isReorderDisabled || orderedItems[0]?.id === item.id}
+                          onClick={() => void handleStepMove(item.id, 'up')}
+                          title={search.trim() ? 'Clear search to move menu items.' : 'Move item up'}
+                          aria-label={`Move ${item.name} up`}
+                        >
+                          <ArrowUp size={15} />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          disabled={isReorderDisabled || orderedItems[orderedItems.length - 1]?.id === item.id}
+                          onClick={() => void handleStepMove(item.id, 'down')}
+                          title={search.trim() ? 'Clear search to move menu items.' : 'Move item down'}
+                          aria-label={`Move ${item.name} down`}
+                        >
+                          <ArrowDown size={15} />
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="row-actions">
+                      <ItemFormDialog restaurantId={restaurantId} category={category} item={item} onSaved={() => loadItems()} />
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button type="button" variant="destructive" size="icon" title="Delete item" aria-label={`Delete ${item.name}`}>
+                            <Trash2 size={16} />
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>Delete {item.name}?</AlertDialogTitle>
+                            <AlertDialogDescription>This permanently removes the menu item. Existing order records remain unchanged.</AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                            <AlertDialogAction variant="destructive" onClick={() => void removeItem(item)}>Delete item</AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    </div>
+                  </div>
+                </article>
+              )
+            })}
+            {filteredItems.length === 0 && (
+              <div className="restaurant-mobile-empty">
+                {search.trim() ? 'No menu items match this search.' : 'This category has no menu items yet.'}
+              </div>
+            )}
+          </div>
+          </>
         )}
       </CollapsibleContent>
     </Collapsible>
@@ -1860,7 +2018,14 @@ export function AdminMenuPage() {
   }, [orderedCategories, search, statusFilter])
 
   const hasFilters = search.trim() !== '' || statusFilter !== 'all'
+  const selectedStatusFilterLabel = statusFilter === 'active' ? 'Active' : statusFilter === 'inactive' ? 'Inactive' : ''
+  const activeDropdownFilterCount = statusFilter !== 'all' ? 1 : 0
   const isCategoryReorderDisabled = loading || reorderingCategories || hasFilters || orderedCategories.length < 2
+
+  const resetFilters = () => {
+    setSearch('')
+    setStatusFilter('all')
+  }
 
   const resetCategoryDragState = () => {
     setDraggedCategoryId(null)
@@ -1903,7 +2068,7 @@ export function AdminMenuPage() {
 
   return (
     <main className="content-grid">
-      <Card>
+      <Card id="menu-categories">
         <CardHeader className="section-header">
           <div className="admin-page-title"><Utensils size={22} /><div><CardTitle>Menu Management</CardTitle><CardDescription>Manage restaurant categories, menu items, visibility, and sold-out state.</CardDescription></div></div>
           <div className="section-actions">
@@ -1912,22 +2077,112 @@ export function AdminMenuPage() {
           </div>
         </CardHeader>
         <CardContent className="menu-management-content">
-          <div className="menu-directory-tools">
-            <Select value={selectedRestaurantId} onValueChange={(value) => { setRestaurantId(value); setCategories([]); setLoading(true); setSearch(''); setStatusFilter('all') }} disabled={restaurants.length === 0}>
-              <SelectTrigger><SelectValue placeholder="Select restaurant" /></SelectTrigger>
-              <SelectContent position="popper">{restaurants.map((restaurant) => <SelectItem key={restaurant.id} value={restaurant.id}>{restaurant.name}</SelectItem>)}</SelectContent>
-            </Select>
-            <div className="directory-search"><Search size={16} /><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filter categories" /></div>
-            <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as CategoryStatusFilter)}>
-              <SelectTrigger><SelectValue /></SelectTrigger><SelectContent position="popper"><SelectItem value="all">All statuses</SelectItem><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem></SelectContent>
-            </Select>
-            <Button type="button" variant="ghost" size="icon" disabled={!hasFilters} onClick={() => { setSearch(''); setStatusFilter('all') }} title="Clear filters" aria-label="Clear filters"><X size={16} /></Button>
+          <div className="menu-directory-tools restaurant-filter-tools">
+            <div className="menu-directory-restaurant-row restaurant-table-selector-row">
+              <Select
+                value={selectedRestaurantId}
+                onValueChange={(value) => {
+                  setRestaurantId(value)
+                  setCategories([])
+                  setLoading(true)
+                  resetFilters()
+                }}
+                disabled={restaurants.length === 0}
+              >
+                <SelectTrigger><SelectValue placeholder="Select restaurant" /></SelectTrigger>
+                <SelectContent position="popper">
+                  {restaurants.map((restaurant) => <SelectItem key={restaurant.id} value={restaurant.id}>{restaurant.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="menu-directory-filter-row">
+              <div className="restaurant-filter-search-row menu-directory-search-row">
+                <div className="directory-search">
+                  <Search size={16} />
+                  <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filter categories" />
+                </div>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="restaurant-filter-trigger"
+                      aria-label="Filter menu categories"
+                    >
+                      <SlidersHorizontal size={16} />
+                      {activeDropdownFilterCount > 0 && (
+                        <span className="restaurant-filter-count">{activeDropdownFilterCount}</span>
+                      )}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="restaurant-filter-popover menu-filter-popover" align="end">
+                    <div className="restaurant-filter-popover-header">
+                      <strong>Filters</strong>
+                      <Button type="button" variant="ghost" size="xs" onClick={resetFilters} disabled={!hasFilters}>
+                        <X size={13} />
+                        Clear all
+                      </Button>
+                    </div>
+                    <div className="restaurant-filter-fields">
+                      <div className="restaurant-filter-field">
+                        <span>Status</span>
+                        <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as CategoryStatusFilter)}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent position="popper">
+                            <SelectItem value="all">All statuses</SelectItem>
+                            <SelectItem value="active">Active</SelectItem>
+                            <SelectItem value="inactive">Inactive</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              </div>
+
+              <div className="restaurant-inline-filters menu-directory-inline-filters">
+                <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as CategoryStatusFilter)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent position="popper">
+                    <SelectItem value="all">All statuses</SelectItem>
+                    <SelectItem value="active">Active</SelectItem>
+                    <SelectItem value="inactive">Inactive</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button type="button" variant="ghost" size="icon" disabled={!hasFilters} onClick={resetFilters} title="Clear filters" aria-label="Clear filters">
+                  <X size={16} />
+                </Button>
+              </div>
+            </div>
+
+            {hasFilters && (
+              <div className="restaurant-filter-chips menu-filter-chips" aria-label="Active menu filters">
+                {search.trim() && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => setSearch('')} title={`Search: ${search.trim()}`}>
+                    <span>Search: {search.trim()}</span>
+                    <X size={13} />
+                  </button>
+                )}
+                {statusFilter !== 'all' && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => setStatusFilter('all')} title={`Status: ${selectedStatusFilterLabel}`}>
+                    <span>Status: {selectedStatusFilterLabel}</span>
+                    <X size={13} />
+                  </button>
+                )}
+                <button type="button" className="restaurant-filter-chip restaurant-filter-chip-clear" onClick={resetFilters}>
+                  <X size={13} />
+                  <span>Clear all</span>
+                </button>
+              </div>
+            )}
           </div>
           {selectedRestaurant && <p className="restaurant-table-scope">Managing menu for <strong>{selectedRestaurant.name}</strong></p>}
           {loading ? (
             <div className="restaurant-loading"><motion.span animate={{ rotate: 360 }} transition={{ duration: 0.9, repeat: Infinity, ease: 'linear' }}><RefreshCw size={18} /></motion.span>Loading menu categories...</div>
           ) : (
-            <div className="menu-category-list">
+            <div id="menu-items" className="menu-category-list">
               {filteredCategories.map((category) => (
                 <div
                   key={category.id}

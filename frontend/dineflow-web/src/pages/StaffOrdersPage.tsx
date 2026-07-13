@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertCircle, Clock3, CreditCard, RefreshCw, Search, ShoppingBag, Utensils, X } from 'lucide-react'
+import { AlertCircle, ChefHat, Clock3, CreditCard, ListChecks, Printer, RefreshCw, Search, Settings2, ShoppingBag, Utensils, Volume2, VolumeX, X } from 'lucide-react'
 import { motion } from 'motion/react'
 import { toast } from 'sonner'
 import {
@@ -30,12 +30,32 @@ import {
 } from '@/components/ui/dialog'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { createOrderRealtimeClient, type OrderRealtimeUpdate } from '@/realtime/orderConnection'
+import {
+  createKitchenTicket,
+  defaultThermalPrinterSettings,
+  printKitchenTicketWithQzTray,
+  printKitchenTicketWithWebSerial,
+  printKitchenTicketWithWebUsb,
+  readStoredThermalPrinterSettings,
+  storeThermalPrinterSettings,
+  type ThermalPaperWidth,
+  type ThermalPrinterMode,
+  type ThermalPrinterSettings,
+} from '@/lib/thermalPrinter'
 import { cn } from '@/lib/utils'
 
 type Queue = 'active' | 'new' | 'kitchen' | 'ready' | 'closed'
+type StaffOrdersViewMode = 'orders' | 'kitchen'
+type KitchenLane = 'new' | 'preparing' | 'ready'
 type SortOption = 'oldest' | 'newest' | 'recentlyUpdated' | 'amountHigh' | 'amountLow' | 'orderNumber'
 type OrderSignalTone = 'new' | 'ready' | 'kitchen' | 'blocked' | 'closed' | 'neutral'
+type PrintTicketRequest = {
+  order: AdminOrder
+  requestedAt: number
+}
 
 const sortRequests: Record<SortOption, { sortBy: string; sortDirection: 'asc' | 'desc' }> = {
   oldest: { sortBy: 'createdAt', sortDirection: 'asc' },
@@ -64,6 +84,31 @@ const queueStatuses: Record<Queue, Set<string>> = {
   kitchen: new Set(['Accepted', 'Preparing']),
   ready: new Set(['Ready']),
   closed: new Set(['Completed', 'Cancelled', 'Rejected']),
+}
+
+const kitchenLaneLabels: Record<KitchenLane, string> = {
+  new: 'New',
+  preparing: 'Preparing',
+  ready: 'Ready',
+}
+
+const kitchenLaneDescriptions: Record<KitchenLane, string> = {
+  new: 'Needs acceptance',
+  preparing: 'Accepted or cooking',
+  ready: 'Waiting pickup',
+}
+
+const kitchenLaneStatuses: Record<KitchenLane, Set<string>> = {
+  new: new Set(['Pending']),
+  preparing: new Set(['Accepted', 'Preparing']),
+  ready: new Set(['Ready']),
+}
+
+const printerModeLabels: Record<ThermalPrinterMode, string> = {
+  browser: 'Browser',
+  'qz-tray': 'QZ Tray',
+  'web-serial': 'Web Serial',
+  'web-usb': 'WebUSB',
 }
 
 const orderTypeLabels: Record<AdminOrder['orderType'], string> = {
@@ -161,6 +206,36 @@ function getOrderSignal(order: AdminOrder, now: Date): {
   return { label: 'Review order', tone: 'neutral', isLate }
 }
 
+function playNewOrderSound(ctx: AudioContext): void {
+  const now = ctx.currentTime
+
+  // First tone: C6 (1047 Hz)
+  const osc1 = ctx.createOscillator()
+  const gain1 = ctx.createGain()
+  osc1.connect(gain1)
+  gain1.connect(ctx.destination)
+  osc1.type = 'sine'
+  osc1.frequency.setValueAtTime(1046.5, now)
+  gain1.gain.setValueAtTime(0, now)
+  gain1.gain.linearRampToValueAtTime(0.42, now + 0.012)
+  gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.28)
+  osc1.start(now)
+  osc1.stop(now + 0.3)
+
+  // Second tone: E6 (1319 Hz), offset 220 ms
+  const osc2 = ctx.createOscillator()
+  const gain2 = ctx.createGain()
+  osc2.connect(gain2)
+  gain2.connect(ctx.destination)
+  osc2.type = 'sine'
+  osc2.frequency.setValueAtTime(1318.5, now + 0.22)
+  gain2.gain.setValueAtTime(0, now + 0.22)
+  gain2.gain.linearRampToValueAtTime(0.42, now + 0.232)
+  gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.65)
+  osc2.start(now + 0.22)
+  osc2.stop(now + 0.65)
+}
+
 export function StaffOrdersPage() {
   const { user } = useAuth()
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
@@ -171,6 +246,7 @@ export function StaffOrdersPage() {
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [queue, setQueue] = useState<Queue>('active')
+  const [viewMode, setViewMode] = useState<StaffOrdersViewMode>('orders')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
@@ -184,6 +260,56 @@ export function StaffOrdersPage() {
   const restaurantFilterRef = useRef(restaurantFilter)
   const isPlatformOwnerRef = useRef(isPlatformOwner)
   const realtimeRefreshTimerRef = useRef<number | null>(null)
+  const [audioEnabled, setAudioEnabled] = useState(true)
+  const audioEnabledRef = useRef(true)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const [printTicket, setPrintTicket] = useState<PrintTicketRequest | null>(null)
+  const [printerSettingsOpen, setPrinterSettingsOpen] = useState(false)
+  const [printerSettings, setPrinterSettings] = useState<ThermalPrinterSettings>(() => readStoredThermalPrinterSettings())
+  const [printingOrderId, setPrintingOrderId] = useState<string | null>(null)
+
+  useEffect(() => {
+    audioEnabledRef.current = audioEnabled
+  }, [audioEnabled])
+
+  useEffect(() => {
+    storeThermalPrinterSettings(printerSettings)
+  }, [printerSettings])
+
+  useEffect(() => {
+    if (!printTicket) return
+
+    document.body.classList.add('staff-printing-order')
+
+    const clearPrintTicket = () => setPrintTicket(null)
+    const printTimer = window.setTimeout(() => {
+      window.print()
+    }, 80)
+
+    window.addEventListener('afterprint', clearPrintTicket, { once: true })
+
+    return () => {
+      window.clearTimeout(printTimer)
+      window.removeEventListener('afterprint', clearPrintTicket)
+      document.body.classList.remove('staff-printing-order')
+    }
+  }, [printTicket])
+
+  // Auto-create AudioContext on mount; resume on first user gesture (browser autoplay policy)
+  useEffect(() => {
+    try {
+      audioContextRef.current = new AudioContext()
+    } catch {
+      return
+    }
+    const resume = () => {
+      if (audioContextRef.current?.state === 'suspended') {
+        void audioContextRef.current.resume()
+      }
+    }
+    window.addEventListener('pointerdown', resume, { once: true })
+    return () => window.removeEventListener('pointerdown', resume)
+  }, [])
 
   const loadOrders = useCallback(async (showToast = false) => {
     try {
@@ -250,6 +376,58 @@ export function StaffOrdersPage() {
     }, 300)
   }, [])
 
+  const toggleAudio = useCallback(async () => {
+    if (audioEnabled) {
+      setAudioEnabled(false)
+      return
+    }
+
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContext()
+    } else if (audioContextRef.current.state === 'suspended') {
+      await audioContextRef.current.resume()
+    }
+
+    setAudioEnabled(true)
+    playNewOrderSound(audioContextRef.current)
+  }, [audioEnabled])
+
+  const updatePrinterSettings = useCallback((updates: Partial<ThermalPrinterSettings>) => {
+    setPrinterSettings((current) => ({ ...current, ...updates }))
+  }, [])
+
+  const printOrderTicket = useCallback(async (order: AdminOrder) => {
+    const printedAt = new Date()
+
+    if (printerSettings.mode === 'browser') {
+      setPrintTicket({ order, requestedAt: printedAt.getTime() })
+      return
+    }
+
+    const ticket = createKitchenTicket(order, printedAt)
+    setPrintingOrderId(order.id)
+
+    try {
+      if (printerSettings.mode === 'qz-tray') {
+        await printKitchenTicketWithQzTray(ticket, printerSettings)
+      } else if (printerSettings.mode === 'web-serial') {
+        await printKitchenTicketWithWebSerial(ticket, printerSettings)
+      } else if (printerSettings.mode === 'web-usb') {
+        await printKitchenTicketWithWebUsb(ticket, printerSettings)
+      }
+
+      toast.success('Kitchen ticket sent', {
+        description: `${order.orderNumber} via ${printerModeLabels[printerSettings.mode]}.`,
+      })
+    } catch (printError) {
+      toast.error('Kitchen ticket could not be printed', {
+        description: printError instanceof Error ? printError.message : 'The print request failed.',
+      })
+    } finally {
+      setPrintingOrderId(null)
+    }
+  }, [printerSettings])
+
   useEffect(() => {
     if (!isPlatformOwner) return
 
@@ -263,9 +441,12 @@ export function StaffOrdersPage() {
   }, [isPlatformOwner])
 
   useEffect(() => {
-    void loadOrders()
+    const initialLoadTimer = window.setTimeout(() => void loadOrders(), 0)
     const refreshTimer = window.setInterval(() => void loadOrders(), 15_000)
-    return () => window.clearInterval(refreshTimer)
+    return () => {
+      window.clearTimeout(initialLoadTimer)
+      window.clearInterval(refreshTimer)
+    }
   }, [loadOrders])
 
   useEffect(() => {
@@ -291,6 +472,11 @@ export function StaffOrdersPage() {
       onOrderPaymentUpdated: (update) => {
         if (shouldHandleRealtimeUpdate(update)) {
           scheduleRealtimeRefresh()
+          const isPayAtCounterConfirmed = update.paymentMethod === 'PayAtCounter' && update.paymentStatus === 'Unpaid'
+          const isOnlinePaid = update.paymentMethod === 'Online' && update.paymentStatus === 'Paid'
+          if (audioEnabledRef.current && audioContextRef.current && (isPayAtCounterConfirmed || isOnlinePaid)) {
+            playNewOrderSound(audioContextRef.current)
+          }
         }
       },
       onOrderDeleted: (update) => {
@@ -320,6 +506,26 @@ export function StaffOrdersPage() {
   const visibleOrders = useMemo(
     () => orders.filter((order) => queueStatuses[queue].has(order.status)),
     [orders, queue],
+  )
+
+  const kitchenLanes = useMemo(() => {
+    const now = lastUpdated ?? new Date()
+
+    return (['new', 'preparing', 'ready'] as KitchenLane[]).map((lane) => ({
+      lane,
+      orders: orders
+        .filter((order) => kitchenLaneStatuses[lane].has(order.status))
+        .sort((first, second) => {
+          const firstAge = getOrderAgeMinutes(first, now)
+          const secondAge = getOrderAgeMinutes(second, now)
+          return secondAge - firstAge
+        }),
+    }))
+  }, [lastUpdated, orders])
+
+  const kitchenOrderCount = useMemo(
+    () => kitchenLanes.reduce((total, lane) => total + lane.orders.length, 0),
+    [kitchenLanes],
   )
 
   const queueCounts = useMemo(() => ({
@@ -421,6 +627,34 @@ export function StaffOrdersPage() {
                 Updated {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               </span>
             ) : null}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  aria-label="Kitchen printer settings"
+                  onClick={() => setPrinterSettingsOpen(true)}
+                >
+                  <Settings2 size={17} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" align="end" sideOffset={6}>
+                Printer: {printerModeLabels[printerSettings.mode]}
+              </TooltipContent>
+            </Tooltip>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              aria-label={audioEnabled ? 'Mute new order sound' : 'Enable new order sound'}
+              title={audioEnabled ? 'Sound on - click to mute' : 'Sound off - click to enable'}
+              onClick={() => void toggleAudio()}
+            >
+              {audioEnabled
+                ? <Volume2 size={17} />
+                : <VolumeX size={17} className="text-muted-foreground" />}
+            </Button>
             <Button type="button" variant="secondary" disabled={loading} onClick={() => void loadOrders(true)}>
               <RefreshCw className={loading ? 'animate-spin' : ''} size={17} />
               Refresh
@@ -428,6 +662,22 @@ export function StaffOrdersPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-5">
+          <Tabs value={viewMode} onValueChange={(value) => setViewMode(value as StaffOrdersViewMode)} className="staff-orders-view-tabs">
+            <TabsList aria-label="Staff order display mode">
+              <TabsTrigger value="orders">
+                <ListChecks size={16} />
+                Orders
+              </TabsTrigger>
+              <TabsTrigger value="kitchen">
+                <ChefHat size={16} />
+                Kitchen
+                <Badge variant="secondary" className="ml-1 h-5 min-w-5 justify-center px-1.5 leading-none">
+                  {kitchenOrderCount}
+                </Badge>
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+
           <div className="staff-orders-priority-strip" aria-label="Staff order priority summary">
             <div className="staff-orders-priority-pill is-action">
               <strong>{priorityCounts.needsAction}</strong>
@@ -509,22 +759,24 @@ export function StaffOrdersPage() {
             </div>
           </div>
 
-          <Tabs value={queue} onValueChange={(value) => setQueue(value as Queue)}>
-            <TabsList className="grid h-11 w-full grid-cols-5">
-              {(['active', 'new', 'kitchen', 'ready', 'closed'] as Queue[]).map((value) => (
-                <TabsTrigger
-                  key={value}
-                  value={value}
-                  className="h-full min-w-0 gap-1 px-1 py-1 capitalize sm:gap-2 sm:px-3"
-                >
-                  {value}
-                  <Badge variant="secondary" className="h-5 min-w-5 justify-center px-1.5 leading-none">
-                    {queueCounts[value]}
-                  </Badge>
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
+          {viewMode === 'orders' ? (
+            <Tabs value={queue} onValueChange={(value) => setQueue(value as Queue)}>
+              <TabsList className="grid h-11 w-full grid-cols-5">
+                {(['active', 'new', 'kitchen', 'ready', 'closed'] as Queue[]).map((value) => (
+                  <TabsTrigger
+                    key={value}
+                    value={value}
+                    className="h-full min-w-0 gap-1 px-1 py-1 capitalize sm:gap-2 sm:px-3"
+                  >
+                    {value}
+                    <Badge variant="secondary" className="h-5 min-w-5 justify-center px-1.5 leading-none">
+                      {queueCounts[value]}
+                    </Badge>
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+            </Tabs>
+          ) : null}
 
           {error ? (
             <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-destructive">
@@ -535,9 +787,156 @@ export function StaffOrdersPage() {
 
           {loading && orders.length === 0 ? (
             <div className="dashboard-empty-state">Loading restaurant orders...</div>
-          ) : visibleOrders.length === 0 ? (
+          ) : viewMode === 'orders' && visibleOrders.length === 0 ? (
             <div className="dashboard-empty-state">
               {debouncedSearch ? `No orders match "${debouncedSearch}" in this queue.` : 'No orders in this queue.'}
+            </div>
+          ) : viewMode === 'kitchen' && kitchenOrderCount === 0 ? (
+            <div className="dashboard-empty-state">
+              {debouncedSearch ? `No kitchen orders match "${debouncedSearch}".` : 'No active kitchen orders.'}
+            </div>
+          ) : viewMode === 'kitchen' ? (
+            <div className="staff-kitchen-board" aria-label="Kitchen order board">
+              {kitchenLanes.map(({ lane, orders: laneOrders }) => (
+                <section key={lane} className={cn('staff-kitchen-lane', `is-${lane}`)}>
+                  <header className="staff-kitchen-lane-header">
+                    <div>
+                      <h3>{kitchenLaneLabels[lane]}</h3>
+                      <span>{kitchenLaneDescriptions[lane]}</span>
+                    </div>
+                    <Badge variant="secondary">{laneOrders.length}</Badge>
+                  </header>
+
+                  {laneOrders.length === 0 ? (
+                    <div className="staff-kitchen-empty">Clear</div>
+                  ) : (
+                    <div className="staff-kitchen-card-list">
+                      {laneOrders.map((order) => {
+                        const now = lastUpdated ?? new Date()
+                        const signal = getOrderSignal(order, now)
+                        const onlinePaymentBlocked = isOnlinePaymentBlocked(order)
+                        const counterPaymentNeeded = needsCounterPayment(order)
+                        const isBusy = busyOrderId === order.id
+                        const itemCount = order.items.reduce((total, item) => total + item.quantity, 0)
+
+                        return (
+                          <article key={order.id} className={cn('staff-kitchen-card', `staff-kitchen-card-${signal.tone}`, signal.isLate && 'is-late')}>
+                            <div className="staff-kitchen-card-header">
+                              <div className="staff-kitchen-card-title">
+                                <span className="staff-kitchen-order-number">{order.orderNumber}</span>
+                                <strong>{order.tableNumber ? `Table ${order.tableNumber}` : getOrderTypeLabel(order.orderType)}</strong>
+                              </div>
+                              <div className="staff-kitchen-card-tools">
+                                <span className={cn('staff-kitchen-timer', signal.isLate && 'is-late')}>
+                                  <Clock3 size={15} />
+                                  {formatElapsedTime(order, now)}
+                                </span>
+                                <PrintTicketButton
+                                  disabled={printingOrderId === order.id}
+                                  modeLabel={printerModeLabels[printerSettings.mode]}
+                                  onClick={() => void printOrderTicket(order)}
+                                />
+                              </div>
+                            </div>
+
+                            <div className="staff-kitchen-meta">
+                              <Badge variant="outline">{itemCount} item{itemCount === 1 ? '' : 's'}</Badge>
+                              <OrderStatusBadge status={order.status} />
+                              <PaymentStatusBadge status={order.paymentStatus} />
+                              {counterPaymentNeeded ? <Badge variant="outline" className="staff-order-counter-badge">Counter due</Badge> : null}
+                            </div>
+
+                            {onlinePaymentBlocked ? (
+                              <div className="staff-kitchen-warning">
+                                <AlertCircle size={16} />
+                                Awaiting online payment
+                              </div>
+                            ) : null}
+
+                            <div className="staff-kitchen-items">
+                              {order.items.map((item) => {
+                                const optionGroups = groupSelectedOptions(item)
+                                const itemName = item.itemNameSnapshot?.trim() || 'Unnamed item'
+
+                                return (
+                                  <div key={item.id} className="staff-kitchen-item">
+                                    <div className="staff-kitchen-item-main">
+                                      <span>{item.quantity}x</span>
+                                      <strong>{itemName}</strong>
+                                    </div>
+                                    {optionGroups.length > 0 ? (
+                                      <div className="staff-kitchen-options">
+                                        {optionGroups.map((group) => (
+                                          <div key={group.groupName}>
+                                            <span>{group.groupName}</span>
+                                            <p>{group.options.map((option) => `${option.optionNameSnapshot}${(option.quantity ?? 1) > 1 ? ` x${option.quantity ?? 1}` : ''}`).join(', ')}</p>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : null}
+                                    {item.note ? (
+                                      <div className="staff-kitchen-note">
+                                        <strong>Item note</strong>
+                                        <span>{item.note}</span>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                )
+                              })}
+                            </div>
+
+                            {order.customerNote ? (
+                              <div className="staff-kitchen-note is-order-note">
+                                <strong>Order note</strong>
+                                <span>{order.customerNote}</span>
+                              </div>
+                            ) : null}
+
+                            <div className="staff-kitchen-actions">
+                              {order.paymentMethod === 'PayAtCounter' && order.paymentStatus !== 'Paid' ? (
+                                <Button type="button" variant="outline" size="sm" disabled={isBusy} onClick={() => void markCounterPayment(order)}>
+                                  Mark paid
+                                </Button>
+                              ) : null}
+                              {(order.availableActions ?? [])
+                                .filter((action) => ['Accept', 'StartPreparing', 'MarkReady', 'Complete'].includes(action))
+                                .map((action) => (
+                                  <Button
+                                    key={action}
+                                    type="button"
+                                    size="sm"
+                                    className="staff-order-primary-action"
+                                    disabled={isBusy || onlinePaymentBlocked}
+                                    onClick={() => beginTransition(order, action)}
+                                  >
+                                    {isBusy ? 'Updating' : actionLabels[action]}
+                                  </Button>
+                                ))}
+                              {(order.availableActions ?? [])
+                                .filter((action) => action === 'Reject' || action === 'Cancel')
+                                .map((action) => (
+                                  <Button
+                                    key={action}
+                                    type="button"
+                                    size="sm"
+                                    variant="destructive"
+                                    disabled={isBusy}
+                                    onClick={() => beginTransition(order, action)}
+                                  >
+                                    {actionLabels[action]}
+                                  </Button>
+                                ))}
+                              {(order.availableActions ?? []).length === 0 && !onlinePaymentBlocked ? (
+                                <span>No kitchen action available.</span>
+                              ) : null}
+                            </div>
+                          </article>
+                        )
+                      })}
+                    </div>
+                  )}
+                </section>
+              ))}
             </div>
           ) : (
             <div className="staff-orders-grid">
@@ -568,10 +967,17 @@ export function StaffOrdersPage() {
                           >
                             {signal.label}
                           </Badge>
-                          <span className={cn('staff-order-wait-time', signal.isLate && 'is-late')}>
-                            <Clock3 size={13} />
-                            Waiting {formatElapsedTime(order, now)}
-                          </span>
+                          <div className="staff-order-card-tools">
+                            <span className={cn('staff-order-wait-time', signal.isLate && 'is-late')}>
+                              <Clock3 size={13} />
+                              Waiting {formatElapsedTime(order, now)}
+                            </span>
+                            <PrintTicketButton
+                              disabled={printingOrderId === order.id}
+                              modeLabel={printerModeLabels[printerSettings.mode]}
+                              onClick={() => void printOrderTicket(order)}
+                            />
+                          </div>
                         </div>
                         <div className="flex items-start justify-between gap-3">
                           <div>
@@ -700,6 +1106,21 @@ export function StaffOrdersPage() {
         </CardContent>
       </Card>
 
+      {printTicket ? (
+        <OrderPrintTicket
+          order={printTicket.order}
+          paperWidth={printerSettings.paperWidth}
+          printedAt={new Date(printTicket.requestedAt)}
+        />
+      ) : null}
+
+      <PrinterSettingsDialog
+        open={printerSettingsOpen}
+        settings={printerSettings}
+        onOpenChange={setPrinterSettingsOpen}
+        onSettingsChange={updatePrinterSettings}
+      />
+
       <Dialog open={pendingTransition !== null} onOpenChange={(open) => {
         if (!open && busyOrderId === null) {
           setPendingTransition(null)
@@ -742,6 +1163,278 @@ export function StaffOrdersPage() {
   )
 }
 
+function PrinterSettingsDialog({
+  open,
+  settings,
+  onOpenChange,
+  onSettingsChange,
+}: {
+  open: boolean
+  settings: ThermalPrinterSettings
+  onOpenChange: (open: boolean) => void
+  onSettingsChange: (updates: Partial<ThermalPrinterSettings>) => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="staff-printer-dialog">
+        <DialogHeader>
+          <DialogTitle>Kitchen printer</DialogTitle>
+          <DialogDescription>
+            Select the route used by the print icon on staff order cards.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="staff-printer-settings">
+          <div className="staff-printer-grid">
+            <div className="staff-printer-field">
+              <span>Route</span>
+              <Select
+                value={settings.mode}
+                onValueChange={(value) => onSettingsChange({ mode: value as ThermalPrinterMode })}
+              >
+                <SelectTrigger aria-label="Kitchen printer route">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  <SelectItem value="browser">Browser print</SelectItem>
+                  <SelectItem value="qz-tray">QZ Tray</SelectItem>
+                  <SelectItem value="web-serial">Web Serial</SelectItem>
+                  <SelectItem value="web-usb">WebUSB</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="staff-printer-field">
+              <span>Paper</span>
+              <Select
+                value={settings.paperWidth}
+                onValueChange={(value) => onSettingsChange({ paperWidth: value as ThermalPaperWidth })}
+              >
+                <SelectTrigger aria-label="Thermal paper width">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  <SelectItem value="80mm">80mm</SelectItem>
+                  <SelectItem value="58mm">58mm</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <label className="staff-printer-switch">
+              <span>Cut paper</span>
+              <Switch
+                checked={settings.cutPaper}
+                onCheckedChange={(checked) => onSettingsChange({ cutPaper: checked })}
+              />
+            </label>
+          </div>
+
+          <div className="staff-printer-route-grid">
+            <section className={cn('staff-printer-route-card', settings.mode === 'qz-tray' && 'active')}>
+              <header>
+                <strong>QZ Tray</strong>
+                <Badge variant={settings.mode === 'qz-tray' ? 'default' : 'outline'}>{settings.mode === 'qz-tray' ? 'Active' : 'Ready'}</Badge>
+              </header>
+              <div className="staff-printer-field">
+                <span>Printer name</span>
+                <Input
+                  value={settings.qzPrinterName}
+                  placeholder="Epson TM-T88VI"
+                  onChange={(event) => onSettingsChange({ qzPrinterName: event.target.value })}
+                />
+              </div>
+            </section>
+
+            <section className={cn('staff-printer-route-card', settings.mode === 'web-serial' && 'active')}>
+              <header>
+                <strong>Web Serial</strong>
+                <Badge variant={settings.mode === 'web-serial' ? 'default' : 'outline'}>{settings.mode === 'web-serial' ? 'Active' : 'Ready'}</Badge>
+              </header>
+              <div className="staff-printer-field">
+                <span>Baud rate</span>
+                <Input
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  value={settings.serialBaudRate}
+                  onChange={(event) => onSettingsChange({ serialBaudRate: Number(event.target.value) })}
+                />
+              </div>
+            </section>
+
+            <section className={cn('staff-printer-route-card', settings.mode === 'web-usb' && 'active')}>
+              <header>
+                <strong>WebUSB</strong>
+                <Badge variant={settings.mode === 'web-usb' ? 'default' : 'outline'}>{settings.mode === 'web-usb' ? 'Active' : 'Ready'}</Badge>
+              </header>
+              <div className="staff-printer-usb-grid">
+                <div className="staff-printer-field">
+                  <span>Vendor ID</span>
+                  <Input
+                    value={settings.usbVendorId}
+                    placeholder="0x04b8"
+                    onChange={(event) => onSettingsChange({ usbVendorId: event.target.value })}
+                  />
+                </div>
+                <div className="staff-printer-field">
+                  <span>Product ID</span>
+                  <Input
+                    value={settings.usbProductId}
+                    placeholder="optional"
+                    onChange={(event) => onSettingsChange({ usbProductId: event.target.value })}
+                  />
+                </div>
+                <div className="staff-printer-field">
+                  <span>Interface</span>
+                  <Input
+                    type="number"
+                    inputMode="numeric"
+                    min={0}
+                    value={settings.usbInterfaceNumber}
+                    onChange={(event) => onSettingsChange({ usbInterfaceNumber: Number(event.target.value) })}
+                  />
+                </div>
+                <div className="staff-printer-field">
+                  <span>Endpoint</span>
+                  <Input
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    value={settings.usbEndpointNumber}
+                    onChange={(event) => onSettingsChange({ usbEndpointNumber: Number(event.target.value) })}
+                  />
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onSettingsChange(defaultThermalPrinterSettings)}
+          >
+            Reset
+          </Button>
+          <Button type="button" onClick={() => onOpenChange(false)}>
+            Done
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function OrderPrintTicket({ order, paperWidth, printedAt }: { order: AdminOrder; paperWidth: ThermalPaperWidth; printedAt: Date }) {
+  const itemCount = order.items.reduce((total, item) => total + item.quantity, 0)
+
+  return (
+    <section className={cn('staff-order-print-ticket', paperWidth === '58mm' && 'is-58mm')} aria-label="Kitchen print ticket">
+      <header className="staff-order-print-header">
+        <span>Kitchen ticket</span>
+        <h1>{order.orderNumber}</h1>
+        <p>{order.restaurantName ?? 'Assigned restaurant'}</p>
+      </header>
+
+      <dl className="staff-order-print-meta">
+        <div>
+          <dt>Order</dt>
+          <dd>{getPrintOrderScope(order)}</dd>
+        </div>
+        <div>
+          <dt>Status</dt>
+          <dd>{order.status}</dd>
+        </div>
+        <div>
+          <dt>Created</dt>
+          <dd>{formatDateTime(order.createdAt)}</dd>
+        </div>
+        <div>
+          <dt>Printed</dt>
+          <dd>{formatDateTime(printedAt)}</dd>
+        </div>
+        <div>
+          <dt>Items</dt>
+          <dd>{itemCount}</dd>
+        </div>
+      </dl>
+
+      <div className="staff-order-print-items">
+        {order.items.map((item) => {
+          const optionGroups = groupSelectedOptions(item)
+          const itemName = item.itemNameSnapshot?.trim() || 'Unnamed item'
+
+          return (
+            <article key={item.id} className="staff-order-print-item">
+              <div className="staff-order-print-item-main">
+                <strong>{item.quantity}x</strong>
+                <span>{itemName}</span>
+              </div>
+
+              {optionGroups.length > 0 ? (
+                <div className="staff-order-print-options">
+                  {optionGroups.map((group) => (
+                    <div key={group.groupName}>
+                      <strong>{group.groupName}</strong>
+                      <span>
+                        {group.options
+                          .map((option) => `${option.optionNameSnapshot}${(option.quantity ?? 1) > 1 ? ` x${option.quantity ?? 1}` : ''}`)
+                          .join(', ')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {item.note ? (
+                <p className="staff-order-print-note">
+                  <strong>Item note:</strong> {item.note}
+                </p>
+              ) : null}
+            </article>
+          )
+        })}
+      </div>
+
+      {order.customerNote ? (
+        <section className="staff-order-print-order-note">
+          <strong>Order note</strong>
+          <p>{order.customerNote}</p>
+        </section>
+      ) : null}
+    </section>
+  )
+}
+
+function PrintTicketButton({ disabled, modeLabel, onClick }: { disabled: boolean; modeLabel: string; onClick: () => void }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon-sm"
+          className="staff-order-print-button"
+          aria-label="Print kitchen ticket"
+          disabled={disabled}
+          onClick={onClick}
+        >
+          {disabled ? <RefreshCw className="animate-spin" size={15} /> : <Printer size={15} />}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="end" sideOffset={6}>
+        Print kitchen ticket via {modeLabel}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+function getPrintOrderScope(order: AdminOrder) {
+  const label = getOrderTypeLabel(order.orderType)
+  return order.tableNumber ? `${label} - Table ${order.tableNumber}` : label
+}
+
 function formatMoney(amount: number, currency: string) {
   return new Intl.NumberFormat(undefined, {
     style: 'currency',
@@ -759,4 +1452,14 @@ function formatTime(value: string) {
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(value))
+}
+
+function formatDateTime(value: string | Date) {
+  return new Intl.DateTimeFormat(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(value instanceof Date ? value : new Date(value))
 }

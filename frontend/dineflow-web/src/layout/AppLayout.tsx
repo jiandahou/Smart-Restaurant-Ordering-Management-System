@@ -1,40 +1,148 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   BarChart3,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ClipboardList,
   CreditCard,
+  DoorOpen,
   LayoutDashboard,
   LogIn,
   LogOut,
+  Monitor,
+  Moon,
   ShieldCheck,
   ShoppingBag,
   Store,
+  Sun,
   UsersRound,
   Utensils,
   UserRound,
   UserPlus,
 } from 'lucide-react'
 import { motion } from 'motion/react'
+import { useTheme } from 'next-themes'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useAuth } from '../auth/AuthContext'
+import { BrandLogo } from '../components/BrandLogo'
 import { DemoIdentitySwitcher } from '../components/DemoIdentitySwitcher'
 import { Avatar, AvatarFallback, AvatarImage } from '../components/ui/avatar'
 import { Button } from '../components/ui/button'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '../components/ui/tooltip'
+import {
+  Drawer,
+  DrawerClose,
+  DrawerContent,
+  DrawerDescription,
+  DrawerHeader,
+  DrawerTitle,
+} from '../components/ui/drawer'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '../components/ui/popover'
 
 const consoleRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']
 const restaurantStaffRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']
 const adminRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin']
 const adminLinks = [
-  { to: '/admin', label: 'Dashboard', icon: LayoutDashboard, end: true },
-  { to: '/admin/users', label: 'Users', icon: UsersRound },
-  { to: '/admin/restaurants', label: 'Restaurants', icon: Store },
+  {
+    to: '/admin',
+    label: 'Dashboard',
+    icon: LayoutDashboard,
+    end: true,
+    children: [
+      { to: '/admin#dashboard-summary', label: 'Summary' },
+      { to: '/admin#dashboard-access', label: 'Public URLs' },
+      { to: '/admin#dashboard-orders', label: 'Recent orders' },
+    ],
+  },
+  {
+    to: '/admin/users',
+    label: 'Users',
+    icon: UsersRound,
+    children: [
+      { to: '/admin/users', label: 'User center' },
+      { to: '/admin/users?section=create', label: 'Create user' },
+      { to: '/admin/users?section=email', label: 'Email' },
+      { to: '/admin/users?section=permissions', label: 'Permission guard' },
+    ],
+  },
+  {
+    to: '/admin/restaurants',
+    label: 'Restaurants',
+    icon: Store,
+    children: [
+      { to: '/admin/restaurants#restaurant-directory', label: 'Directory' },
+      { to: '/admin/restaurants#restaurant-tables', label: 'Tables' },
+    ],
+  },
   { to: '/admin/orders', label: 'Orders', icon: ClipboardList },
-  { to: '/admin/menu', label: 'Menu', icon: Utensils },
-  { to: '/admin/payments', label: 'Payments', icon: CreditCard },
-  { to: '/admin/reports', label: 'Reports', icon: BarChart3 },
+  {
+    to: '/admin/menu',
+    label: 'Menu',
+    icon: Utensils,
+    children: [
+      { to: '/admin/menu#menu-categories', label: 'Categories' },
+      { to: '/admin/menu#menu-items', label: 'Items & options' },
+    ],
+  },
+  {
+    to: '/admin/payments',
+    label: 'Payments',
+    icon: CreditCard,
+    children: [
+      { to: '/admin/payments#payment-orders', label: 'Orders' },
+      { to: '/admin/payments#refund-requests', label: 'Refund requests' },
+      { to: '/admin/payments#refund-records', label: 'Refund records' },
+    ],
+  },
+  {
+    to: '/admin/reports',
+    label: 'Reports',
+    icon: BarChart3,
+    children: [
+      { to: '/admin/reports', label: 'Audit' },
+      { to: '/admin/reports?section=orders', label: 'Orders' },
+      { to: '/admin/reports?section=payments', label: 'Payments' },
+    ],
+  },
 ]
 type BackendStatus = 'idle' | 'checking' | 'ok' | 'fail'
+type ThemeMode = 'system' | 'light' | 'dark'
+
+const themeCycle: Record<ThemeMode, ThemeMode> = {
+  system: 'light',
+  light: 'dark',
+  dark: 'system',
+}
+
+const themeLabels: Record<ThemeMode, string> = {
+  system: 'System theme',
+  light: 'Light theme',
+  dark: 'Dark theme',
+}
+
+const themeNextAction: Record<ThemeMode, string> = {
+  system: 'Click to switch to light',
+  light: 'Click to switch to dark',
+  dark: 'Click to use system theme',
+}
+
+const backendStatusTooltip: Record<BackendStatus, string> = {
+  idle: 'Check backend connection',
+  checking: 'Checking backend…',
+  ok: 'Backend is healthy',
+  fail: 'Connection failed — click to retry',
+}
 
 function getInitials(name?: string | null, email?: string | null) {
   const source = name?.trim() || email?.trim() || 'U'
@@ -47,22 +155,78 @@ function getInitials(name?: string | null, email?: string | null) {
   return source.slice(0, 2).toUpperCase()
 }
 
+function isCurrentChildLink(target: string, locationPathname: string, locationSearch: string, locationHash: string) {
+  const [pathAndSearch, hash = ''] = target.split('#')
+  const [pathname, search = ''] = pathAndSearch.split('?')
+
+  return pathname === locationPathname
+    && `?${search}`.replace(/^\?$/, '') === locationSearch
+    && (hash ? `#${hash}` === locationHash : !locationHash)
+}
+
+function scrollToHash(hash: string) {
+  const id = hash.replace(/^#/, '')
+
+  if (!id) {
+    return
+  }
+
+  window.setTimeout(() => {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, 0)
+}
+
 export function AppLayout() {
   const { user, token, logout, hasAnyRole } = useAuth()
+  const { theme = 'system', setTheme } = useTheme()
   const navigate = useNavigate()
   const location = useLocation()
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('idle')
+  const [isAdminDrawerOpen, setIsAdminDrawerOpen] = useState(false)
+  const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
+  const [isDesktopUserMenuOpen, setIsDesktopUserMenuOpen] = useState(false)
+  const [expandedAdminGroups, setExpandedAdminGroups] = useState<Record<string, boolean>>({})
+  const themeMode: ThemeMode = theme === 'light' || theme === 'dark' ? theme : 'system'
+  const ThemeIcon = themeMode === 'dark' ? Moon : themeMode === 'light' ? Sun : Monitor
   const isSignedIn = Boolean(token)
   const canUseAdminArea = hasAnyRole(consoleRoles)
   const canUseAdminTools = hasAnyRole(adminRoles)
   const canUseStaffOrders = hasAnyRole(restaurantStaffRoles)
   const isAdminArea = location.pathname.startsWith('/admin')
-  const isStaffOrdersArea = location.pathname.startsWith('/staff/orders')
+  const isStaffOrdersArea = location.pathname.startsWith('/staff/')
   const isBackendPulseActive = backendStatus === 'checking' || backendStatus === 'ok'
+  const visibleAdminLinks = adminLinks.filter((link) => canUseAdminTools || ['/admin', '/admin/orders'].includes(link.to))
+
+  useEffect(() => {
+    if (location.hash) {
+      scrollToHash(location.hash)
+    }
+  }, [location.hash, location.pathname, location.search])
 
   const handleLogout = () => {
     logout()
     navigate('/login')
+  }
+
+  const closeUserMenu = () => {
+    setIsUserMenuOpen(false)
+  }
+
+  const closeDesktopUserMenu = () => {
+    setIsDesktopUserMenuOpen(false)
+  }
+
+  const cycleTheme = () => {
+    setTheme(themeCycle[themeMode])
+  }
+
+  const isAdminGroupExpanded = (to: string) => expandedAdminGroups[to] ?? location.pathname === to
+
+  const toggleAdminGroup = (to: string) => {
+    setExpandedAdminGroups((current) => ({
+      ...current,
+      [to]: !(current[to] ?? location.pathname === to),
+    }))
   }
 
   const checkBackend = async () => {
@@ -90,132 +254,385 @@ export function AppLayout() {
   return (
     <div className={`app-shell${isStaffOrdersArea ? ' staff-orders-shell' : ''}`}>
       <header className="topbar">
-        <div>
-          <p className="eyebrow">DineFlow</p>
-          <h1>Console</h1>
+        <div className="topbar-brand">
+          <BrandLogo className="topbar-brand-logo" />
+        </div>
+
+        <div className="mobile-topbar-actions" aria-label="Quick actions">
+          <Popover open={isUserMenuOpen} onOpenChange={setIsUserMenuOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                className="mobile-user-menu-trigger"
+                aria-label="Open user menu"
+                aria-expanded={isUserMenuOpen}
+              >
+                <Avatar size="sm">
+                  {user?.avatarUrl && <AvatarImage src={user.avatarUrl} alt={user.fullName ?? user.email ?? 'User avatar'} />}
+                  <AvatarFallback>{getInitials(user?.fullName, user?.email)}</AvatarFallback>
+                </Avatar>
+                <span className="mobile-user-menu-trigger-copy">
+                  <strong>{user?.fullName || (isSignedIn ? 'Not set' : 'Guest')}</strong>
+                  <span>{user?.email || 'Browser order tracking'}</span>
+                </span>
+                <ChevronDown size={15} />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="mobile-user-menu">
+              <div className="mobile-user-menu-header">
+                <Avatar size="sm">
+                  {user?.avatarUrl && <AvatarImage src={user.avatarUrl} alt={user.fullName ?? user.email ?? 'User avatar'} />}
+                  <AvatarFallback>{getInitials(user?.fullName, user?.email)}</AvatarFallback>
+                </Avatar>
+                <div>
+                  <strong>{user?.fullName || (isSignedIn ? 'Not set' : 'Guest')}</strong>
+                  <span>{user?.email || 'Browser order tracking'}</span>
+                </div>
+              </div>
+
+              <div className="mobile-user-menu-demo">
+                <DemoIdentitySwitcher />
+              </div>
+
+              <div className="mobile-user-menu-items">
+                <Link
+                  to="/my-orders"
+                  className={`mobile-user-menu-item${location.pathname === '/my-orders' ? ' active' : ''}`}
+                  onClick={closeUserMenu}
+                >
+                  <ShoppingBag size={17} />
+                  My Orders
+                </Link>
+                {isSignedIn && (
+                  <Link
+                    to="/me"
+                    className={`mobile-user-menu-item${location.pathname === '/me' ? ' active' : ''}`}
+                    onClick={closeUserMenu}
+                  >
+                    <UserRound size={17} />
+                    Profile
+                  </Link>
+                )}
+                {canUseStaffOrders && (
+                  <>
+                    <Link
+                      to="/staff/front-counter"
+                      className={`mobile-user-menu-item${location.pathname.startsWith('/staff/front-counter') ? ' active' : ''}`}
+                      onClick={closeUserMenu}
+                    >
+                      <DoorOpen size={17} />
+                      Front Counter
+                    </Link>
+                    <Link
+                      to="/staff/orders"
+                      className={`mobile-user-menu-item${location.pathname.startsWith('/staff/orders') ? ' active' : ''}`}
+                      onClick={closeUserMenu}
+                    >
+                      <ClipboardList size={17} />
+                      Staff Orders
+                    </Link>
+                  </>
+                )}
+                {canUseAdminArea && (
+                  <Link
+                    to="/admin"
+                    className={`mobile-user-menu-item${location.pathname.startsWith('/admin') ? ' active' : ''}`}
+                    onClick={closeUserMenu}
+                  >
+                    <ShieldCheck size={17} />
+                    Admin
+                  </Link>
+                )}
+                {isSignedIn ? (
+                  <button
+                    type="button"
+                    className="mobile-user-menu-item"
+                    onClick={() => {
+                      closeUserMenu()
+                      handleLogout()
+                    }}
+                  >
+                    <LogOut size={17} />
+                    Sign out
+                  </button>
+                ) : (
+                  <>
+                    <Link to="/login" className="mobile-user-menu-item" onClick={closeUserMenu}>
+                      <LogIn size={17} />
+                      Log in
+                    </Link>
+                    <Link to="/register" className="mobile-user-menu-item" onClick={closeUserMenu}>
+                      <UserPlus size={17} />
+                      Register
+                    </Link>
+                  </>
+                )}
+              </div>
+            </PopoverContent>
+          </Popover>
+
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="mobile-topbar-icon"
+                  aria-label={`${themeLabels[themeMode]} — ${themeNextAction[themeMode]}`}
+                  onClick={cycleTheme}
+                >
+                  <ThemeIcon size={18} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                <span className="flex flex-col items-start gap-0.5">
+                  <span className="font-medium">{themeLabels[themeMode]}</span>
+                  <span className="opacity-70">{themeNextAction[themeMode]}</span>
+                </span>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className={`mobile-topbar-icon navbar-status-button ${backendStatus}`}
+                  aria-label={backendStatusTooltip[backendStatus]}
+                  onClick={checkBackend}
+                  disabled={backendStatus === 'checking'}
+                >
+                  <span className="health-icon-wrap">
+                    <svg
+                      className="health-ecg"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      aria-hidden="true"
+                    >
+                      <path
+                        className="health-ecg-base"
+                        d="M2 12h4l3-8 6 16 3-8h4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      {isBackendPulseActive && (
+                        <motion.path
+                          className="health-ecg-sweep"
+                          d="M2 12h4l3-8 6 16 3-8h4"
+                          pathLength={1}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          initial={{ strokeDashoffset: 1 }}
+                          animate={{ strokeDashoffset: [1, 0] }}
+                          transition={{
+                            duration: backendStatus === 'checking' ? 1.05 : 1.45,
+                            ease: 'linear',
+                            repeat: Infinity,
+                          }}
+                        />
+                      )}
+                    </svg>
+                  </span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">{backendStatusTooltip[backendStatus]}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
 
         <nav className="nav-actions" aria-label="Primary">
-          <div className="navbar-user">
-            <Avatar size="sm">
-              {user?.avatarUrl && <AvatarImage src={user.avatarUrl} alt={user.fullName ?? user.email ?? 'User avatar'} />}
-              <AvatarFallback>{getInitials(user?.fullName, user?.email)}</AvatarFallback>
-            </Avatar>
-            <div className="navbar-user-copy">
-              <strong>{user?.fullName || (isSignedIn ? 'Not set' : 'Guest')}</strong>
-              <span>{user?.email || 'Browser order tracking'}</span>
-            </div>
-          </div>
-          <DemoIdentitySwitcher />
-          <NavLink to="/my-orders" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
-            <ShoppingBag size={18} />
-            My Orders
-          </NavLink>
-          {isSignedIn && (
-            <NavLink to="/me" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
-              <UserRound size={18} />
-              Profile
-            </NavLink>
-          )}
-          {canUseAdminArea && (
-            <>
-              {canUseStaffOrders && (
-                <NavLink
-                  to="/staff/orders"
-                  className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+          <Popover open={isDesktopUserMenuOpen} onOpenChange={setIsDesktopUserMenuOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                className="navbar-user navbar-user-trigger"
+                aria-label="Open user menu"
+                aria-expanded={isDesktopUserMenuOpen}
+              >
+                <Avatar size="sm">
+                  {user?.avatarUrl && <AvatarImage src={user.avatarUrl} alt={user.fullName ?? user.email ?? 'User avatar'} />}
+                  <AvatarFallback>{getInitials(user?.fullName, user?.email)}</AvatarFallback>
+                </Avatar>
+                <span className="navbar-user-copy">
+                  <strong>{user?.fullName || (isSignedIn ? 'Not set' : 'Guest')}</strong>
+                  <span>{user?.email || 'Browser order tracking'}</span>
+                </span>
+                <ChevronDown size={15} />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="mobile-user-menu desktop-user-menu">
+              <div className="mobile-user-menu-header">
+                <Avatar size="sm">
+                  {user?.avatarUrl && <AvatarImage src={user.avatarUrl} alt={user.fullName ?? user.email ?? 'User avatar'} />}
+                  <AvatarFallback>{getInitials(user?.fullName, user?.email)}</AvatarFallback>
+                </Avatar>
+                <div>
+                  <strong>{user?.fullName || (isSignedIn ? 'Not set' : 'Guest')}</strong>
+                  <span>{user?.email || 'Browser order tracking'}</span>
+                </div>
+              </div>
+
+              <div className="mobile-user-menu-demo">
+                <DemoIdentitySwitcher />
+              </div>
+
+              <div className="mobile-user-menu-items">
+                <Link
+                  to="/my-orders"
+                  className={`mobile-user-menu-item${location.pathname === '/my-orders' ? ' active' : ''}`}
+                  onClick={closeDesktopUserMenu}
                 >
-                  <ClipboardList size={18} />
-                  Staff Orders
-                </NavLink>
-              )}
-              <NavLink
-                to="/admin"
-                end
-                className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
-              >
-                <ShieldCheck size={18} />
-                Admin
-              </NavLink>
-            </>
-          )}
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className={`navbar-status-button ${backendStatus}`}
-            title="Check backend status"
-            aria-label="Check backend status"
-            onClick={checkBackend}
-            disabled={backendStatus === 'checking'}
-          >
-            <span className="health-icon-wrap">
-              <svg
-                className="health-ecg"
-                viewBox="0 0 24 24"
-                fill="none"
-                aria-hidden="true"
-              >
-                <path
-                  className="health-ecg-base"
-                  d="M2 12h4l3-8 6 16 3-8h4"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                {isBackendPulseActive && (
-                  <motion.path
-                    className="health-ecg-sweep"
-                    d="M2 12h4l3-8 6 16 3-8h4"
-                    pathLength={1}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    initial={{ strokeDashoffset: 1 }}
-                    animate={{ strokeDashoffset: [1, 0] }}
-                    transition={{
-                      duration: backendStatus === 'checking' ? 1.05 : 1.45,
-                      ease: 'linear',
-                      repeat: Infinity,
-                    }}
-                  />
+                  <ShoppingBag size={17} />
+                  My Orders
+                </Link>
+                {isSignedIn && (
+                  <Link
+                    to="/me"
+                    className={`mobile-user-menu-item${location.pathname === '/me' ? ' active' : ''}`}
+                    onClick={closeDesktopUserMenu}
+                  >
+                    <UserRound size={17} />
+                    Profile
+                  </Link>
                 )}
-              </svg>
-            </span>
-          </Button>
-          {isSignedIn ? (
-            <Button type="button" variant="ghost" onClick={handleLogout}>
-              <LogOut size={18} />
-              Sign out
-            </Button>
-          ) : (
-            <>
-              <Button type="button" variant="ghost" asChild>
-                <Link to="/login">
-                  <LogIn size={18} />
-                  Log in
-                </Link>
-              </Button>
-              <Button type="button" variant="outline" asChild>
-                <Link to="/register">
-                  <UserPlus size={18} />
-                  Register
-                </Link>
-              </Button>
-            </>
-          )}
+                {canUseStaffOrders && (
+                  <>
+                    <Link
+                      to="/staff/front-counter"
+                      className={`mobile-user-menu-item${location.pathname.startsWith('/staff/front-counter') ? ' active' : ''}`}
+                      onClick={closeDesktopUserMenu}
+                    >
+                      <DoorOpen size={17} />
+                      Front Counter
+                    </Link>
+                    <Link
+                      to="/staff/orders"
+                      className={`mobile-user-menu-item${location.pathname.startsWith('/staff/orders') ? ' active' : ''}`}
+                      onClick={closeDesktopUserMenu}
+                    >
+                      <ClipboardList size={17} />
+                      Staff Orders
+                    </Link>
+                  </>
+                )}
+                {canUseAdminArea && (
+                  <Link
+                    to="/admin"
+                    className={`mobile-user-menu-item${location.pathname.startsWith('/admin') ? ' active' : ''}`}
+                    onClick={closeDesktopUserMenu}
+                  >
+                    <ShieldCheck size={17} />
+                    Admin
+                  </Link>
+                )}
+                {isSignedIn ? (
+                  <button
+                    type="button"
+                    className="mobile-user-menu-item"
+                    onClick={() => {
+                      closeDesktopUserMenu()
+                      handleLogout()
+                    }}
+                  >
+                    <LogOut size={17} />
+                    Sign out
+                  </button>
+                ) : (
+                  <>
+                    <Link to="/login" className="mobile-user-menu-item" onClick={closeDesktopUserMenu}>
+                      <LogIn size={17} />
+                      Log in
+                    </Link>
+                    <Link to="/register" className="mobile-user-menu-item" onClick={closeDesktopUserMenu}>
+                      <UserPlus size={17} />
+                      Register
+                    </Link>
+                  </>
+                )}
+              </div>
+            </PopoverContent>
+          </Popover>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  aria-label={`${themeLabels[themeMode]} — ${themeNextAction[themeMode]}`}
+                  onClick={cycleTheme}
+                >
+                  <ThemeIcon size={18} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                <span className="flex flex-col items-start gap-0.5">
+                  <span className="font-medium">{themeLabels[themeMode]}</span>
+                  <span className="opacity-70">{themeNextAction[themeMode]}</span>
+                </span>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className={`navbar-status-button ${backendStatus}`}
+                  aria-label={backendStatusTooltip[backendStatus]}
+                  onClick={checkBackend}
+                  disabled={backendStatus === 'checking'}
+                >
+                  <span className="health-icon-wrap">
+                    <svg
+                      className="health-ecg"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      aria-hidden="true"
+                    >
+                      <path
+                        className="health-ecg-base"
+                        d="M2 12h4l3-8 6 16 3-8h4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      {isBackendPulseActive && (
+                        <motion.path
+                          className="health-ecg-sweep"
+                          d="M2 12h4l3-8 6 16 3-8h4"
+                          pathLength={1}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          initial={{ strokeDashoffset: 1 }}
+                          animate={{ strokeDashoffset: [1, 0] }}
+                          transition={{
+                            duration: backendStatus === 'checking' ? 1.05 : 1.45,
+                            ease: 'linear',
+                            repeat: Infinity,
+                          }}
+                        />
+                      )}
+                    </svg>
+                  </span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">{backendStatusTooltip[backendStatus]}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </nav>
       </header>
 
-      {isSignedIn && (
-        <section className="identity-strip">
-          <span>{user?.email}</span>
-          <span>{user?.roles.join(', ')}</span>
-        </section>
-      )}
-
       {canUseAdminArea && isAdminArea && (
-        <nav className="admin-shell-nav" aria-label="Admin area">
-          {adminLinks
-            .filter((link) => canUseAdminTools || ['/admin', '/admin/orders'].includes(link.to))
-            .map(({ to, label, icon: Icon, end }) => (
+        <>
+          <nav className="admin-shell-nav" aria-label="Admin area">
+            {visibleAdminLinks.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
               to={to}
@@ -226,7 +643,101 @@ export function AppLayout() {
               {label}
             </NavLink>
           ))}
-        </nav>
+          </nav>
+
+          <Drawer direction="left" open={isAdminDrawerOpen} onOpenChange={setIsAdminDrawerOpen}>
+            <div className="admin-mobile-nav">
+              <Button
+                type="button"
+                variant="outline"
+                className={`admin-mobile-trigger${isAdminDrawerOpen ? ' hidden' : ''}`}
+                aria-label="Open admin navigation"
+                aria-expanded={isAdminDrawerOpen}
+                onClick={() => setIsAdminDrawerOpen(true)}
+              >
+                <ChevronRight size={18} />
+              </Button>
+            </div>
+            <DrawerContent className="admin-mobile-drawer">
+              <Button
+                type="button"
+                variant="outline"
+                className="admin-mobile-drawer-tab"
+                aria-label="Close admin navigation"
+                aria-expanded={isAdminDrawerOpen}
+                onClick={() => setIsAdminDrawerOpen(false)}
+              >
+                <ChevronLeft size={18} />
+              </Button>
+              <DrawerHeader className="admin-mobile-drawer-header">
+                <BrandLogo className="admin-mobile-drawer-brand" />
+                <DrawerTitle>Admin</DrawerTitle>
+                <DrawerDescription>DineFlow console navigation</DrawerDescription>
+              </DrawerHeader>
+              <nav className="admin-mobile-drawer-nav" aria-label="Admin area">
+                {visibleAdminLinks.map(({ to, label, icon: Icon, end, children }) => (
+                  <div key={to} className="admin-mobile-drawer-group">
+                    <div className="admin-mobile-drawer-row">
+                      <DrawerClose asChild>
+                        <NavLink
+                          to={to}
+                          end={end}
+                          className={({ isActive }) =>
+                            isActive ? 'admin-mobile-drawer-link active' : 'admin-mobile-drawer-link'
+                          }
+                        >
+                          <Icon size={18} />
+                          <span>{label}</span>
+                        </NavLink>
+                      </DrawerClose>
+                      {children && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className={`admin-mobile-drawer-expand${isAdminGroupExpanded(to) ? ' open' : ''}`}
+                          aria-label={`${isAdminGroupExpanded(to) ? 'Collapse' : 'Expand'} ${label} navigation`}
+                          aria-expanded={isAdminGroupExpanded(to)}
+                          onClick={() => toggleAdminGroup(to)}
+                        >
+                          <ChevronDown size={17} />
+                        </Button>
+                      )}
+                    </div>
+                    {children && isAdminGroupExpanded(to) && (
+                      <div
+                        className="admin-mobile-drawer-subnav"
+                        id={`admin-mobile-subnav-${label.toLowerCase().replace(/\s+/g, '-')}`}
+                      >
+                        {children.map((child) => (
+                          <DrawerClose key={child.to} asChild>
+                            <Link
+                              to={child.to}
+                              onClick={() => {
+                                const [, hash] = child.to.split('#')
+
+                                if (hash) {
+                                  scrollToHash(hash)
+                                }
+                              }}
+                              className={
+                                isCurrentChildLink(child.to, location.pathname, location.search, location.hash)
+                                  ? 'admin-mobile-drawer-sublink active'
+                                  : 'admin-mobile-drawer-sublink'
+                              }
+                            >
+                              {child.label}
+                            </Link>
+                          </DrawerClose>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </nav>
+            </DrawerContent>
+          </Drawer>
+        </>
       )}
 
       <Outlet />

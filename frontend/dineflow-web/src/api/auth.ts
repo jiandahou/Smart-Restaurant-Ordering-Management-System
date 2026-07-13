@@ -178,6 +178,9 @@ export type Restaurant = {
   currency: string
   paymentPolicy: RestaurantPaymentPolicy
   isActive: boolean
+  acceptingOrders: boolean
+  openingHoursJson: string
+  specialOpeningDaysJson: string
   createdAt: string
   updatedAt: string | null
 }
@@ -205,6 +208,9 @@ export type RestaurantRequest = {
   currency: string
   paymentPolicy: RestaurantPaymentPolicy
   isActive: boolean
+  acceptingOrders: boolean
+  openingHoursJson?: string | null
+  specialOpeningDaysJson?: string | null
 }
 
 export type UpdateRestaurantResponse = {
@@ -524,6 +530,10 @@ export type AdminOrder = {
   customerName: string | null
   customerEmail: string | null
   orderNumber: string
+  pickupDate: string | null
+  pickupNumber: number | null
+  pickupCode: string
+  tableSessionId: string | null
   orderType: AdminOrderType
   status: AdminOrderStatus
   paymentStatus: AdminPaymentStatus
@@ -538,6 +548,91 @@ export type AdminOrder = {
   paymentAttempts: number
   latestPayment: AdminOrderPayment | null
   items: AdminOrderItem[]
+}
+
+export type FrontCounterListParams = {
+  restaurantId?: string
+  search?: string
+}
+
+export type FrontCounterTakeawayResponse = {
+  generatedAt: string
+  orders: AdminOrder[]
+}
+
+export type FrontCounterTableSessionsResponse = {
+  generatedAt: string
+  sessions: FrontCounterTableSessionSummary[]
+}
+
+export type FrontCounterTablesResponse = {
+  generatedAt: string
+  tables: FrontCounterTableSummary[]
+}
+
+export type FrontCounterTableSummary = {
+  restaurantId: string
+  restaurantName: string
+  tableId: string
+  tableNumber: string
+  capacity: number
+  isActive: boolean
+  activeSessionId: string | null
+  openedAt: string | null
+  currency: string
+  activeOrderCount: number
+  historyOrderCount: number
+  itemCount: number
+  totalAmount: number
+  amountDue: number
+  latestOrderStatus: AdminOrderStatus | ''
+  mergedItems: FrontCounterMergedItem[]
+  activeOrders: AdminOrder[]
+}
+
+export type FrontCounterTableDetail = FrontCounterTableSummary & {
+  activeSession: FrontCounterTableSessionDetail | null
+  historyOrders: AdminOrder[]
+}
+
+export type FrontCounterTableSessionSummary = {
+  id: string
+  restaurantId: string
+  restaurantName: string
+  tableId: string
+  tableNumber: string
+  status: 'Open' | 'Closed'
+  openedAt: string
+  closedAt: string | null
+  currency: string
+  activeOrderCount: number
+  itemCount: number
+  totalAmount: number
+  amountDue: number
+  latestOrderStatus: AdminOrderStatus | ''
+}
+
+export type FrontCounterMergedItem = {
+  itemName: string
+  quantity: number
+  unitPrice: number
+  totalPrice: number
+  note: string | null
+  selectedOptions: AdminOrderItemOption[]
+  orderItemIds: string[]
+}
+
+export type FrontCounterTableSessionDetail = FrontCounterTableSessionSummary & {
+  mergedItems: FrontCounterMergedItem[]
+  orders: AdminOrder[]
+}
+
+export type FrontCounterSettleOrderResponse = {
+  order: AdminOrder
+}
+
+export type FrontCounterSettleTableSessionResponse = {
+  tableSession: FrontCounterTableSessionDetail
 }
 
 export type CustomerOrderItem = {
@@ -570,6 +665,9 @@ export type CustomerOrder = {
   tableNumber: string | null
   customerId: string | null
   orderNumber: string
+  pickupDate: string | null
+  pickupNumber: number | null
+  pickupCode: string
   currency: string
   orderType: number
   status: number
@@ -1242,6 +1340,13 @@ export function updateRestaurant(restaurantId: string, payload: RestaurantReques
   })
 }
 
+export function updateRestaurantOrderingStatus(restaurantId: string, acceptingOrders: boolean) {
+  return request<UpdateRestaurantResponse>(`/api/restaurant/${restaurantId}/ordering-status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ acceptingOrders }),
+  })
+}
+
 export function deleteRestaurant(restaurantId: string) {
   return request<DeleteRestaurantResponse>(`/api/restaurant/${restaurantId}`, {
     method: 'DELETE',
@@ -1461,6 +1566,30 @@ export function getStaffOrders(params: AdminOrderListParams = {}) {
   return request<PagedResponse<AdminOrder>>(`/api/staff/orders${toQueryString(params)}`)
 }
 
+export function getFrontCounterTakeaway(params: FrontCounterListParams = {}) {
+  return request<FrontCounterTakeawayResponse>(`/api/staff/front-counter/takeaway${toQueryString(params)}`)
+}
+
+export function getFrontCounterTableSessions(params: FrontCounterListParams = {}) {
+  return request<FrontCounterTableSessionsResponse>(`/api/staff/front-counter/table-sessions${toQueryString(params)}`)
+}
+
+export function getFrontCounterTables(params: FrontCounterListParams = {}) {
+  return request<FrontCounterTablesResponse>(`/api/staff/front-counter/tables${toQueryString(params)}`)
+}
+
+export function getFrontCounterTable(tableId: string, params: { restaurantId?: string } = {}) {
+  return request<FrontCounterTableDetail>(
+    `/api/staff/front-counter/tables/${tableId}${toQueryString(params)}`,
+  )
+}
+
+export function getFrontCounterTableSession(sessionId: string, params: { restaurantId?: string } = {}) {
+  return request<FrontCounterTableSessionDetail>(
+    `/api/staff/front-counter/table-sessions/${sessionId}${toQueryString(params)}`,
+  )
+}
+
 export function getAdminOrderSummary() {
   return request<AdminOrderSummary>('/api/admin/orders/summary')
 }
@@ -1473,6 +1602,24 @@ export function recordCounterPayment(orderId: string) {
   return request<AdminOrder>(`/api/admin/orders/${orderId}/counter-payment`, {
     method: 'POST',
   })
+}
+
+export function settleCompleteFrontCounterOrder(orderId: string, params: { restaurantId?: string } = {}) {
+  return request<FrontCounterSettleOrderResponse>(
+    `/api/staff/front-counter/orders/${orderId}/settle-complete${toQueryString(params)}`,
+    {
+      method: 'POST',
+    },
+  )
+}
+
+export function settleCompleteFrontCounterTableSession(sessionId: string, params: { restaurantId?: string } = {}) {
+  return request<FrontCounterSettleTableSessionResponse>(
+    `/api/staff/front-counter/table-sessions/${sessionId}/settle-complete${toQueryString(params)}`,
+    {
+      method: 'POST',
+    },
+  )
 }
 
 export function refundAdminOrder(orderId: string, payload: RefundOrderRequest = {}) {
