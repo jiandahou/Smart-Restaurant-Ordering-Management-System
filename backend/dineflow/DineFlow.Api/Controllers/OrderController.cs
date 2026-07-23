@@ -41,6 +41,7 @@ public class OrderController : ControllerBase
         _logger = logger;
     }
 
+    [Authorize(Policy = AuthorizationPolicies.PlatformOwnerOnly)]
     [HttpGet]
     public async Task<IActionResult> GetOrders(CancellationToken cancellationToken)
     {
@@ -114,6 +115,7 @@ public class OrderController : ControllerBase
         return Ok(orders.Select(MapToResponse).ToList());
     }
 
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> GetOrder(Guid id, CancellationToken cancellationToken)
     {
