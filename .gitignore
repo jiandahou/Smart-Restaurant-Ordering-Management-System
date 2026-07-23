@@ -15,6 +15,7 @@ Desktop.ini
 .env
 .env.*
 !.env.example
+certs/
 appsettings.*.local.json
 appsettings.Development.json
 

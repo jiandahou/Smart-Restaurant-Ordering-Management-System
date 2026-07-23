@@ -121,6 +121,8 @@ services:
       SeedOwner__Email: ${SEED_OWNER_EMAIL:-owner@dineflow.com}
       SeedOwner__Password: ${SEED_OWNER_PASSWORD:-ChangeMe123!}
       SeedOwner__FullName: ${SEED_OWNER_FULL_NAME:-DineFlow Owner}
+      QzPrint__CertificatePemBase64: ${QZ_CERT_PEM_B64:-}
+      QzPrint__PrivateKeyPemBase64: ${QZ_PRIVATE_KEY_PEM_B64:-}
     ports:
       - "5000:8080"
     volumes:

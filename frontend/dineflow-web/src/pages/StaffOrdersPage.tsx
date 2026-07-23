@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertCircle, ChefHat, Clock3, CreditCard, ListChecks, Printer, RefreshCw, Search, Settings2, ShoppingBag, Utensils, Volume2, VolumeX, X } from 'lucide-react'
+import { AlertCircle, Cable, ChefHat, Clock3, CreditCard, Download, ListChecks, Printer, RefreshCw, Search, Settings2, ShieldCheck, ShieldOff, ShoppingBag, Usb, Utensils, Volume2, VolumeX, X } from 'lucide-react'
 import { motion } from 'motion/react'
 import { toast } from 'sonner'
 import {
@@ -34,13 +34,28 @@ import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { createOrderRealtimeClient, type OrderRealtimeUpdate } from '@/realtime/orderConnection'
 import {
+  canManageQzTrustCertificate,
   createKitchenTicket,
   defaultThermalPrinterSettings,
+  detectWebUsbPrinter,
+  downloadQzTrustCertificate,
+  getQzTrayDefaultPrinter,
+  hasQzTrayConnectedBefore,
+  installQzTrustCertificate,
+  isQzTrayConnected,
+  listQzTrayPrinters,
+  removeQzTrustCertificate,
+  selectWebSerialPort,
   printKitchenTicketWithQzTray,
   printKitchenTicketWithWebSerial,
   printKitchenTicketWithWebUsb,
+  probeQzTrayStatus,
+  QZ_TRAY_DOWNLOAD_URL,
+  QzTrayError,
   readStoredThermalPrinterSettings,
   storeThermalPrinterSettings,
+  type QzTrayConnectionStatus,
+  type QzTrayErrorReason,
   type ThermalPaperWidth,
   type ThermalPrinterMode,
   type ThermalPrinterSettings,
@@ -109,6 +124,31 @@ const printerModeLabels: Record<ThermalPrinterMode, string> = {
   'qz-tray': 'QZ Tray',
   'web-serial': 'Web Serial',
   'web-usb': 'WebUSB',
+}
+
+// Maps a typed QZ Tray failure to staff-friendly guidance. `offerDownload` adds a
+// one-click link to the QZ Tray installer for the cases the user can fix by installing/launching it.
+const qzErrorGuidance: Record<QzTrayErrorReason, { title: string; description: string; offerDownload: boolean }> = {
+  'not-loaded': {
+    title: 'QZ Tray could not start',
+    description: 'The QZ Tray helper failed to load. Reload the page, or install QZ Tray if you have not yet.',
+    offerDownload: true,
+  },
+  'not-running': {
+    title: 'QZ Tray is not running',
+    description: 'Install the QZ Tray desktop app and make sure it is running, then print again.',
+    offerDownload: true,
+  },
+  'no-printer': {
+    title: 'No QZ Tray printer selected',
+    description: 'Pick a printer, or enter a network printer IP, in Kitchen printer settings before printing.',
+    offerDownload: false,
+  },
+  'print-failed': {
+    title: 'QZ Tray could not print',
+    description: 'The printer rejected the job. Check the printer name and that the device is online.',
+    offerDownload: false,
+  },
 }
 
 const orderTypeLabels: Record<AdminOrder['orderType'], string> = {
@@ -420,13 +460,66 @@ export function StaffOrdersPage() {
         description: `${order.orderNumber} via ${printerModeLabels[printerSettings.mode]}.`,
       })
     } catch (printError) {
-      toast.error('Kitchen ticket could not be printed', {
-        description: printError instanceof Error ? printError.message : 'The print request failed.',
-      })
+      if (printError instanceof QzTrayError) {
+        const guidance = qzErrorGuidance[printError.reason]
+        toast.error(guidance.title, {
+          description: guidance.description,
+          ...(guidance.offerDownload
+            ? {
+                action: {
+                  label: 'Download QZ Tray',
+                  onClick: () => window.open(QZ_TRAY_DOWNLOAD_URL, '_blank', 'noopener,noreferrer'),
+                },
+              }
+            : {}),
+        })
+      } else {
+        toast.error('Kitchen ticket could not be printed', {
+          description: printError instanceof Error ? printError.message : 'The print request failed.',
+        })
+      }
     } finally {
       setPrintingOrderId(null)
     }
   }, [printerSettings])
+
+  // Latest print handler + settings for the realtime callbacks, without forcing
+  // the SignalR connection to rebuild whenever printer settings change.
+  const printOrderTicketRef = useRef(printOrderTicket)
+  useEffect(() => {
+    printOrderTicketRef.current = printOrderTicket
+  }, [printOrderTicket])
+
+  const printerSettingsRef = useRef(printerSettings)
+  useEffect(() => {
+    printerSettingsRef.current = printerSettings
+  }, [printerSettings])
+
+  // Orders already auto-printed this session, so overlapping realtime events
+  // (created + payment-updated) cannot produce duplicate tickets.
+  const autoPrintedOrderIdsRef = useRef<Set<string>>(new Set())
+
+  // Auto-print is QZ Tray-only: it is the sole route that prints silently without
+  // a user gesture (Web Serial/USB pickers and the browser dialog need one).
+  const autoPrintOrder = useCallback(async (update: OrderRealtimeUpdate) => {
+    const settings = printerSettingsRef.current
+    if (settings.mode !== 'qz-tray' || !settings.autoPrintNewOrders) return
+    if (autoPrintedOrderIdsRef.current.has(update.orderId)) return
+    autoPrintedOrderIdsRef.current.add(update.orderId)
+
+    try {
+      // Realtime updates carry no line items; fetch the full order for the ticket.
+      const page = isPlatformOwner
+        ? await getAdminOrders({ search: update.orderNumber, pageSize: 5 })
+        : await getStaffOrders({ search: update.orderNumber, pageSize: 5 })
+      const order = page.items.find((candidate) => candidate.id === update.orderId)
+      if (order) {
+        await printOrderTicketRef.current(order)
+      }
+    } catch {
+      // Lookup failed; staff can still print manually from the order card.
+    }
+  }, [isPlatformOwner])
 
   useEffect(() => {
     if (!isPlatformOwner) return
@@ -463,6 +556,10 @@ export function StaffOrdersPage() {
           description: `${update.orderNumber} is waiting in the staff queue.`,
         })
         scheduleRealtimeRefresh()
+        // Pay-at-counter orders are actionable immediately — print on arrival.
+        if (update.paymentMethod === 'PayAtCounter') {
+          void autoPrintOrder(update)
+        }
       },
       onOrderUpdated: (update) => {
         if (shouldHandleRealtimeUpdate(update)) {
@@ -476,6 +573,11 @@ export function StaffOrdersPage() {
           const isOnlinePaid = update.paymentMethod === 'Online' && update.paymentStatus === 'Paid'
           if (audioEnabledRef.current && audioContextRef.current && (isPayAtCounterConfirmed || isOnlinePaid)) {
             playNewOrderSound(audioContextRef.current)
+          }
+          // Same trigger as the sound: pay-at-counter confirmed, or online payment
+          // succeeded — the moment the kitchen should start on the order.
+          if (isPayAtCounterConfirmed || isOnlinePaid) {
+            void autoPrintOrder(update)
           }
         }
       },
@@ -501,7 +603,7 @@ export function StaffOrdersPage() {
 
       void client.stop()
     }
-  }, [scheduleRealtimeRefresh, shouldHandleRealtimeUpdate, user])
+  }, [autoPrintOrder, scheduleRealtimeRefresh, shouldHandleRealtimeUpdate, user])
 
   const visibleOrders = useMemo(
     () => orders.filter((order) => queueStatuses[queue].has(order.status)),
@@ -1174,6 +1276,181 @@ function PrinterSettingsDialog({
   onOpenChange: (open: boolean) => void
   onSettingsChange: (updates: Partial<ThermalPrinterSettings>) => void
 }) {
+  const [qzStatus, setQzStatus] = useState<QzTrayConnectionStatus | 'checking' | 'unknown'>('unknown')
+  const [qzPrinters, setQzPrinters] = useState<string[]>([])
+  const [qzPrintersLoading, setQzPrintersLoading] = useState(false)
+
+  // Track the latest printer name without making the discovery callback depend on
+  // it (which would refetch the printer list on every keystroke).
+  const qzPrinterNameRef = useRef(settings.qzPrinterName)
+  useEffect(() => {
+    qzPrinterNameRef.current = settings.qzPrinterName
+  }, [settings.qzPrinterName])
+
+  // Discover the printers QZ Tray can see and preselect the OS default when the
+  // user has not chosen one yet. Safe to call only when connected (or from an
+  // explicit user action, since connecting may show the QZ allow-prompt).
+  const loadQzPrinters = useCallback(async () => {
+    setQzPrintersLoading(true)
+    try {
+      const printers = await listQzTrayPrinters()
+      setQzPrinters(printers)
+      setQzStatus('connected')
+
+      if (!qzPrinterNameRef.current.trim() && printers.length > 0) {
+        const defaultPrinter = await getQzTrayDefaultPrinter()
+        onSettingsChange({
+          qzPrinterName: defaultPrinter && printers.includes(defaultPrinter) ? defaultPrinter : printers[0],
+        })
+      }
+    } catch {
+      // Discovery failed (e.g. QZ stopped between checks); keep manual entry usable.
+    } finally {
+      setQzPrintersLoading(false)
+    }
+  }, [onSettingsChange])
+
+  // On open, show whether a connection is already active (cheap, no prompt) and
+  // refresh the printer list for the dropdown. If this browser has connected
+  // before (e.g. the websocket dropped on a page reload), auto-reconnect instead
+  // of requiring a manual Test connection — silent when QZ has remembered the site.
+  useEffect(() => {
+    if (!open) return
+    const connected = isQzTrayConnected()
+    setQzStatus(connected ? 'connected' : 'unknown')
+    if (connected || hasQzTrayConnectedBefore()) {
+      void loadQzPrinters()
+    }
+  }, [open, loadQzPrinters])
+
+  // Explicit user-triggered probe: may open a connection (and show the QZ Tray
+  // allow-prompt on unsigned setups), so it never runs automatically.
+  const testQzConnection = useCallback(async () => {
+    setQzStatus('checking')
+    const status = await probeQzTrayStatus()
+    setQzStatus(status)
+    if (status === 'connected') {
+      await loadQzPrinters()
+    }
+  }, [loadQzPrinters])
+
+  const [usbDetecting, setUsbDetecting] = useState(false)
+  const [usbDeviceLabel, setUsbDeviceLabel] = useState<string | null>(null)
+  const [serialSelecting, setSerialSelecting] = useState(false)
+  const [serialPortLabel, setSerialPortLabel] = useState<string | null>(null)
+  const [trustBusy, setTrustBusy] = useState(false)
+
+  // One-time serial port grant (browser picker); prints then reuse it silently.
+  // Bluetooth SPP printers paired with the OS appear here as virtual COM ports.
+  const selectSerialPort = useCallback(async () => {
+    setSerialSelecting(true)
+    try {
+      const label = await selectWebSerialPort()
+      setSerialPortLabel(label)
+      toast.success('Serial port selected', { description: `${label} — later prints reuse it without asking.` })
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'NotFoundError') {
+        return // User closed the picker without choosing.
+      }
+      toast.error('Could not select serial port', {
+        description: error instanceof Error ? error.message : 'The port request failed.',
+      })
+    } finally {
+      setSerialSelecting(false)
+    }
+  }, [])
+  const qzTrustSupported = canManageQzTrustCertificate()
+
+  // Quick trust setup: user picks the QZ Tray install folder in the system picker
+  // and we write override.crt there — the one file that makes QZ stop prompting.
+  const installTrust = useCallback(async () => {
+    setTrustBusy(true)
+    try {
+      const folder = await installQzTrustCertificate()
+      toast.success('Trust certificate installed', {
+        description: `override.crt written to "${folder}". Restart QZ Tray (tray icon → exit, reopen) to apply.`,
+      })
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return // User closed the folder picker.
+      }
+      toast.error('Could not install trust certificate', {
+        description: error instanceof Error ? error.message : 'Writing override.crt failed.',
+      })
+    } finally {
+      setTrustBusy(false)
+    }
+  }, [])
+
+  const removeTrust = useCallback(async () => {
+    setTrustBusy(true)
+    try {
+      const folder = await removeQzTrustCertificate()
+      toast.success('Trust certificate removed', {
+        description: `override.crt deleted from "${folder}". Restart QZ Tray to apply.`,
+      })
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return
+      }
+      if (error instanceof DOMException && error.name === 'NotFoundError') {
+        toast.info('Nothing to remove', { description: 'No override.crt was found in that folder.' })
+        return
+      }
+      toast.error('Could not remove trust certificate', {
+        description: error instanceof Error ? error.message : 'Deleting override.crt failed.',
+      })
+    } finally {
+      setTrustBusy(false)
+    }
+  }, [])
+
+  const downloadTrustCert = useCallback(async () => {
+    try {
+      await downloadQzTrustCertificate()
+    } catch (error) {
+      toast.error('Could not download certificate', {
+        description: error instanceof Error ? error.message : 'The certificate request failed.',
+      })
+    }
+  }, [])
+
+  // Browser-native USB picker (user gesture) → auto-fill vendor/product IDs and
+  // the detected bulk-OUT interface/endpoint, instead of hand-typed hex values.
+  const selectUsbPrinter = useCallback(async () => {
+    setUsbDetecting(true)
+    try {
+      const detected = await detectWebUsbPrinter()
+      onSettingsChange({
+        usbVendorId: detected.vendorId,
+        usbProductId: detected.productId,
+        usbInterfaceNumber: detected.interfaceNumber,
+        usbEndpointNumber: detected.endpointNumber,
+      })
+      setUsbDeviceLabel(detected.label)
+      toast.success('USB printer selected', { description: detected.label })
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'NotFoundError') {
+        return // User closed the picker without choosing — not an error.
+      }
+      toast.error('Could not select USB printer', {
+        description: error instanceof Error ? error.message : 'The device request failed.',
+      })
+    } finally {
+      setUsbDetecting(false)
+    }
+  }, [onSettingsChange])
+
+  const qzConnected = qzStatus === 'connected'
+  const qzStatusLabel =
+    qzStatus === 'connected'
+      ? 'QZ Tray connected'
+      : qzStatus === 'checking'
+        ? 'Checking QZ Tray…'
+        : qzStatus === 'unavailable'
+          ? 'QZ Tray helper unavailable'
+          : 'QZ Tray not detected'
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="staff-printer-dialog">
@@ -1227,6 +1504,14 @@ function PrinterSettingsDialog({
                 onCheckedChange={(checked) => onSettingsChange({ cutPaper: checked })}
               />
             </label>
+
+            <label className="staff-printer-switch">
+              <span>Beep on print</span>
+              <Switch
+                checked={settings.beepOnPrint}
+                onCheckedChange={(checked) => onSettingsChange({ beepOnPrint: checked })}
+              />
+            </label>
           </div>
 
           <div className="staff-printer-route-grid">
@@ -1237,11 +1522,154 @@ function PrinterSettingsDialog({
               </header>
               <div className="staff-printer-field">
                 <span>Printer name</span>
-                <Input
-                  value={settings.qzPrinterName}
-                  placeholder="Epson TM-T88VI"
-                  onChange={(event) => onSettingsChange({ qzPrinterName: event.target.value })}
-                />
+                {qzPrinters.length > 0 ? (
+                  <Select
+                    value={settings.qzPrinterName || undefined}
+                    onValueChange={(value) => onSettingsChange({ qzPrinterName: value })}
+                  >
+                    <SelectTrigger aria-label="QZ Tray printer">
+                      <SelectValue placeholder="Choose a printer" />
+                    </SelectTrigger>
+                    <SelectContent position="popper">
+                      {(settings.qzPrinterName && !qzPrinters.includes(settings.qzPrinterName)
+                        ? [settings.qzPrinterName, ...qzPrinters]
+                        : qzPrinters
+                      ).map((name) => (
+                        <SelectItem key={name} value={name}>
+                          {name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input
+                    value={settings.qzPrinterName}
+                    placeholder={qzPrintersLoading ? 'Detecting printers…' : 'Epson TM-T88VI'}
+                    onChange={(event) => onSettingsChange({ qzPrinterName: event.target.value })}
+                  />
+                )}
+              </div>
+              <div className="staff-printer-usb-grid">
+                <div className="staff-printer-field">
+                  <span>Network IP (optional)</span>
+                  <Input
+                    value={settings.qzNetworkHost}
+                    placeholder="192.168.1.50"
+                    onChange={(event) => onSettingsChange({ qzNetworkHost: event.target.value })}
+                  />
+                </div>
+                <div className="staff-printer-field">
+                  <span>Port</span>
+                  <Input
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    value={settings.qzNetworkPort}
+                    onChange={(event) => onSettingsChange({ qzNetworkPort: Number(event.target.value) })}
+                  />
+                </div>
+              </div>
+              {settings.qzNetworkHost.trim() ? (
+                <p className="text-[0.7rem] leading-snug text-muted-foreground">
+                  Printing goes straight to {settings.qzNetworkHost.trim()}:{settings.qzNetworkPort || 9100} over the
+                  network — no printer driver needed. The printer name above is ignored while this is set.
+                </p>
+              ) : null}
+              <div className="mt-1 flex flex-col gap-2">
+                <span className="flex items-center gap-2 text-xs">
+                  <span
+                    className={cn(
+                      'inline-block size-2 shrink-0 rounded-full',
+                      qzConnected
+                        ? 'bg-emerald-500'
+                        : qzStatus === 'checking'
+                          ? 'bg-amber-500'
+                          : 'bg-muted-foreground/40',
+                    )}
+                  />
+                  <span className="text-muted-foreground">{qzStatusLabel}</span>
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void testQzConnection()}
+                    disabled={qzStatus === 'checking' || qzPrintersLoading}
+                  >
+                    <RefreshCw size={14} className={cn((qzStatus === 'checking' || qzPrintersLoading) && 'animate-spin')} />
+                    {qzConnected ? 'Refresh printers' : 'Test connection'}
+                  </Button>
+                  {!qzConnected ? (
+                    <Button asChild type="button" variant="outline" size="sm">
+                      <a href={QZ_TRAY_DOWNLOAD_URL} target="_blank" rel="noopener noreferrer">
+                        <Download size={14} />
+                        Download QZ Tray
+                      </a>
+                    </Button>
+                  ) : null}
+                </div>
+                {!qzConnected ? (
+                  <p className="text-[0.7rem] leading-snug text-muted-foreground">
+                    QZ Tray is a small desktop app for silent printing. Install and launch it, then use Test connection.
+                    Prefer no install? Web Serial or WebUSB print directly from Chrome/Edge.
+                  </p>
+                ) : null}
+                <label className="staff-printer-switch">
+                  <span>Auto-print new orders</span>
+                  <Switch
+                    checked={settings.autoPrintNewOrders}
+                    onCheckedChange={(checked) => onSettingsChange({ autoPrintNewOrders: checked })}
+                  />
+                </label>
+                {settings.autoPrintNewOrders ? (
+                  <p className="text-[0.7rem] leading-snug text-muted-foreground">
+                    Pay-at-counter orders print as soon as they arrive; online orders print once payment succeeds.
+                  </p>
+                ) : null}
+
+                <div className="mt-1 flex flex-col gap-2 border-t border-border pt-2">
+                  <span className="text-xs font-medium">Silent printing (trust certificate)</span>
+                  {qzTrustSupported ? (
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void installTrust()}
+                        disabled={trustBusy}
+                      >
+                        <ShieldCheck size={14} />
+                        Install trust cert
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void removeTrust()}
+                        disabled={trustBusy}
+                      >
+                        <ShieldOff size={14} />
+                        Remove
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void downloadTrustCert()}
+                    >
+                      <Download size={14} />
+                      Download override.crt
+                    </Button>
+                  )}
+                  <p className="text-[0.7rem] leading-snug text-muted-foreground">
+                    {qzTrustSupported
+                      ? 'Pick the QZ Tray install folder (e.g. D:\\QZ tray) when asked, then restart QZ Tray. Install stops the security prompt on this machine; Remove undoes it.'
+                      : 'Place the downloaded override.crt in the QZ Tray install folder, then restart QZ Tray.'}
+                  </p>
+                </div>
               </div>
             </section>
 
@@ -1250,6 +1678,23 @@ function PrinterSettingsDialog({
                 <strong>Web Serial</strong>
                 <Badge variant={settings.mode === 'web-serial' ? 'default' : 'outline'}>{settings.mode === 'web-serial' ? 'Active' : 'Ready'}</Badge>
               </header>
+              <div className="mb-2 flex flex-col gap-1">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void selectSerialPort()}
+                  disabled={serialSelecting}
+                >
+                  {serialSelecting ? <RefreshCw size={14} className="animate-spin" /> : <Cable size={14} />}
+                  Select port
+                </Button>
+                <span className="text-[0.7rem] leading-snug text-muted-foreground">
+                  {serialPortLabel
+                    ? `Selected: ${serialPortLabel}`
+                    : 'Grant a port once — later prints reuse it silently. Bluetooth printers paired with Windows appear as COM ports.'}
+                </span>
+              </div>
               <div className="staff-printer-field">
                 <span>Baud rate</span>
                 <Input
@@ -1267,6 +1712,23 @@ function PrinterSettingsDialog({
                 <strong>WebUSB</strong>
                 <Badge variant={settings.mode === 'web-usb' ? 'default' : 'outline'}>{settings.mode === 'web-usb' ? 'Active' : 'Ready'}</Badge>
               </header>
+              <div className="mb-2 flex flex-col gap-1">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void selectUsbPrinter()}
+                  disabled={usbDetecting}
+                >
+                  {usbDetecting ? <RefreshCw size={14} className="animate-spin" /> : <Usb size={14} />}
+                  Select printer
+                </Button>
+                <span className="text-[0.7rem] leading-snug text-muted-foreground">
+                  {usbDeviceLabel
+                    ? `Selected: ${usbDeviceLabel}`
+                    : 'Pick your printer from the browser list — IDs below fill in automatically.'}
+                </span>
+              </div>
               <div className="staff-printer-usb-grid">
                 <div className="staff-printer-field">
                   <span>Vendor ID</span>
