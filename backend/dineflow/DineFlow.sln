@@ -11,6 +11,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DineFlow.Application", "Din
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DineFlow.Infrastructure", "DineFlow.Infrastructure\DineFlow.Infrastructure.csproj", "{2BE70421-BDD2-42AC-A8B1-396881C4B6EA}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DineFlow.Tests", "DineFlow.Tests\DineFlow.Tests.csproj", "{2D0058F2-D6C9-4B30-8FCC-C18A91C41C7E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -36,5 +38,9 @@ Global
 		{2BE70421-BDD2-42AC-A8B1-396881C4B6EA}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{2BE70421-BDD2-42AC-A8B1-396881C4B6EA}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{2BE70421-BDD2-42AC-A8B1-396881C4B6EA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2D0058F2-D6C9-4B30-8FCC-C18A91C41C7E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2D0058F2-D6C9-4B30-8FCC-C18A91C41C7E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2D0058F2-D6C9-4B30-8FCC-C18A91C41C7E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2D0058F2-D6C9-4B30-8FCC-C18A91C41C7E}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
