@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { Clock3, ClipboardList, CreditCard, Loader2, ReceiptText, RefreshCw, ShoppingBag, Undo2, Utensils } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
+import { Clock3, ClipboardList, CreditCard, Loader2, ReceiptText, RefreshCw, RotateCcw, ShoppingBag, Undo2, Utensils } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   createOrderCheckoutSession,
@@ -11,8 +11,10 @@ import {
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
+import { OrderProgressStepper } from '../components/orders/OrderProgressStepper'
 import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { PaymentStatusBadge } from '../components/orders/PaymentStatusBadge'
+import { reorderIntoTakeawayCart } from '../lib/reorder'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
@@ -79,12 +81,16 @@ function getContinuePaymentLabel(order: CustomerOrder) {
   return 'Continue payment'
 }
 
+const ORDER_POLL_INTERVAL_MS = 20_000
+
 export function MyOrdersPage() {
   const { token, loading: authLoading } = useAuth()
+  const navigate = useNavigate()
   const [orders, setOrders] = useState<CustomerOrder[]>([])
   const [loading, setLoading] = useState(true)
   const [guestOrderCount, setGuestOrderCount] = useState(0)
   const [payingOrderId, setPayingOrderId] = useState<string | null>(null)
+  const [reorderingOrderId, setReorderingOrderId] = useState<string | null>(null)
   const [refundOrder, setRefundOrder] = useState<CustomerOrder | null>(null)
   const [refundReason, setRefundReason] = useState('')
   const [requestingRefundOrderId, setRequestingRefundOrderId] = useState<string | null>(null)
@@ -130,6 +136,95 @@ export function MyOrdersPage() {
   useEffect(() => {
     void loadOrders()
   }, [loadOrders])
+
+  // Silent background refresh — keeps order/payment status current without the
+  // full-screen loader or toast. Used by the polling effect below.
+  const refreshSilently = useCallback(async () => {
+    if (authLoading) {
+      return
+    }
+
+    try {
+      if (token) {
+        setOrders(await getMyOrders())
+      } else {
+        const guestOrderIds = getGuestOrderIds()
+        setGuestOrderCount(guestOrderIds.length)
+        if (guestOrderIds.length > 0) {
+          setOrders(await getGuestOrders(guestOrderIds))
+        }
+      }
+    } catch {
+      // Transient polling errors are ignored; the manual Refresh surfaces failures.
+    }
+  }, [authLoading, token])
+
+  // Poll while the tab is visible so customers see status changes without
+  // manually refreshing. Guests have no auth token and cannot use SignalR, so
+  // polling is the only live-update path that works for everyone. Paused when
+  // the tab is hidden; resumes with an immediate refresh when it returns.
+  useEffect(() => {
+    if (authLoading) {
+      return
+    }
+
+    let timer: number | undefined
+
+    const start = () => {
+      if (timer === undefined) {
+        timer = window.setInterval(() => void refreshSilently(), ORDER_POLL_INTERVAL_MS)
+      }
+    }
+
+    const stop = () => {
+      if (timer !== undefined) {
+        window.clearInterval(timer)
+        timer = undefined
+      }
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        stop()
+      } else {
+        void refreshSilently()
+        start()
+      }
+    }
+
+    if (!document.hidden) {
+      start()
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      stop()
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [authLoading, refreshSilently])
+
+  const handleReorder = async (order: CustomerOrder) => {
+    setReorderingOrderId(order.id)
+
+    try {
+      const result = await reorderIntoTakeawayCart(order)
+      toast.success(
+        `Added ${result.addedCount} item${result.addedCount === 1 ? '' : 's'} to a new cart`,
+        result.skippedCount > 0
+          ? {
+              description: `${result.skippedCount} unavailable item${result.skippedCount === 1 ? '' : 's'} skipped.`,
+            }
+          : undefined,
+      )
+      navigate(`/r/${encodeURIComponent(result.restaurantId)}/menu`)
+    } catch (error) {
+      toast.error('Could not reorder', {
+        description: error instanceof Error ? error.message : 'The reorder could not be completed.',
+      })
+    } finally {
+      setReorderingOrderId(null)
+    }
+  }
 
   const handleContinuePayment = async (order: CustomerOrder) => {
     setPayingOrderId(order.id)
@@ -245,8 +340,10 @@ export function MyOrdersPage() {
                 const itemCount = getItemCount(order)
                 const showContinuePayment = canContinuePayment(order)
                 const showRequestRefund = canRequestRefund(order)
+                const canReorder = getOrderMenuPath(order) !== null && order.orderItems.length > 0
                 const isPaying = payingOrderId === order.id
                 const isRequestingRefund = requestingRefundOrderId === order.id
+                const isReordering = reorderingOrderId === order.id
 
                 return (
                   <article key={order.id} className="my-order-card">
@@ -282,6 +379,8 @@ export function MyOrdersPage() {
                         </Badge>
                       </div>
                     </div>
+
+                    <OrderProgressStepper status={order.status} className="my-order-progress" />
 
                     {order.latestRefundRequest ? (
                       <div className={`my-order-refund-state my-order-refund-state-${order.latestRefundRequest.status.toLowerCase()}`}>
@@ -330,7 +429,7 @@ export function MyOrdersPage() {
                       <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
                     </div>
 
-                    {showContinuePayment || showRequestRefund ? (
+                    {showContinuePayment || showRequestRefund || canReorder ? (
                       <div className="my-order-action-bar">
                         {showContinuePayment ? (
                           <Button
@@ -356,6 +455,18 @@ export function MyOrdersPage() {
                           >
                             {isRequestingRefund ? <Loader2 className="animate-spin" /> : <Undo2 />}
                             Request refund
+                          </Button>
+                        ) : null}
+                        {canReorder ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="my-order-reorder-button"
+                            disabled={isReordering}
+                            onClick={() => void handleReorder(order)}
+                          >
+                            {isReordering ? <Loader2 className="animate-spin" /> : <RotateCcw />}
+                            Order again
                           </Button>
                         ) : null}
                       </div>
