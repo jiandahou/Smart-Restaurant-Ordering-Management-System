@@ -202,6 +202,9 @@ export function AppLayout() {
   const isStaffOrdersArea = location.pathname.startsWith('/staff/')
   const isBackendPulseActive = backendStatus === 'checking' || backendStatus === 'ok'
   const visibleAdminLinks = adminLinks.filter((link) => canUseAdminTools || ['/admin', '/admin/orders'].includes(link.to))
+  const selectedPrintRestaurant = printing.printRestaurants.find(
+    (restaurant) => restaurant.id === printing.activeRestaurantId,
+  )
 
   useEffect(() => {
     if (location.hash) {
@@ -745,7 +748,11 @@ export function AppLayout() {
           onSettingsChange={printing.updateSettings}
           onRefreshPrintJobs={() => void printing.refreshPrintJobs(true)}
           onRetryPrintJob={(jobId) => void printing.retryQueuedPrint(jobId)}
-          onPrintTestTicket={() => void printing.printTestTicket('Selected restaurant')}
+          onPrintTestTicket={() => void printing.printTestTicket(selectedPrintRestaurant?.name ?? 'DineFlow')}
+          showPrintRestaurantSelector={printing.isPlatformOwner}
+          printRestaurants={printing.printRestaurants}
+          activePrintRestaurantId={printing.activeRestaurantId}
+          onPrintRestaurantChange={printing.setPlatformRestaurantId}
         />
       ) : null}
 

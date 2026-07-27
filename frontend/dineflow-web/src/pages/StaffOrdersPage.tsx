@@ -496,6 +496,17 @@ export function StaffOrdersPage() {
             </Button>
           </div>
         </CardHeader>
+        {isPlatformOwner && !printing.activeRestaurantId ? (
+          <div className="mx-6 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
+            <span className="flex items-center gap-2 text-sm">
+              <AlertCircle className="size-4 shrink-0" />
+              Automatic printing is paused because this print station is not assigned to a restaurant.
+            </span>
+            <Button type="button" variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
+              Choose print restaurant
+            </Button>
+          </div>
+        ) : null}
         {printJobs.failedCount + printJobs.deadLetterCount > 0 ? (
           <div className="mx-6 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-destructive">
             <span className="flex items-center gap-2 text-sm">
@@ -1077,6 +1088,10 @@ export function PrinterSettingsDialog({
   onRefreshPrintJobs,
   onRetryPrintJob,
   onPrintTestTicket,
+  showPrintRestaurantSelector = false,
+  printRestaurants = [],
+  activePrintRestaurantId,
+  onPrintRestaurantChange,
 }: {
   open: boolean
   settings: ThermalPrinterSettings
@@ -1087,6 +1102,10 @@ export function PrinterSettingsDialog({
   onRefreshPrintJobs: () => void
   onRetryPrintJob: (jobId: string) => void
   onPrintTestTicket: () => void
+  showPrintRestaurantSelector?: boolean
+  printRestaurants?: Restaurant[]
+  activePrintRestaurantId?: string
+  onPrintRestaurantChange?: (restaurantId: string) => void
 }) {
   const [qzStatus, setQzStatus] = useState<QzTrayConnectionStatus | 'checking' | 'unknown'>('unknown')
   const [qzVersion, setQzVersion] = useState<string | null>(null)
@@ -1659,6 +1678,35 @@ export function PrinterSettingsDialog({
         </DialogHeader>
 
         <div className="staff-printer-settings">
+          {showPrintRestaurantSelector ? (
+            <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
+              <div className="staff-printer-field">
+                <span>Print restaurant</span>
+                <Select
+                  value={activePrintRestaurantId}
+                  onValueChange={(restaurantId) => onPrintRestaurantChange?.(restaurantId)}
+                >
+                  <SelectTrigger aria-label="Restaurant used for automatic printing">
+                    <SelectValue placeholder="Select a restaurant" />
+                  </SelectTrigger>
+                  <SelectContent position="popper">
+                    {printRestaurants.map((restaurant) => (
+                      <SelectItem key={restaurant.id} value={restaurant.id}>
+                        {restaurant.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {!activePrintRestaurantId ? (
+                <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2.5 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
+                  <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
+                  Select the restaurant served by this printer before enabling automatic printing.
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="staff-printer-grid">
             <div className="staff-printer-field">
               <span>Route</span>
@@ -1756,6 +1804,7 @@ export function PrinterSettingsDialog({
                       size="sm"
                       aria-label="Auto-print new orders"
                       checked={settings.autoPrintNewOrders}
+                      disabled={showPrintRestaurantSelector && !activePrintRestaurantId}
                       onCheckedChange={(checked) => onSettingsChange({ autoPrintNewOrders: checked })}
                     />
                   </label>

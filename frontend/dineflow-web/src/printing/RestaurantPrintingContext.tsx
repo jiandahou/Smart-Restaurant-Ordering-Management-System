@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from 'react'
 import { toast } from 'sonner'
-import type { AdminOrder } from '@/api/auth'
+import { getRestaurants, type AdminOrder, type Restaurant } from '@/api/auth'
 import {
   claimPrintJobs,
   getPrintJobs,
@@ -147,7 +147,9 @@ type RestaurantPrintingContextValue = {
   printStationLeaseHeld: boolean
   printingOrderId: string | null
   orderEventRevision: number
+  isPlatformOwner: boolean
   activeRestaurantId?: string
+  printRestaurants: Restaurant[]
   setPlatformRestaurantId: (restaurantId?: string) => void
   refreshPrintJobs: (showError?: boolean) => Promise<void>
   retryQueuedPrint: (jobId: string) => Promise<void>
@@ -164,6 +166,7 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
   const [platformRestaurantId, setPlatformRestaurantIdState] = useState<string | undefined>(
     readPlatformRestaurantId,
   )
+  const [printRestaurants, setPrintRestaurants] = useState<Restaurant[]>([])
   const activeRestaurantId = user?.restaurantId
     ?? (isPlatformOwner ? platformRestaurantId : undefined)
 
@@ -202,6 +205,25 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
       // A platform owner can select the restaurant again when storage is unavailable.
     }
   }, [])
+
+  useEffect(() => {
+    if (!isPlatformOwner) return
+    let cancelled = false
+
+    void getRestaurants()
+      .then((restaurants) => {
+        if (!cancelled) setPrintRestaurants(restaurants)
+      })
+      .catch((error) => {
+        recordPrinterDiagnostic('global_print_restaurants_load_failed', {
+          message: error instanceof Error ? error.message : String(error),
+        })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [isPlatformOwner])
 
   useEffect(() => {
     audioEnabledRef.current = audioEnabled
@@ -724,7 +746,9 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
     printStationLeaseHeld,
     printingOrderId,
     orderEventRevision,
+    isPlatformOwner,
     activeRestaurantId,
+    printRestaurants,
     setPlatformRestaurantId,
     refreshPrintJobs,
     retryQueuedPrint,
@@ -733,10 +757,12 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
   }), [
     activeRestaurantId,
     audioEnabled,
+    isPlatformOwner,
     orderEventRevision,
     printJobs,
     printJobsLoading,
     printOrder,
+    printRestaurants,
     printStationLeaseHeld,
     printTestTicket,
     printingOrderId,
