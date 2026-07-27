@@ -160,10 +160,11 @@ public sealed class RestaurantOperatingHoursService
                     return false;
                 }
 
-                if (string.Equals(window.OpensAt, window.ClosesAt, StringComparison.Ordinal))
+                if (string.Equals(window.OpensAt, window.ClosesAt, StringComparison.Ordinal)
+                    && !IsFullDayWindow(window))
                 {
                     openingHours = [];
-                    error = "Opening and closing times cannot be the same.";
+                    error = "Opening and closing times cannot be the same, except 00:00 to 00:00 for 24 hours.";
                     return false;
                 }
             }
@@ -393,10 +394,11 @@ public sealed class RestaurantOperatingHoursService
                     return false;
                 }
 
-                if (string.Equals(window.OpensAt, window.ClosesAt, StringComparison.Ordinal))
+                if (string.Equals(window.OpensAt, window.ClosesAt, StringComparison.Ordinal)
+                    && !IsFullDayWindow(window))
                 {
                     specialOpeningDays = [];
-                    error = "Special day opening and closing times cannot be the same.";
+                    error = "Special day opening and closing times cannot be the same, except 00:00 to 00:00 for 24 hours.";
                     return false;
                 }
             }
@@ -468,6 +470,11 @@ public sealed class RestaurantOperatingHoursService
 
     private static bool IsWindowActiveFromOpeningDay(RestaurantOpeningHoursWindow window, TimeOnly localTime)
     {
+        if (IsFullDayWindow(window))
+        {
+            return true;
+        }
+
         var opensAt = ParseTime(window.OpensAt);
         var closesAt = ParseTime(window.ClosesAt);
 
@@ -478,9 +485,20 @@ public sealed class RestaurantOperatingHoursService
 
     private static bool IsOvernightCarryoverActive(RestaurantOpeningHoursWindow window, TimeOnly localTime)
     {
+        if (IsFullDayWindow(window))
+        {
+            return false;
+        }
+
         var opensAt = ParseTime(window.OpensAt);
         var closesAt = ParseTime(window.ClosesAt);
         return closesAt <= opensAt && localTime < closesAt;
+    }
+
+    private static bool IsFullDayWindow(RestaurantOpeningHoursWindow window)
+    {
+        return string.Equals(window.OpensAt, "00:00", StringComparison.Ordinal)
+            && string.Equals(window.ClosesAt, "00:00", StringComparison.Ordinal);
     }
 
     private static bool HasOverlappingWindows(IReadOnlyList<RestaurantOpeningHoursWindow> windows)

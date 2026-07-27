@@ -1987,6 +1987,12 @@
   border-radius: 8px;
 }
 
+.opening-hours-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 .restaurant-details-dialog {
   max-width: min(600px, calc(100% - 32px));
 }

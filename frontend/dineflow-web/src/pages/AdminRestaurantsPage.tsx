@@ -105,12 +105,16 @@ const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/
 
 const maximumOpeningWindowsPerDay = 4
 
+function isFullDayOpeningWindow(value: { opensAt: string; closesAt: string }) {
+  return value.opensAt === '00:00' && value.closesAt === '00:00'
+}
+
 const openingHoursWindowSchema = z.object({
   opensAt: z.string().regex(timePattern, 'Use HH:mm time.'),
   closesAt: z.string().regex(timePattern, 'Use HH:mm time.'),
-}).refine((value) => value.opensAt !== value.closesAt, {
+}).refine((value) => value.opensAt !== value.closesAt || isFullDayOpeningWindow(value), {
   path: ['closesAt'],
-  message: 'Closing time must differ from opening time.',
+  message: 'Closing time must differ from opening time, except 00:00 to 00:00 for 24 hours.',
 })
 
 const openingHoursDaySchema = z.object({
@@ -213,6 +217,17 @@ function createDefaultOpeningWindow(): OpeningHoursWindow {
     opensAt: '09:00',
     closesAt: '21:00',
   }
+}
+
+function createFullDayOpeningWindow(): OpeningHoursWindow {
+  return {
+    opensAt: '00:00',
+    closesAt: '00:00',
+  }
+}
+
+function isFullDayOpeningSchedule(windows: OpeningHoursWindow[]) {
+  return windows.length === 1 && isFullDayOpeningWindow(windows[0])
 }
 
 function createSuggestedOpeningWindow(existingWindows: OpeningHoursWindow[]): OpeningHoursWindow {
@@ -953,62 +968,87 @@ function OpeningHoursEditor({
 
   return (
     <div className="opening-hours-editor">
-      {normalizedValue.map((day) => (
-        <div key={day.dayOfWeek} className="opening-hours-row">
-          <div className="opening-hours-day">
-            <Switch
-              checked={day.isOpen}
-              onCheckedChange={(checked) => updateDay(day.dayOfWeek, { isOpen: checked })}
-              aria-label={`${dayLabels[day.dayOfWeek]} open`}
-            />
-            <span>{dayLabels[day.dayOfWeek]}</span>
-            <small>{day.isOpen ? `${day.windows.length} segment${day.windows.length === 1 ? '' : 's'}` : 'Closed'}</small>
-          </div>
-          <div className="opening-hours-windows">
-            {day.windows.map((window, windowIndex) => (
-              <div key={`${day.dayOfWeek}-${windowIndex}`} className="opening-hours-window">
-                <Input
-                  type="time"
-                  value={window.opensAt}
-                  disabled={!day.isOpen}
-                  aria-label={`${dayLabels[day.dayOfWeek]} segment ${windowIndex + 1} opening time`}
-                  onChange={(event) => updateWindow(day.dayOfWeek, windowIndex, { opensAt: event.target.value })}
-                />
-                <span>to</span>
-                <Input
-                  type="time"
-                  value={window.closesAt}
-                  disabled={!day.isOpen}
-                  aria-label={`${dayLabels[day.dayOfWeek]} segment ${windowIndex + 1} closing time`}
-                  onChange={(event) => updateWindow(day.dayOfWeek, windowIndex, { closesAt: event.target.value })}
-                />
+      {normalizedValue.map((day) => {
+        const isOpenAllDay = day.isOpen && isFullDayOpeningSchedule(day.windows)
+
+        return (
+          <div key={day.dayOfWeek} className="opening-hours-row">
+            <div className="opening-hours-day">
+              <Switch
+                checked={day.isOpen}
+                onCheckedChange={(checked) => updateDay(day.dayOfWeek, { isOpen: checked })}
+                aria-label={`${dayLabels[day.dayOfWeek]} open`}
+              />
+              <span>{dayLabels[day.dayOfWeek]}</span>
+              <small>
+                {day.isOpen
+                  ? isOpenAllDay
+                    ? 'Open 24 hours'
+                    : `${day.windows.length} segment${day.windows.length === 1 ? '' : 's'}`
+                  : 'Closed'}
+              </small>
+            </div>
+            <div className="opening-hours-windows">
+              {day.windows.map((window, windowIndex) => (
+                <div key={`${day.dayOfWeek}-${windowIndex}`} className="opening-hours-window">
+                  <Input
+                    type="time"
+                    value={window.opensAt}
+                    disabled={!day.isOpen}
+                    aria-label={`${dayLabels[day.dayOfWeek]} segment ${windowIndex + 1} opening time`}
+                    onChange={(event) => updateWindow(day.dayOfWeek, windowIndex, { opensAt: event.target.value })}
+                  />
+                  <span>to</span>
+                  <Input
+                    type="time"
+                    value={window.closesAt}
+                    disabled={!day.isOpen}
+                    aria-label={`${dayLabels[day.dayOfWeek]} segment ${windowIndex + 1} closing time`}
+                    onChange={(event) => updateWindow(day.dayOfWeek, windowIndex, { closesAt: event.target.value })}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="opening-hours-remove-window"
+                    disabled={!day.isOpen || day.windows.length <= 1}
+                    aria-label={`Remove ${dayLabels[day.dayOfWeek]} segment ${windowIndex + 1}`}
+                    onClick={() => removeWindow(day.dayOfWeek, windowIndex)}
+                  >
+                    <Trash2 size={14} />
+                  </Button>
+                </div>
+              ))}
+              <div className="opening-hours-actions">
                 <Button
                   type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="opening-hours-remove-window"
-                  disabled={!day.isOpen || day.windows.length <= 1}
-                  aria-label={`Remove ${dayLabels[day.dayOfWeek]} segment ${windowIndex + 1}`}
-                  onClick={() => removeWindow(day.dayOfWeek, windowIndex)}
+                  variant={isOpenAllDay ? 'secondary' : 'outline'}
+                  size="sm"
+                  className="opening-hours-add-window"
+                  disabled={!day.isOpen}
+                  aria-pressed={isOpenAllDay}
+                  onClick={() => updateDay(day.dayOfWeek, {
+                    windows: [isOpenAllDay ? createDefaultOpeningWindow() : createFullDayOpeningWindow()],
+                  })}
                 >
-                  <Trash2 size={14} />
+                  24 hours
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="opening-hours-add-window"
+                  disabled={!day.isOpen || isOpenAllDay || day.windows.length >= maximumOpeningWindowsPerDay}
+                  onClick={() => addWindow(day.dayOfWeek)}
+                >
+                  <Plus size={14} />
+                  Add segment
                 </Button>
               </div>
-            ))}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="opening-hours-add-window"
-              disabled={!day.isOpen || day.windows.length >= maximumOpeningWindowsPerDay}
-              onClick={() => addWindow(day.dayOfWeek)}
-            >
-              <Plus size={14} />
-              Add segment
-            </Button>
+            </div>
           </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
@@ -1023,6 +1063,7 @@ function OpeningWindowsEditor({
   onChange: (windows: OpeningHoursWindow[]) => void
 }) {
   const safeWindows = windows.length > 0 ? windows : [createDefaultOpeningWindow()]
+  const isOpenAllDay = isFullDayOpeningSchedule(safeWindows)
 
   const updateWindow = (windowIndex: number, patch: Partial<OpeningHoursWindow>) => {
     onChange(safeWindows.map((window, index) => (index === windowIndex ? { ...window, ...patch } : window)))
@@ -1076,17 +1117,32 @@ function OpeningWindowsEditor({
           </Button>
         </div>
       ))}
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="opening-hours-add-window"
-        disabled={disabled || safeWindows.length >= maximumOpeningWindowsPerDay}
-        onClick={addWindow}
-      >
-        <Plus size={14} />
-        Add segment
-      </Button>
+      <div className="opening-hours-actions">
+        <Button
+          type="button"
+          variant={isOpenAllDay ? 'secondary' : 'outline'}
+          size="sm"
+          className="opening-hours-add-window"
+          disabled={disabled}
+          aria-pressed={isOpenAllDay}
+          onClick={() => onChange([
+            isOpenAllDay ? createDefaultOpeningWindow() : createFullDayOpeningWindow(),
+          ])}
+        >
+          24 hours
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="opening-hours-add-window"
+          disabled={disabled || isOpenAllDay || safeWindows.length >= maximumOpeningWindowsPerDay}
+          onClick={addWindow}
+        >
+          <Plus size={14} />
+          Add segment
+        </Button>
+      </div>
     </div>
   )
 }
