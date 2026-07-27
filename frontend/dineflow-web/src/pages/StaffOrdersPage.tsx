@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertCircle, Bluetooth, Cable, CheckCircle2, ChefHat, CircleHelp, Clock3, Copy, CreditCard, Download, ListChecks, Printer, RefreshCw, Search, Settings2, ShieldCheck, ShieldOff, ShoppingBag, Trash2, Usb, Utensils, Volume2, VolumeX, X } from 'lucide-react'
+import { AlertCircle, Bluetooth, Cable, CheckCircle2, ChefHat, CircleHelp, Clock3, Copy, CreditCard, Download, ListChecks, Printer, RefreshCw, Search, ShieldCheck, ShieldOff, ShoppingBag, Trash2, Usb, Utensils, X } from 'lucide-react'
 import { motion } from 'motion/react'
 import { toast } from 'sonner'
 import {
@@ -12,15 +12,7 @@ import {
   type OrderTransitionAction,
   type Restaurant,
 } from '@/api/auth'
-import {
-  claimPrintJobs,
-  getPrintJobs,
-  requestOrderReprint,
-  retryPrintJob,
-  updatePrintJobStatus,
-  upsertPrintStation,
-  type PrintJobList,
-} from '@/api/printing'
+import type { PrintJobList } from '@/api/printing'
 import { useAuth } from '@/auth/AuthContext'
 import { OrderStatusBadge } from '@/components/orders/OrderStatusBadge'
 import { OrderTransitionReasonField } from '@/components/orders/OrderTransitionReasonField'
@@ -41,26 +33,13 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import {
-  markOrderPrinted,
-  setAutoPrintEnabled,
-} from '@/lib/autoPrintLedger'
 import { getBackgroundBrowserGuidance } from '@/lib/backgroundBrowser'
-import {
-  getPrintStationIdentity,
-  hasPrintJobTransportReceipt,
-  markPrintJobTransportAccepted,
-  withPrintStationLeadership,
-} from '@/lib/printStation'
 import { downloadPrinterDiagnostics, recordPrinterDiagnostic } from '@/lib/printerDiagnostics'
-import { createOrderRealtimeClient, type OrderRealtimeUpdate } from '@/realtime/orderConnection'
+import { useRestaurantPrinting } from '@/printing/RestaurantPrintingContext'
 import {
   canManageQzTrustCertificate,
   checkQzPrinterHealth,
   clearQzPrinterQueue,
-  closeQzNetworkSockets,
-  closeQzSerialPorts,
-  createKitchenTicket,
   defaultThermalPrinterSettings,
   detectWebUsbPrinter,
   downloadQzTrustCertificate,
@@ -76,21 +55,10 @@ import {
   probeQzNetworkPrinter,
   removeQzTrustCertificate,
   selectWebSerialPort,
-  printKitchenTicketWithQzTray,
-  printKitchenTicketWithWebBluetooth,
-  printKitchenTicketWithWebSerial,
-  printKitchenTicketWithWebUsb,
   selectWebBluetoothPrinter,
   probeQzTrayStatus,
   QZ_TRAY_DOWNLOAD_URL,
   QzTrayError,
-  readStoredThermalPrinterSettings,
-  releaseWebSerialSession,
-  startQzKeepAlive,
-  startWebSerialKeepAlive,
-  stopQzKeepAlive,
-  stopWebSerialKeepAlive,
-  storeThermalPrinterSettings,
   subscribeQzTrayConnectionStatus,
   testQzSerialConnection,
   testWebSerialConnection,
@@ -98,7 +66,6 @@ import {
   type QzTargetType,
   type QzPrintEncoding,
   type QzTrayConnectionStatus,
-  type QzTrayErrorReason,
   type QzTrayPrinterDescriptor,
   type ThermalPaperWidth,
   type ThermalPrinterMode,
@@ -116,8 +83,6 @@ type PrintTicketRequest = {
   requestedAt: number
 }
 type ConnectionTestStatus = 'untested' | 'testing' | 'succeeded' | 'failed'
-
-const autoPrintPollIntervalMs = 5_000
 
 const sortRequests: Record<SortOption, { sortBy: string; sortDirection: 'asc' | 'desc' }> = {
   oldest: { sortBy: 'createdAt', sortDirection: 'asc' },
@@ -172,36 +137,6 @@ const printerModeLabels: Record<ThermalPrinterMode, string> = {
   'web-serial': 'Web Serial',
   'web-usb': 'WebUSB',
   'web-bluetooth': 'Web Bluetooth',
-}
-
-// Maps a typed QZ Tray failure to staff-friendly guidance. `offerDownload` adds a
-// one-click link to the QZ Tray installer for the cases the user can fix by installing/launching it.
-const qzErrorGuidance: Record<QzTrayErrorReason, { title: string; description: string; offerDownload: boolean }> = {
-  'not-loaded': {
-    title: 'QZ Tray could not start',
-    description: 'The QZ Tray helper failed to load. Reload the page, or install QZ Tray if you have not yet.',
-    offerDownload: true,
-  },
-  'not-running': {
-    title: 'QZ Tray is not running',
-    description: 'Install the QZ Tray desktop app and make sure it is running, then print again.',
-    offerDownload: true,
-  },
-  'no-printer': {
-    title: 'No QZ Tray printer selected',
-    description: 'Pick a printer, enter a network printer IP, or choose a serial port in Kitchen printer settings before printing.',
-    offerDownload: false,
-  },
-  'printer-unavailable': {
-    title: 'Printer is not ready — ticket not queued',
-    description: 'Check power, paper and cover. If old jobs piled up while it was down, use Clear queue in printer settings, then print again.',
-    offerDownload: false,
-  },
-  'print-failed': {
-    title: 'QZ Tray could not print',
-    description: 'The printer rejected the job. Check the printer name and that the device is online.',
-    offerDownload: false,
-  },
 }
 
 const orderTypeLabels: Record<AdminOrder['orderType'], string> = {
@@ -299,42 +234,15 @@ function getOrderSignal(order: AdminOrder, now: Date): {
   return { label: 'Review order', tone: 'neutral', isLate }
 }
 
-function playNewOrderSound(ctx: AudioContext): void {
-  const now = ctx.currentTime
-
-  // First tone: C6 (1047 Hz)
-  const osc1 = ctx.createOscillator()
-  const gain1 = ctx.createGain()
-  osc1.connect(gain1)
-  gain1.connect(ctx.destination)
-  osc1.type = 'sine'
-  osc1.frequency.setValueAtTime(1046.5, now)
-  gain1.gain.setValueAtTime(0, now)
-  gain1.gain.linearRampToValueAtTime(0.42, now + 0.012)
-  gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.28)
-  osc1.start(now)
-  osc1.stop(now + 0.3)
-
-  // Second tone: E6 (1319 Hz), offset 220 ms
-  const osc2 = ctx.createOscillator()
-  const gain2 = ctx.createGain()
-  osc2.connect(gain2)
-  gain2.connect(ctx.destination)
-  osc2.type = 'sine'
-  osc2.frequency.setValueAtTime(1318.5, now + 0.22)
-  gain2.gain.setValueAtTime(0, now + 0.22)
-  gain2.gain.linearRampToValueAtTime(0.42, now + 0.232)
-  gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.65)
-  osc2.start(now + 0.22)
-  osc2.stop(now + 0.65)
-}
-
 export function StaffOrdersPage() {
   const { user } = useAuth()
+  const printing = useRestaurantPrinting()
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
   const [orders, setOrders] = useState<AdminOrder[]>([])
   const [restaurants, setRestaurants] = useState<Restaurant[]>([])
-  const [restaurantFilter, setRestaurantFilter] = useState('all')
+  const [restaurantFilter, setRestaurantFilter] = useState(
+    () => printing.activeRestaurantId ?? 'all',
+  )
   const [sortOption, setSortOption] = useState<SortOption>('newest')
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -350,93 +258,17 @@ export function StaffOrdersPage() {
   } | null>(null)
   const [reason, setReason] = useState('')
   const loadOrdersRef = useRef<() => Promise<void>>(() => Promise.resolve())
-  const autoPrintSweepRef = useRef<((orders: AdminOrder[]) => Promise<void>) | null>(null)
-  const restaurantFilterRef = useRef(restaurantFilter)
-  const isPlatformOwnerRef = useRef(isPlatformOwner)
-  const realtimeRefreshTimerRef = useRef<number | null>(null)
-  const [audioEnabled, setAudioEnabled] = useState(true)
-  const audioEnabledRef = useRef(true)
-  const audioContextRef = useRef<AudioContext | null>(null)
   const [printTicket, setPrintTicket] = useState<PrintTicketRequest | null>(null)
-  const [printerSettingsOpen, setPrinterSettingsOpen] = useState(false)
-  const [printerSettings, setPrinterSettings] = useState<ThermalPrinterSettings>(() => readStoredThermalPrinterSettings())
-  const printerSettingsRef = useRef(printerSettings)
-  const [printingOrderId, setPrintingOrderId] = useState<string | null>(null)
-  const printStationIdentityRef = useRef(getPrintStationIdentity())
-  const [printJobs, setPrintJobs] = useState<PrintJobList>({
-    jobs: [],
-    pendingCount: 0,
-    failedCount: 0,
-    deadLetterCount: 0,
-  })
-  const [printJobsLoading, setPrintJobsLoading] = useState(false)
-  const [printStationLeaseHeld, setPrintStationLeaseHeld] = useState(false)
-  const lastPrintErrorRef = useRef<string | null>(null)
-  const printDispatchChainRef = useRef<Promise<void>>(Promise.resolve())
-
-  useEffect(() => {
-    audioEnabledRef.current = audioEnabled
-  }, [audioEnabled])
-
-  useEffect(() => {
-    storeThermalPrinterSettings(printerSettings)
-  }, [printerSettings])
-
-  // Keep the QZ Tray websocket (or the Web Serial port) warm so it never
-  // idle-drops. Network (9100) printers are deliberately NOT kept warm with
-  // background traffic here — that was tried and made real prints go missing
-  // more often on this hardware (see enqueueNetworkPrint in thermalPrinter.ts);
-  // reliability for that route now comes from strict one-at-a-time queuing
-  // instead.
-  useEffect(() => {
-    stopQzKeepAlive()
-    stopWebSerialKeepAlive()
-
-    if (printerSettings.mode === 'qz-tray') {
-      startQzKeepAlive()
-      return () => stopQzKeepAlive()
-    }
-    if (printerSettings.mode === 'web-serial') {
-      startWebSerialKeepAlive(() => printerSettingsRef.current.serialBaudRate || 9600)
-      return () => stopWebSerialKeepAlive()
-    }
-  }, [printerSettings.mode])
-
-  // A COM port allows only one holder at a time. Release the port held by
-  // whichever route is NOT active so the active route can open it — otherwise
-  // switching between Web Serial and QZ serial fails with a "port busy" error.
-  useEffect(() => {
-    const usingQzSerial = printerSettings.mode === 'qz-tray' && printerSettings.qzTargetType === 'serial'
-    const usingQzNetwork = printerSettings.mode === 'qz-tray' && printerSettings.qzTargetType === 'network'
-    if (printerSettings.mode !== 'web-serial') {
-      void releaseWebSerialSession()
-    }
-    if (!usingQzSerial) {
-      void closeQzSerialPorts()
-    }
-    if (!usingQzNetwork) {
-      void closeQzNetworkSockets()
-    }
-  }, [printerSettings.mode, printerSettings.qzTargetType])
-
-  // QZ applies encoding/serial options when the raw transport opens. Reopen the
-  // handle after those settings change so the next test/print uses the new
-  // values instead of silently reusing an old connection configuration.
-  useEffect(() => {
-    if (printerSettings.qzTargetType === 'serial') {
-      void closeQzSerialPorts()
-    }
-    if (printerSettings.qzTargetType === 'network') {
-      void closeQzNetworkSockets()
-    }
-  }, [
-    printerSettings.qzEncoding,
-    printerSettings.qzNetworkHost,
-    printerSettings.qzNetworkPort,
-    printerSettings.qzSerialPort,
-    printerSettings.qzTargetType,
-    printerSettings.serialBaudRate,
-  ])
+  const {
+    settings: printerSettings,
+    printingOrderId,
+    printJobs,
+    printStationLeaseHeld,
+    orderEventRevision,
+    printOrder,
+    setSettingsOpen,
+    setPlatformRestaurantId,
+  } = printing
 
   useEffect(() => {
     if (!printTicket) return
@@ -457,22 +289,6 @@ export function StaffOrdersPage() {
     }
   }, [printTicket])
 
-  // Auto-create AudioContext on mount; resume on first user gesture (browser autoplay policy)
-  useEffect(() => {
-    try {
-      audioContextRef.current = new AudioContext()
-    } catch {
-      return
-    }
-    const resume = () => {
-      if (audioContextRef.current?.state === 'suspended') {
-        void audioContextRef.current.resume()
-      }
-    }
-    window.addEventListener('pointerdown', resume, { once: true })
-    return () => window.removeEventListener('pointerdown', resume)
-  }, [])
-
   const loadOrders = useCallback(async (showToast = false) => {
     try {
       setError(null)
@@ -490,12 +306,7 @@ export function StaffOrdersPage() {
         ? await getAdminOrders(request)
         : await getStaffOrders(request)
       setOrders(response.items)
-      ordersRef.current = response.items
       setLastUpdated(new Date())
-      // Drive auto-print from the refreshed list (realtime or the 15s poll), so a
-      // missed SignalR event cannot drop a ticket. Via ref because the sweep is
-      // defined later in the component body.
-      void autoPrintSweepRef.current?.(response.items)
       if (showToast) toast.success('Staff order queue refreshed')
     } catch (loadError) {
       const message = loadError instanceof Error ? loadError.message : 'Could not load orders.'
@@ -511,11 +322,6 @@ export function StaffOrdersPage() {
   }, [loadOrders])
 
   useEffect(() => {
-    restaurantFilterRef.current = restaurantFilter
-    isPlatformOwnerRef.current = isPlatformOwner
-  }, [isPlatformOwner, restaurantFilter])
-
-  useEffect(() => {
     const timer = window.setTimeout(() => {
       setDebouncedSearch(search.trim())
     }, 250)
@@ -523,340 +329,14 @@ export function StaffOrdersPage() {
     return () => window.clearTimeout(timer)
   }, [search])
 
-  const shouldHandleRealtimeUpdate = useCallback((update: OrderRealtimeUpdate) => {
-    if (!isPlatformOwnerRef.current) {
-      return true
-    }
-
-    const activeRestaurantFilter = restaurantFilterRef.current
-    return activeRestaurantFilter === 'all' || update.restaurantId === activeRestaurantFilter
-  }, [])
-
-  const scheduleRealtimeRefresh = useCallback(() => {
-    if (realtimeRefreshTimerRef.current !== null) {
-      window.clearTimeout(realtimeRefreshTimerRef.current)
-    }
-
-    realtimeRefreshTimerRef.current = window.setTimeout(() => {
-      realtimeRefreshTimerRef.current = null
-      void loadOrdersRef.current()
-    }, 300)
-  }, [])
-
-  const toggleAudio = useCallback(async () => {
-    if (audioEnabled) {
-      setAudioEnabled(false)
-      return
-    }
-
-    if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContext()
-    } else if (audioContextRef.current.state === 'suspended') {
-      await audioContextRef.current.resume()
-    }
-
-    setAudioEnabled(true)
-    playNewOrderSound(audioContextRef.current)
-  }, [audioEnabled])
-
-  const updatePrinterSettings = useCallback((updates: Partial<ThermalPrinterSettings>) => {
-    const current = printerSettingsRef.current
-    if (
-      typeof updates.autoPrintNewOrders === 'boolean'
-      && updates.autoPrintNewOrders !== current.autoPrintNewOrders
-    ) {
-      setAutoPrintEnabled(updates.autoPrintNewOrders)
-      recordPrinterDiagnostic('auto_print_toggled', { enabled: updates.autoPrintNewOrders })
-    }
-
-    const next = { ...current, ...updates }
-    printerSettingsRef.current = next
-    setPrinterSettings(next)
-  }, [])
-
-  const printOrderTicket = useCallback(async (order: AdminOrder): Promise<boolean> => {
-    const printedAt = new Date()
-
-    if (printerSettings.mode === 'browser') {
-      setPrintTicket({ order, requestedAt: printedAt.getTime() })
-      return true
-    }
-
-    const ticket = createKitchenTicket(order, printedAt)
-    setPrintingOrderId(order.id)
-
-    try {
-      lastPrintErrorRef.current = null
-      if (printerSettings.mode === 'qz-tray') {
-        await printKitchenTicketWithQzTray(ticket, printerSettings)
-      } else if (printerSettings.mode === 'web-serial') {
-        await printKitchenTicketWithWebSerial(ticket, printerSettings)
-      } else if (printerSettings.mode === 'web-usb') {
-        await printKitchenTicketWithWebUsb(ticket, printerSettings)
-      } else if (printerSettings.mode === 'web-bluetooth') {
-        await printKitchenTicketWithWebBluetooth(ticket, printerSettings)
-      }
-
-      toast.success('Kitchen ticket sent', {
-        description: `${order.orderNumber} via ${printerModeLabels[printerSettings.mode]}.`,
-      })
-      markOrderPrinted(order.id, printedAt)
-      autoPrintedOrderIdsRef.current.add(order.id)
-      recordPrinterDiagnostic('hardware_print_succeeded', {
-        orderId: order.id,
-        orderNumber: order.orderNumber,
-        mode: printerSettings.mode,
-        target: printerSettings.mode === 'qz-tray' ? printerSettings.qzTargetType : printerSettings.mode,
-        durationMs: Date.now() - printedAt.getTime(),
-      })
-      return true
-    } catch (printError) {
-      lastPrintErrorRef.current = printError instanceof Error ? printError.message : String(printError)
-      recordPrinterDiagnostic('hardware_print_failed', {
-        orderId: order.id,
-        orderNumber: order.orderNumber,
-        mode: printerSettings.mode,
-        target: printerSettings.mode === 'qz-tray' ? printerSettings.qzTargetType : printerSettings.mode,
-        reason: printError instanceof QzTrayError ? printError.reason : 'unknown',
-        message: printError instanceof Error ? printError.message : String(printError),
-        durationMs: Date.now() - printedAt.getTime(),
-      })
-      if (printError instanceof QzTrayError) {
-        const guidance = qzErrorGuidance[printError.reason]
-        toast.error(guidance.title, {
-          // Prefer the error's own message: it is crafted per connection type
-          // (system printer / network / serial) and is more specific than the
-          // canned guidance, which is fallback for reasons without a message.
-          description: printError.message || guidance.description,
-          ...(guidance.offerDownload
-            ? {
-                action: {
-                  label: 'Download QZ Tray',
-                  onClick: () => window.open(QZ_TRAY_DOWNLOAD_URL, '_blank', 'noopener,noreferrer'),
-                },
-              }
-            : {}),
-        })
-      } else {
-        toast.error('Kitchen ticket could not be printed', {
-          description: printError instanceof Error ? printError.message : 'The print request failed.',
-        })
-      }
-      return false
-    } finally {
-      setPrintingOrderId(null)
-    }
-  }, [printerSettings])
-
-  // Every source (manual print, automatic print, retry) passes through the same
-  // in-page FIFO. QZ/COM devices are single-writer transports; overlapping sends
-  // are a common cause of truncated tickets and "port busy" failures.
-  const dispatchOrderTicket = useCallback((order: AdminOrder): Promise<boolean> => {
-    const operation = printDispatchChainRef.current
-      .catch(() => undefined)
-      .then(() => printOrderTicket(order))
-    printDispatchChainRef.current = operation.then(() => undefined, () => undefined)
-    return operation
-  }, [printOrderTicket])
-
-  // Latest print handler + settings for realtime callbacks, without rebuilding
-  // the SignalR connection whenever printer settings change.
-  const printOrderTicketRef = useRef(dispatchOrderTicket)
+  const lastOrderEventRevisionRef = useRef(orderEventRevision)
   useEffect(() => {
-    printOrderTicketRef.current = dispatchOrderTicket
-  }, [dispatchOrderTicket])
-
-  useEffect(() => {
-    printerSettingsRef.current = printerSettings
-  }, [printerSettings])
-
-  const autoPrintedOrderIdsRef = useRef<Set<string>>(new Set())
-  const autoPrintNotifiedIdsRef = useRef<Set<string>>(new Set())
-  const ordersRef = useRef<AdminOrder[]>([])
-  const autoPrintSweepRunningRef = useRef(false)
-
-  const activePrintRestaurantId = user?.restaurantId
-    ?? (isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined)
-
-  const refreshPrintJobs = useCallback(async (showError = false) => {
-    if (!activePrintRestaurantId) return
-    setPrintJobsLoading(true)
-    try {
-      setPrintJobs(await getPrintJobs({ restaurantId: activePrintRestaurantId, take: 30 }))
-    } catch (jobsError) {
-      if (showError) {
-        toast.error('Could not load print jobs', {
-          description: jobsError instanceof Error ? jobsError.message : 'The request failed.',
-        })
-      }
-    } finally {
-      setPrintJobsLoading(false)
-    }
-  }, [activePrintRestaurantId])
-
-  // Server-backed auto-print. The server owns the durable queue, retry schedule,
-  // deduplication key, and station lease. Web Locks only avoids needless races
-  // between tabs; a second computer still cannot claim this station's jobs.
-  const runAutoPrintSweep = useCallback(async (force = false) => {
-    const settings = printerSettingsRef.current
-    if (settings.mode !== 'qz-tray' || (!settings.autoPrintNewOrders && !force)) return
-    if (!activePrintRestaurantId) {
-      recordPrinterDiagnostic('auto_print_skipped', {
-        reason: 'restaurant_not_selected',
-        isPlatformOwner,
-      })
-      return
-    }
-    if (autoPrintSweepRunningRef.current) return
-    autoPrintSweepRunningRef.current = true
-
-    try {
-      const identity = printStationIdentityRef.current
-      await withPrintStationLeadership(identity.stationKey, identity.clientInstanceId, async () => {
-        const runtime = await getQzRuntimeInfo().catch(() => ({ connected: false, version: null }))
-        const connectionType = settings.qzTargetType
-        const printerName = settings.qzTargetType === 'printer'
-          ? settings.qzPrinterName
-          : settings.qzTargetType === 'network'
-            ? `${settings.qzNetworkHost}:${settings.qzNetworkPort}`
-            : settings.qzSerialPort
-
-        const station = await upsertPrintStation(identity.stationKey, identity.stationName, {
-          autoPrintEnabled: settings.autoPrintNewOrders,
-          restaurantId: activePrintRestaurantId,
-          clientInstanceId: identity.clientInstanceId,
-          qzStatus: runtime.connected ? 'connected' : 'disconnected',
-          printerStatus: 'unknown',
-          printerName,
-          connectionType,
-          qzVersion: runtime.version ?? undefined,
-          lastError: lastPrintErrorRef.current ?? undefined,
-        })
-        setPrintStationLeaseHeld(station.leaseHeldByAnotherClient)
-        if (station.leaseHeldByAnotherClient) return
-
-        const claimed = await claimPrintJobs({
-          stationKey: identity.stationKey,
-          clientInstanceId: identity.clientInstanceId,
-          restaurantId: activePrintRestaurantId,
-          maxJobs: 5,
-        })
-        setPrintStationLeaseHeld(false)
-        setPrintJobs((current) => ({
-          ...current,
-          pendingCount: claimed.pendingCount,
-          failedCount: claimed.failedCount,
-        }))
-
-        for (const job of claimed.jobs) {
-          if (!job.leaseToken) continue
-          const leaseToken = job.leaseToken
-
-          if (hasPrintJobTransportReceipt(job.id)) {
-            await updatePrintJobStatus(job.id, leaseToken, 'Completed', {
-              detail: 'Recovered a durable client receipt; ticket was already accepted by the print transport.',
-            })
-            recordPrinterDiagnostic('auto_print_job_receipt_recovered', {
-              jobId: job.id,
-              orderId: job.orderId,
-            })
-            continue
-          }
-
-          if (!autoPrintNotifiedIdsRef.current.has(job.orderId)) {
-            autoPrintNotifiedIdsRef.current.add(job.orderId)
-            if (audioEnabledRef.current && audioContextRef.current) {
-              playNewOrderSound(audioContextRef.current)
-            }
-          }
-
-          recordPrinterDiagnostic('auto_print_job_claimed', {
-            jobId: job.id,
-            orderId: job.orderId,
-            orderNumber: job.order.orderNumber,
-            attempt: job.attempts,
-            stationKey: identity.stationKey,
-          })
-
-          await updatePrintJobStatus(job.id, leaseToken, 'Sending', {
-            detail: `${connectionType} send started`,
-          })
-
-          const printed = await printOrderTicketRef.current(job.order)
-          if (printed) {
-            markPrintJobTransportAccepted(job.id)
-            await updatePrintJobStatus(job.id, leaseToken, 'Completed', {
-              detail: `${connectionType} transport accepted the ticket; physical paper output is not confirmed`,
-            })
-            recordPrinterDiagnostic('auto_print_job_completed', {
-              jobId: job.id,
-              orderId: job.orderId,
-              attempt: job.attempts,
-            })
-          } else {
-            await updatePrintJobStatus(job.id, leaseToken, 'Failed', {
-              detail: `${connectionType} send failed`,
-              error: lastPrintErrorRef.current ?? 'The print transport rejected the ticket.',
-            })
-          }
-        }
-      })
-      await refreshPrintJobs()
-    } catch (sweepError) {
-      if (sweepError instanceof Error && /another browser tab or computer|station_lease_held/i.test(sweepError.message)) {
-        setPrintStationLeaseHeld(true)
-      }
-      recordPrinterDiagnostic('auto_print_sweep_failed', {
-        message: sweepError instanceof Error ? sweepError.message : String(sweepError),
-        stationKey: printStationIdentityRef.current.stationKey,
-      })
-    } finally {
-      autoPrintSweepRunningRef.current = false
-    }
-  }, [activePrintRestaurantId, isPlatformOwner, refreshPrintJobs])
-
-  useEffect(() => {
-    autoPrintSweepRef.current = () => runAutoPrintSweep()
-  }, [runAutoPrintSweep])
-
-  useEffect(() => {
-    if (printerSettings.mode === 'qz-tray' && printerSettings.autoPrintNewOrders) {
-      const initialTimer = window.setTimeout(() => void runAutoPrintSweep(), 0)
-      const timer = window.setInterval(() => void runAutoPrintSweep(), autoPrintPollIntervalMs)
-      return () => {
-        window.clearTimeout(initialTimer)
-        window.clearInterval(timer)
-      }
-    }
-  }, [printerSettings.autoPrintNewOrders, printerSettings.mode, runAutoPrintSweep])
-
-  useEffect(() => {
-    if (!activePrintRestaurantId) return
-    const identity = printStationIdentityRef.current
-    void (async () => {
-      const runtime = await getQzRuntimeInfo().catch(() => ({ connected: false, version: null }))
-      await upsertPrintStation(identity.stationKey, identity.stationName, {
-        autoPrintEnabled: printerSettings.mode === 'qz-tray' && printerSettings.autoPrintNewOrders,
-        restaurantId: activePrintRestaurantId,
-        clientInstanceId: identity.clientInstanceId,
-        qzStatus: runtime.connected ? 'connected' : 'disconnected',
-        printerStatus: 'unknown',
-        connectionType: printerSettings.mode === 'qz-tray' ? printerSettings.qzTargetType : printerSettings.mode,
-        qzVersion: runtime.version ?? undefined,
-      })
-      await refreshPrintJobs()
-    })().catch((stationError) => {
-      recordPrinterDiagnostic('print_station_registration_failed', {
-        message: stationError instanceof Error ? stationError.message : String(stationError),
-      })
-    })
-  }, [
-    activePrintRestaurantId,
-    printerSettings.autoPrintNewOrders,
-    printerSettings.mode,
-    printerSettings.qzTargetType,
-    refreshPrintJobs,
-  ])
+    if (lastOrderEventRevisionRef.current === orderEventRevision) return
+    lastOrderEventRevisionRef.current = orderEventRevision
+    setQueue('active')
+    const timer = window.setTimeout(() => void loadOrdersRef.current(), 300)
+    return () => window.clearTimeout(timer)
+  }, [orderEventRevision])
 
   useEffect(() => {
     if (!isPlatformOwner) return
@@ -878,163 +358,6 @@ export function StaffOrdersPage() {
       window.clearInterval(refreshTimer)
     }
   }, [loadOrders])
-
-  useEffect(() => {
-    if (!user) return
-
-    const client = createOrderRealtimeClient({
-      onOrderCreated: (update) => {
-        if (!shouldHandleRealtimeUpdate(update)) {
-          return
-        }
-
-        setQueue('active')
-        toast('New order received', {
-          description: `${update.orderNumber} is waiting in the staff queue.`,
-        })
-        // Refresh fast; the sweep after the refresh handles sound + auto-print
-        // (driven by order state, so it also survives a missed realtime event).
-        scheduleRealtimeRefresh()
-      },
-      onOrderUpdated: (update) => {
-        if (shouldHandleRealtimeUpdate(update)) {
-          scheduleRealtimeRefresh()
-        }
-      },
-      onOrderPaymentUpdated: (update) => {
-        if (shouldHandleRealtimeUpdate(update)) {
-          scheduleRealtimeRefresh()
-        }
-      },
-      onOrderDeleted: (update) => {
-        if (shouldHandleRealtimeUpdate(update)) {
-          scheduleRealtimeRefresh()
-        }
-      },
-      onConnected: () => {
-        recordPrinterDiagnostic('staff_signalr_connected', {
-          visibilityState: document.visibilityState,
-        })
-      },
-      onReconnecting: (realtimeError) => {
-        recordPrinterDiagnostic('staff_signalr_reconnecting', {
-          visibilityState: document.visibilityState,
-          message: realtimeError?.message,
-        })
-      },
-      onReconnected: () => {
-        recordPrinterDiagnostic('staff_signalr_reconnected', {
-          visibilityState: document.visibilityState,
-        })
-        void loadOrdersRef.current()
-      },
-      onClosed: (realtimeError) => {
-        recordPrinterDiagnostic('staff_signalr_closed', {
-          visibilityState: document.visibilityState,
-          message: realtimeError?.message,
-        })
-      },
-    })
-
-    void client.start().catch((realtimeError) => {
-      console.warn('[SignalR] Staff order realtime connection failed.', realtimeError)
-      recordPrinterDiagnostic('staff_signalr_start_failed', {
-        visibilityState: document.visibilityState,
-        message: realtimeError instanceof Error ? realtimeError.message : String(realtimeError),
-      })
-    })
-
-    let hiddenAt = document.hidden ? Date.now() : null
-    let lastRecoveryAt = 0
-
-    const recoverFromBackground = (trigger: string) => {
-      const now = Date.now()
-      if (now - lastRecoveryAt < 1_000) return
-      lastRecoveryAt = now
-
-      const hiddenDurationMs = hiddenAt === null ? null : now - hiddenAt
-      hiddenAt = null
-      recordPrinterDiagnostic('staff_page_recovering', {
-        trigger,
-        hiddenDurationMs,
-        signalRState: client.connection.state,
-        audioState: audioContextRef.current?.state,
-      })
-
-      void (async () => {
-        if (audioContextRef.current?.state === 'suspended') {
-          await audioContextRef.current.resume().catch((audioError) => {
-            recordPrinterDiagnostic('staff_audio_resume_failed', {
-              trigger,
-              message: audioError instanceof Error ? audioError.message : String(audioError),
-            })
-          })
-        }
-
-        await client.start().catch((realtimeError) => {
-          recordPrinterDiagnostic('staff_signalr_resume_failed', {
-            trigger,
-            state: client.connection.state,
-            message: realtimeError instanceof Error ? realtimeError.message : String(realtimeError),
-          })
-        })
-        await loadOrdersRef.current()
-
-        recordPrinterDiagnostic('staff_page_recovered', {
-          trigger,
-          signalRState: client.connection.state,
-          audioState: audioContextRef.current?.state,
-        })
-      })()
-    }
-
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        hiddenAt = Date.now()
-        recordPrinterDiagnostic('staff_page_hidden', {
-          signalRState: client.connection.state,
-          audioState: audioContextRef.current?.state,
-        })
-        return
-      }
-
-      recoverFromBackground('visibilitychange')
-    }
-    const handleFocus = () => {
-      if (!document.hidden) recoverFromBackground('focus')
-    }
-    const handleFreeze = () => {
-      recordPrinterDiagnostic('staff_page_frozen', {
-        hiddenDurationMs: hiddenAt === null ? null : Date.now() - hiddenAt,
-        signalRState: client.connection.state,
-      })
-    }
-    const handleResume = () => recoverFromBackground('resume')
-    const handlePageShow = (event: PageTransitionEvent) => {
-      if (event.persisted) recoverFromBackground('pageshow')
-    }
-
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-    document.addEventListener('freeze', handleFreeze)
-    document.addEventListener('resume', handleResume)
-    window.addEventListener('focus', handleFocus)
-    window.addEventListener('pageshow', handlePageShow)
-
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-      document.removeEventListener('freeze', handleFreeze)
-      document.removeEventListener('resume', handleResume)
-      window.removeEventListener('focus', handleFocus)
-      window.removeEventListener('pageshow', handlePageShow)
-
-      if (realtimeRefreshTimerRef.current !== null) {
-        window.clearTimeout(realtimeRefreshTimerRef.current)
-        realtimeRefreshTimerRef.current = null
-      }
-
-      void client.stop()
-    }
-  }, [scheduleRealtimeRefresh, shouldHandleRealtimeUpdate, user])
 
   const visibleOrders = useMemo(
     () => orders.filter((order) => queueStatuses[queue].has(order.status)),
@@ -1141,107 +464,12 @@ export function StaffOrdersPage() {
     }
   }
 
-  const retryQueuedPrint = useCallback(async (jobId: string) => {
-    try {
-      await retryPrintJob(jobId, 'Retried by staff from the print task centre.')
-      toast.success('Print job queued again')
-      await refreshPrintJobs()
-      void runAutoPrintSweep(true)
-    } catch (retryError) {
-      toast.error('Could not retry print job', {
-        description: retryError instanceof Error ? retryError.message : 'The request failed.',
-      })
-    }
-  }, [refreshPrintJobs, runAutoPrintSweep])
-
   const printOrQueueOrder = useCallback(async (order: AdminOrder) => {
-    if (printerSettings.mode !== 'qz-tray' || !activePrintRestaurantId) {
-      await dispatchOrderTicket(order)
-      return
+    const result = await printOrder(order)
+    if (result === 'browser') {
+      setPrintTicket({ order, requestedAt: Date.now() })
     }
-
-    try {
-      const identity = printStationIdentityRef.current
-      await upsertPrintStation(identity.stationKey, identity.stationName, {
-        autoPrintEnabled: printerSettings.autoPrintNewOrders,
-        restaurantId: activePrintRestaurantId,
-        clientInstanceId: identity.clientInstanceId,
-        qzStatus: isQzTrayConnected() ? 'connected' : 'disconnected',
-        printerStatus: 'unknown',
-        printerName: printerSettings.qzPrinterName || undefined,
-        connectionType: printerSettings.qzTargetType,
-      })
-      await requestOrderReprint(order.id, {
-        stationKey: identity.stationKey,
-        restaurantId: activePrintRestaurantId,
-        reason: 'Manual print requested from the staff order card.',
-      })
-      toast.success('Print job queued', { description: order.orderNumber })
-      await refreshPrintJobs()
-      await runAutoPrintSweep(true)
-    } catch (queueError) {
-      toast.error('Could not queue the print job', {
-        description: queueError instanceof Error ? queueError.message : 'The request failed.',
-      })
-    }
-  }, [
-    activePrintRestaurantId,
-    dispatchOrderTicket,
-    printerSettings.mode,
-    printerSettings.autoPrintNewOrders,
-    printerSettings.qzPrinterName,
-    printerSettings.qzTargetType,
-    refreshPrintJobs,
-    runAutoPrintSweep,
-  ])
-
-  const printTestTicket = useCallback(async () => {
-    const now = new Date()
-    const operation = printDispatchChainRef.current
-      .catch(() => undefined)
-      .then(() => printKitchenTicketWithQzTray({
-        orderNumber: 'TEST-001',
-        restaurantName: restaurantName === 'All restaurants' ? 'DineFlow' : restaurantName,
-        orderScope: 'Printer diagnostics',
-        status: 'TEST',
-        createdAt: now,
-        printedAt: now,
-        itemCount: 2,
-        orderNote: 'English + 中文 encoding check',
-        items: [
-          {
-            quantity: 1,
-            name: 'TEST ITEM / 测试项目',
-            note: 'If this line is readable, encoding is correct.',
-            optionGroups: [{ groupName: 'Connection', options: [printerSettings.qzTargetType] }],
-          },
-          {
-            quantity: 1,
-            name: '0123456789 !@#$%',
-            optionGroups: [],
-          },
-        ],
-      }, printerSettings))
-    printDispatchChainRef.current = operation.then(() => undefined, () => undefined)
-
-    try {
-      await operation
-      toast.success('Test ticket sent')
-      recordPrinterDiagnostic('test_ticket_succeeded', {
-        target: printerSettings.qzTargetType,
-        encoding: printerSettings.qzEncoding,
-      })
-    } catch (testError) {
-      toast.error('Test ticket failed', {
-        description: testError instanceof Error ? testError.message : 'The print request failed.',
-      })
-      recordPrinterDiagnostic('test_ticket_failed', {
-        target: printerSettings.qzTargetType,
-        encoding: printerSettings.qzEncoding,
-        message: testError instanceof Error ? testError.message : String(testError),
-      })
-    }
-  }, [printerSettings, restaurantName])
+  }, [printOrder])
 
   return (
     <main className="content-grid">
@@ -1262,34 +490,6 @@ export function StaffOrdersPage() {
                 Updated {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               </span>
             ) : null}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  aria-label="Kitchen printer settings"
-                  onClick={() => setPrinterSettingsOpen(true)}
-                >
-                  <Settings2 size={17} />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" align="end" sideOffset={6}>
-                Printer: {printerModeLabels[printerSettings.mode]}
-              </TooltipContent>
-            </Tooltip>
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              aria-label={audioEnabled ? 'Mute new order sound' : 'Enable new order sound'}
-              title={audioEnabled ? 'Sound on - click to mute' : 'Sound off - click to enable'}
-              onClick={() => void toggleAudio()}
-            >
-              {audioEnabled
-                ? <Volume2 size={17} />
-                : <VolumeX size={17} className="text-muted-foreground" />}
-            </Button>
             <Button type="button" variant="secondary" disabled={loading} onClick={() => void loadOrders(true)}>
               <RefreshCw className={loading ? 'animate-spin' : ''} size={17} />
               Refresh
@@ -1303,7 +503,7 @@ export function StaffOrdersPage() {
               {printJobs.failedCount + printJobs.deadLetterCount} print job
               {printJobs.failedCount + printJobs.deadLetterCount === 1 ? '' : 's'} need attention.
             </span>
-            <Button type="button" variant="outline" size="sm" onClick={() => setPrinterSettingsOpen(true)}>
+            <Button type="button" variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
               Open print tasks
             </Button>
           </div>
@@ -1354,7 +554,13 @@ export function StaffOrdersPage() {
             {isPlatformOwner ? (
               <div className="staff-orders-filter space-y-1.5">
                 <span className="text-sm font-medium">Restaurant</span>
-                <Select value={restaurantFilter} onValueChange={setRestaurantFilter}>
+                <Select
+                  value={restaurantFilter}
+                  onValueChange={(value) => {
+                    setRestaurantFilter(value)
+                    setPlatformRestaurantId(value === 'all' ? undefined : value)
+                  }}
+                >
                   <SelectTrigger aria-label="Filter staff orders by restaurant">
                     <SelectValue placeholder="Select restaurant" />
                   </SelectTrigger>
@@ -1767,18 +973,6 @@ export function StaffOrdersPage() {
         />
       ) : null}
 
-      <PrinterSettingsDialog
-        open={printerSettingsOpen}
-        settings={printerSettings}
-        printJobs={printJobs}
-        printJobsLoading={printJobsLoading}
-        onOpenChange={setPrinterSettingsOpen}
-        onSettingsChange={updatePrinterSettings}
-        onRefreshPrintJobs={() => void refreshPrintJobs(true)}
-        onRetryPrintJob={(jobId) => void retryQueuedPrint(jobId)}
-        onPrintTestTicket={() => void printTestTicket()}
-      />
-
       <Dialog open={pendingTransition !== null} onOpenChange={(open) => {
         if (!open && busyOrderId === null) {
           setPendingTransition(null)
@@ -1873,7 +1067,7 @@ async function withSettingsTimeout<T>(operation: Promise<T>, message: string): P
   }
 }
 
-function PrinterSettingsDialog({
+export function PrinterSettingsDialog({
   open,
   settings,
   printJobs,

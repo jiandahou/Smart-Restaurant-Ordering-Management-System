@@ -27,6 +27,7 @@ import { ResetPasswordPage } from './pages/ResetPasswordPage'
 import { StaffOrdersPage } from './pages/StaffOrdersPage'
 import { ProtectedRoute } from './routes/ProtectedRoute'
 import { Toaster } from './components/ui/sonner'
+import { RestaurantPrintingProvider } from './printing/RestaurantPrintingContext'
 
 function App() {
   return (
@@ -46,7 +47,11 @@ function App() {
         <Route path="/checkout" element={<CheckoutPage />} />
         <Route path="/r/:restaurantId/menu" element={<CustomerMenuPage />} />
         <Route path="/table/:qrToken" element={<CustomerMenuPage />} />
-        <Route element={<AppLayout />}>
+        <Route element={(
+          <RestaurantPrintingProvider>
+            <AppLayout />
+          </RestaurantPrintingProvider>
+        )}>
           <Route path="/my-orders" element={<MyOrdersPage />} />
           <Route element={<ProtectedRoute />}>
             <Route path="/me" element={<ProfilePage />} />

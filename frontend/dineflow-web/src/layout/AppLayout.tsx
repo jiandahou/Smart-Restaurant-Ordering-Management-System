@@ -12,6 +12,7 @@ import {
   LogOut,
   Monitor,
   Moon,
+  Printer,
   ShieldCheck,
   ShoppingBag,
   Store,
@@ -20,6 +21,8 @@ import {
   Utensils,
   UserRound,
   UserPlus,
+  Volume2,
+  VolumeX,
 } from 'lucide-react'
 import { motion } from 'motion/react'
 import { useTheme } from 'next-themes'
@@ -49,6 +52,8 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '../components/ui/popover'
+import { PrinterSettingsDialog } from '../pages/StaffOrdersPage'
+import { useRestaurantPrinting } from '../printing/RestaurantPrintingContext'
 
 const consoleRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']
 const restaurantStaffRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']
@@ -186,6 +191,7 @@ export function AppLayout() {
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
   const [isDesktopUserMenuOpen, setIsDesktopUserMenuOpen] = useState(false)
   const [expandedAdminGroups, setExpandedAdminGroups] = useState<Record<string, boolean>>({})
+  const printing = useRestaurantPrinting()
   const themeMode: ThemeMode = theme === 'light' || theme === 'dark' ? theme : 'system'
   const ThemeIcon = themeMode === 'dark' ? Moon : themeMode === 'light' ? Sun : Monitor
   const isSignedIn = Boolean(token)
@@ -372,6 +378,57 @@ export function AppLayout() {
             </PopoverContent>
           </Popover>
 
+          {canUseStaffOrders ? (
+            <>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="mobile-topbar-icon relative"
+                      aria-label="Kitchen printer settings"
+                      onClick={() => printing.setSettingsOpen(true)}
+                    >
+                      <Printer size={18} />
+                      {printing.printJobs.failedCount + printing.printJobs.deadLetterCount > 0 ? (
+                        <motion.span
+                          className="absolute -right-1 -top-1 size-2.5 rounded-full bg-destructive"
+                          initial={{ scale: 0.8 }}
+                          animate={{ scale: [0.8, 1.15, 0.8] }}
+                          transition={{ duration: 1.8, repeat: Infinity }}
+                        />
+                      ) : null}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    Printer: {printing.settings.mode === 'qz-tray' ? 'QZ Tray' : printing.settings.mode}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="mobile-topbar-icon"
+                      aria-label={printing.audioEnabled ? 'Mute new order sound' : 'Enable new order sound'}
+                      onClick={() => void printing.toggleAudio()}
+                    >
+                      {printing.audioEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    {printing.audioEnabled ? 'New order sound on' : 'New order sound off'}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </>
+          ) : null}
+
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -557,6 +614,55 @@ export function AppLayout() {
               </div>
             </PopoverContent>
           </Popover>
+          {canUseStaffOrders ? (
+            <>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="relative"
+                      aria-label="Kitchen printer settings"
+                      onClick={() => printing.setSettingsOpen(true)}
+                    >
+                      <Printer size={18} />
+                      {printing.printJobs.failedCount + printing.printJobs.deadLetterCount > 0 ? (
+                        <motion.span
+                          className="absolute -right-1 -top-1 size-2.5 rounded-full bg-destructive"
+                          initial={{ scale: 0.8 }}
+                          animate={{ scale: [0.8, 1.15, 0.8] }}
+                          transition={{ duration: 1.8, repeat: Infinity }}
+                        />
+                      ) : null}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    Printer: {printing.settings.mode === 'qz-tray' ? 'QZ Tray' : printing.settings.mode}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      aria-label={printing.audioEnabled ? 'Mute new order sound' : 'Enable new order sound'}
+                      onClick={() => void printing.toggleAudio()}
+                    >
+                      {printing.audioEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    {printing.audioEnabled ? 'New order sound on' : 'New order sound off'}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </>
+          ) : null}
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -628,6 +734,20 @@ export function AppLayout() {
           </TooltipProvider>
         </nav>
       </header>
+
+      {canUseStaffOrders ? (
+        <PrinterSettingsDialog
+          open={printing.settingsOpen}
+          settings={printing.settings}
+          printJobs={printing.printJobs}
+          printJobsLoading={printing.printJobsLoading}
+          onOpenChange={printing.setSettingsOpen}
+          onSettingsChange={printing.updateSettings}
+          onRefreshPrintJobs={() => void printing.refreshPrintJobs(true)}
+          onRetryPrintJob={(jobId) => void printing.retryQueuedPrint(jobId)}
+          onPrintTestTicket={() => void printing.printTestTicket('Selected restaurant')}
+        />
+      ) : null}
 
       {canUseAdminArea && isAdminArea && (
         <>
