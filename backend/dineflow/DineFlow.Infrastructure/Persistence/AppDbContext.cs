@@ -5,6 +5,7 @@ using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Restaurant;
 using RestaurantEntity = DineFlow.Infrastructure.Restaurant.Restaurant;
 using DineFlow.Infrastructure.Payments;
+using DineFlow.Infrastructure.Printing;
 using DineFlow.Infrastructure.Reporting;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
@@ -37,6 +38,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<UserPasskey> UserPasskeys => Set<UserPasskey>();
     public DbSet<UserMfaSettings> UserMfaSettings => Set<UserMfaSettings>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
+    public DbSet<PrintJob> PrintJobs => Set<PrintJob>();
+    public DbSet<PrintStation> PrintStations => Set<PrintStation>();
 
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
@@ -88,6 +91,43 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .WithMany()
                 .HasForeignKey(refreshToken => refreshToken.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<PrintStation>(entity =>
+        {
+            entity.HasKey(station => station.Id);
+            entity.Property(station => station.StationKey).HasMaxLength(120).IsRequired();
+            entity.Property(station => station.Name).HasMaxLength(160).IsRequired();
+            entity.Property(station => station.LeaseOwner).HasMaxLength(120);
+            entity.Property(station => station.QzStatus).HasMaxLength(40);
+            entity.Property(station => station.PrinterStatus).HasMaxLength(80);
+            entity.Property(station => station.PrinterName).HasMaxLength(240);
+            entity.Property(station => station.ConnectionType).HasMaxLength(80);
+            entity.Property(station => station.QzVersion).HasMaxLength(40);
+            entity.Property(station => station.LastError).HasMaxLength(2_000);
+            entity.HasIndex(station => new { station.RestaurantId, station.StationKey }).IsUnique();
+            entity.HasIndex(station => station.LastSeenAt);
+        });
+
+        builder.Entity<PrintJob>(entity =>
+        {
+            entity.HasKey(job => job.Id);
+            entity.Property(job => job.DeduplicationKey).HasMaxLength(240).IsRequired();
+            entity.Property(job => job.LastError).HasMaxLength(2_000);
+            entity.Property(job => job.LastStatusDetail).HasMaxLength(2_000);
+            entity.Property(job => job.CreatedByUserId).HasMaxLength(450);
+            entity.HasIndex(job => job.DeduplicationKey).IsUnique();
+            entity.HasIndex(job => new { job.RestaurantId, job.State, job.NextAttemptAt });
+            entity.HasIndex(job => new { job.OrderId, job.TicketRevision });
+            entity.HasIndex(job => job.LeaseExpiresAt);
+            entity.HasOne(job => job.Order)
+                .WithMany()
+                .HasForeignKey(job => job.OrderId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(job => job.Station)
+                .WithMany(station => station.Jobs)
+                .HasForeignKey(job => job.StationId)
+                .OnDelete(DeleteBehavior.SetNull);
         });
 
         builder.Entity<UserMfaSettings>(entity =>
@@ -314,6 +354,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(order => order.OrderNumber)
                 .HasMaxLength(40)
                 .IsRequired();
+
+            entity.Property(order => order.TicketRevision)
+                .HasDefaultValue(1);
 
             entity.HasIndex(order => order.RestaurantId);
             entity.HasIndex(order => order.CustomerId);

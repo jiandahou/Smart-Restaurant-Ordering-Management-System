@@ -17,6 +17,7 @@ export type ThermalPrinterMode = 'browser' | 'qz-tray' | 'web-serial' | 'web-usb
 /** How QZ Tray reaches the printer: an OS print queue, a RAW network socket,
  * or a serial/Bluetooth COM port owned by QZ. */
 export type QzTargetType = 'printer' | 'network' | 'serial'
+export type QzPrintEncoding = 'UTF-8' | 'GBK' | 'GB2312' | 'CP1252' | 'ISO-8859-1'
 export type ThermalPaperWidth = '58mm' | '80mm'
 
 export type SystemPrinterConnectionKind =
@@ -57,6 +58,9 @@ export type ThermalPrinterSettings = {
   /** Which QZ connection the settings dialog has active; only that target's
    * fields are used when printing. */
   qzTargetType: QzTargetType
+  /** Character encoding QZ uses when converting the ESC/POS string to bytes.
+   * UTF-8 is safest for mixed-language tickets; legacy printers may need GBK. */
+  qzEncoding: QzPrintEncoding
   qzPrinterName: string
   /** QZ network target: tickets go straight to host:port (RAW/9100) over the
    * LAN — no OS printer driver needed. */
@@ -158,6 +162,7 @@ export const defaultThermalPrinterSettings: ThermalPrinterSettings = {
   beepOnPrint: false,
   autoPrintNewOrders: false,
   qzTargetType: 'printer',
+  qzEncoding: 'UTF-8',
   qzPrinterName: '',
   qzNetworkHost: '',
   qzNetworkPort: 9100,
@@ -315,6 +320,19 @@ export function isQzTrayConnected(): boolean {
     return getQzClient().websocket.isActive() === true
   } catch {
     return false
+  }
+}
+
+export async function getQzRuntimeInfo(): Promise<{
+  connected: boolean
+  version: string | null
+}> {
+  const client = getQzClient()
+  if (!client.websocket.isActive()) return { connected: false, version: null }
+  const version = await Promise.resolve(client.api.getVersion()).catch(() => null)
+  return {
+    connected: client.websocket.isActive() === true,
+    version: typeof version === 'string' ? version : version == null ? null : String(version),
   }
 }
 
@@ -834,6 +852,7 @@ async function ensureQzNetworkSocketOpen(
   client: typeof qz,
   host: string,
   port: number,
+  encoding: QzPrintEncoding,
   timeoutMs = 5_000,
 ): Promise<boolean> {
   const target = `${host}:${port}`
@@ -851,7 +870,7 @@ async function ensureQzNetworkSocketOpen(
       (client.socket.open as (socketHost: string, socketPort: number, options?: { encoding?: string }) => unknown)(
         host,
         port,
-        { encoding: 'UTF-8' },
+        { encoding },
       )),
     new Promise<void>((_, reject) =>
       window.setTimeout(() => reject(new Error(`Timed out opening ${target}`)), timeoutMs),
@@ -1262,7 +1281,12 @@ export async function listQzSerialPorts(): Promise<string[]> {
 // dial-up, then a persistent link (no per-print beep/redial/sleep).
 const openQzSerialPorts = new Set<string>()
 
-async function ensureQzSerialPortOpen(client: typeof qz, portName: string, baudRate: number): Promise<void> {
+async function ensureQzSerialPortOpen(
+  client: typeof qz,
+  portName: string,
+  baudRate: number,
+  encoding: QzPrintEncoding = defaultThermalPrinterSettings.qzEncoding,
+): Promise<void> {
   if (openQzSerialPorts.has(portName)) {
     return
   }
@@ -1274,6 +1298,7 @@ async function ensureQzSerialPortOpen(client: typeof qz, portName: string, baudR
       stopBits: 1,
       parity: 'NONE',
       flowControl: 'NONE',
+      encoding,
     })
 
   try {
@@ -1416,13 +1441,13 @@ export async function printKitchenTicketWithQzTray(ticket: KitchenTicket, settin
     const baudRate = settings.serialBaudRate || defaultThermalPrinterSettings.serialBaudRate
     const payload = buildEscPosKitchenTicket(ticket, settings)
     const sendOnce = async () => {
-      await ensureQzSerialPortOpen(client, serialPort, baudRate)
+      await ensureQzSerialPortOpen(client, serialPort, baudRate, settings.qzEncoding)
       await client.serial.sendData(serialPort, payload)
     }
 
     try {
       await sendOnce()
-    } catch (firstError) {
+    } catch {
       // A kept-alive Bluetooth/serial link goes dead after the printer sleeps or
       // drifts out of range, but our bookkeeping still thinks the port is open —
       // so the FIRST print after an idle gap writes into a dead connection. Reset
@@ -1477,7 +1502,12 @@ export async function printKitchenTicketWithQzTray(ticket: KitchenTicket, settin
       })
 
       const sendOnce = async () => {
-        reusedConnection = await ensureQzNetworkSocketOpen(client, networkHost, networkPort)
+        reusedConnection = await ensureQzNetworkSocketOpen(
+          client,
+          networkHost,
+          networkPort,
+          settings.qzEncoding,
+        )
         await qzSocketCallAsPromise(() =>
           (client.socket.sendData as (host: string, port: number, data: string) => unknown)(
             networkHost,
@@ -1544,7 +1574,10 @@ export async function printKitchenTicketWithQzTray(ticket: KitchenTicket, settin
   }
 
   try {
-    const config = client.configs.create(printerName, { jobName: `Kitchen ${ticket.orderNumber}` })
+    const config = client.configs.create(printerName, {
+      jobName: `Kitchen ${ticket.orderNumber}`,
+      encoding: settings.qzEncoding,
+    })
     await client.print(config, [buildEscPosKitchenTicket(ticket, settings)])
   } catch (error) {
     throw new QzTrayError(
@@ -1790,7 +1823,10 @@ export async function printKitchenTicketWithWebSerial(ticket: KitchenTicket, set
     await teardownWebSerialSession()
 
     const detail = error instanceof Error && error.message ? ` (${error.message})` : ''
-    throw new Error(`Serial write failed${detail}. The connection was reset — print again to reconnect.`)
+    throw new Error(
+      `Serial write failed${detail}. The connection was reset — print again to reconnect.`,
+      { cause: error },
+    )
   }
 }
 
@@ -2014,7 +2050,10 @@ export async function printKitchenTicketWithWebBluetooth(ticket: KitchenTicket, 
     clearBleSession()
 
     const detail = error instanceof Error && error.message ? ` (${error.message})` : ''
-    throw new Error(`Bluetooth write failed${detail}. The connection was reset — print again to reconnect.`)
+    throw new Error(
+      `Bluetooth write failed${detail}. The connection was reset — print again to reconnect.`,
+      { cause: error },
+    )
   }
 }
 
@@ -2279,6 +2318,9 @@ function normalizePrinterSettings(settings: ThermalPrinterSettings): ThermalPrin
     qzTargetType: ['printer', 'network', 'serial'].includes(settings.qzTargetType)
       ? settings.qzTargetType
       : defaultThermalPrinterSettings.qzTargetType,
+    qzEncoding: ['UTF-8', 'GBK', 'GB2312', 'CP1252', 'ISO-8859-1'].includes(settings.qzEncoding)
+      ? settings.qzEncoding
+      : defaultThermalPrinterSettings.qzEncoding,
     qzNetworkHost: typeof settings.qzNetworkHost === 'string' ? settings.qzNetworkHost.trim() : '',
     qzNetworkPort: Number.isFinite(settings.qzNetworkPort) && settings.qzNetworkPort >= 1
       ? Math.round(settings.qzNetworkPort)

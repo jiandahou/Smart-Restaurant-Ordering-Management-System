@@ -12,6 +12,15 @@ import {
   type OrderTransitionAction,
   type Restaurant,
 } from '@/api/auth'
+import {
+  claimPrintJobs,
+  getPrintJobs,
+  requestOrderReprint,
+  retryPrintJob,
+  updatePrintJobStatus,
+  upsertPrintStation,
+  type PrintJobList,
+} from '@/api/printing'
 import { useAuth } from '@/auth/AuthContext'
 import { OrderStatusBadge } from '@/components/orders/OrderStatusBadge'
 import { OrderTransitionReasonField } from '@/components/orders/OrderTransitionReasonField'
@@ -34,11 +43,15 @@ import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   markOrderPrinted,
-  readAutoPrintLedger,
   setAutoPrintEnabled,
-  shouldAutoPrintOrder,
 } from '@/lib/autoPrintLedger'
 import { getBackgroundBrowserGuidance } from '@/lib/backgroundBrowser'
+import {
+  getPrintStationIdentity,
+  hasPrintJobTransportReceipt,
+  markPrintJobTransportAccepted,
+  withPrintStationLeadership,
+} from '@/lib/printStation'
 import { downloadPrinterDiagnostics, recordPrinterDiagnostic } from '@/lib/printerDiagnostics'
 import { createOrderRealtimeClient, type OrderRealtimeUpdate } from '@/realtime/orderConnection'
 import {
@@ -52,6 +65,7 @@ import {
   detectWebUsbPrinter,
   downloadQzTrustCertificate,
   getQzHostNetwork,
+  getQzRuntimeInfo,
   getQzTrayDefaultPrinter,
   hasQzTrayConnectedBefore,
   installQzTrustCertificate,
@@ -82,6 +96,7 @@ import {
   testWebSerialConnection,
   testWebUsbConnection,
   type QzTargetType,
+  type QzPrintEncoding,
   type QzTrayConnectionStatus,
   type QzTrayErrorReason,
   type QzTrayPrinterDescriptor,
@@ -102,7 +117,7 @@ type PrintTicketRequest = {
 }
 type ConnectionTestStatus = 'untested' | 'testing' | 'succeeded' | 'failed'
 
-const maxAutoPrintJobsPerSweep = 2
+const autoPrintPollIntervalMs = 5_000
 
 const sortRequests: Record<SortOption, { sortBy: string; sortDirection: 'asc' | 'desc' }> = {
   oldest: { sortBy: 'createdAt', sortDirection: 'asc' },
@@ -347,6 +362,17 @@ export function StaffOrdersPage() {
   const [printerSettings, setPrinterSettings] = useState<ThermalPrinterSettings>(() => readStoredThermalPrinterSettings())
   const printerSettingsRef = useRef(printerSettings)
   const [printingOrderId, setPrintingOrderId] = useState<string | null>(null)
+  const printStationIdentityRef = useRef(getPrintStationIdentity())
+  const [printJobs, setPrintJobs] = useState<PrintJobList>({
+    jobs: [],
+    pendingCount: 0,
+    failedCount: 0,
+    deadLetterCount: 0,
+  })
+  const [printJobsLoading, setPrintJobsLoading] = useState(false)
+  const [printStationLeaseHeld, setPrintStationLeaseHeld] = useState(false)
+  const lastPrintErrorRef = useRef<string | null>(null)
+  const printDispatchChainRef = useRef<Promise<void>>(Promise.resolve())
 
   useEffect(() => {
     audioEnabledRef.current = audioEnabled
@@ -392,6 +418,25 @@ export function StaffOrdersPage() {
       void closeQzNetworkSockets()
     }
   }, [printerSettings.mode, printerSettings.qzTargetType])
+
+  // QZ applies encoding/serial options when the raw transport opens. Reopen the
+  // handle after those settings change so the next test/print uses the new
+  // values instead of silently reusing an old connection configuration.
+  useEffect(() => {
+    if (printerSettings.qzTargetType === 'serial') {
+      void closeQzSerialPorts()
+    }
+    if (printerSettings.qzTargetType === 'network') {
+      void closeQzNetworkSockets()
+    }
+  }, [
+    printerSettings.qzEncoding,
+    printerSettings.qzNetworkHost,
+    printerSettings.qzNetworkPort,
+    printerSettings.qzSerialPort,
+    printerSettings.qzTargetType,
+    printerSettings.serialBaudRate,
+  ])
 
   useEffect(() => {
     if (!printTicket) return
@@ -541,6 +586,7 @@ export function StaffOrdersPage() {
     setPrintingOrderId(order.id)
 
     try {
+      lastPrintErrorRef.current = null
       if (printerSettings.mode === 'qz-tray') {
         await printKitchenTicketWithQzTray(ticket, printerSettings)
       } else if (printerSettings.mode === 'web-serial') {
@@ -565,6 +611,7 @@ export function StaffOrdersPage() {
       })
       return true
     } catch (printError) {
+      lastPrintErrorRef.current = printError instanceof Error ? printError.message : String(printError)
       recordPrinterDiagnostic('hardware_print_failed', {
         orderId: order.id,
         orderNumber: order.orderNumber,
@@ -601,122 +648,215 @@ export function StaffOrdersPage() {
     }
   }, [printerSettings])
 
-  // Latest print handler + settings for the realtime callbacks, without forcing
-  // the SignalR connection to rebuild whenever printer settings change.
-  const printOrderTicketRef = useRef(printOrderTicket)
-  useEffect(() => {
-    printOrderTicketRef.current = printOrderTicket
+  // Every source (manual print, automatic print, retry) passes through the same
+  // in-page FIFO. QZ/COM devices are single-writer transports; overlapping sends
+  // are a common cause of truncated tickets and "port busy" failures.
+  const dispatchOrderTicket = useCallback((order: AdminOrder): Promise<boolean> => {
+    const operation = printDispatchChainRef.current
+      .catch(() => undefined)
+      .then(() => printOrderTicket(order))
+    printDispatchChainRef.current = operation.then(() => undefined, () => undefined)
+    return operation
   }, [printOrderTicket])
+
+  // Latest print handler + settings for realtime callbacks, without rebuilding
+  // the SignalR connection whenever printer settings change.
+  const printOrderTicketRef = useRef(dispatchOrderTicket)
+  useEffect(() => {
+    printOrderTicketRef.current = dispatchOrderTicket
+  }, [dispatchOrderTicket])
 
   useEffect(() => {
     printerSettingsRef.current = printerSettings
   }, [printerSettings])
 
-  // Auto-print bookkeeping. Successful prints are also persisted in
-  // autoPrintLedger, so these refs are only the fast session cache. Failed jobs
-  // use a bounded exponential delay but are never marked as printed.
-  const autoPrintedOrderIdsRef = useRef<Set<string>>(
-    readAutoPrintLedger(printerSettings.autoPrintNewOrders).printedOrderIds,
-  )
+  const autoPrintedOrderIdsRef = useRef<Set<string>>(new Set())
   const autoPrintNotifiedIdsRef = useRef<Set<string>>(new Set())
-  const autoPrintAttemptsRef = useRef<Map<string, { attempts: number; nextAttemptAt: number }>>(new Map())
   const ordersRef = useRef<AdminOrder[]>([])
   const autoPrintSweepRunningRef = useRef(false)
 
-  // An order is ready for the kitchen once it is actionable: pay-at-counter orders
-  // on arrival, online orders once paid. Done/cancelled orders never print.
-  const qualifiesForAutoPrint = useCallback((order: AdminOrder) => {
-    if (queueStatuses.closed.has(order.status)) return false
-    return order.paymentMethod === 'PayAtCounter' || order.paymentStatus === 'Paid'
-  }, [])
+  const activePrintRestaurantId = user?.restaurantId
+    ?? (isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined)
 
-  // State-driven auto-print: runs after every order-list refresh (realtime OR the
-  // 15s poll), so a missed SignalR event cannot drop a ticket — the poll is the
-  // backstop. Auto-print is QZ Tray-only (the only route that prints without a
-  // user gesture). Uses the already-loaded orders, so an expired session for the
-  // lookup can't silently swallow it.
-  const runAutoPrintSweep = useCallback(async (currentOrders: AdminOrder[]) => {
+  const refreshPrintJobs = useCallback(async (showError = false) => {
+    if (!activePrintRestaurantId) return
+    setPrintJobsLoading(true)
+    try {
+      setPrintJobs(await getPrintJobs({ restaurantId: activePrintRestaurantId, take: 30 }))
+    } catch (jobsError) {
+      if (showError) {
+        toast.error('Could not load print jobs', {
+          description: jobsError instanceof Error ? jobsError.message : 'The request failed.',
+        })
+      }
+    } finally {
+      setPrintJobsLoading(false)
+    }
+  }, [activePrintRestaurantId])
+
+  // Server-backed auto-print. The server owns the durable queue, retry schedule,
+  // deduplication key, and station lease. Web Locks only avoids needless races
+  // between tabs; a second computer still cannot claim this station's jobs.
+  const runAutoPrintSweep = useCallback(async (force = false) => {
     const settings = printerSettingsRef.current
-    if (settings.mode !== 'qz-tray' || !settings.autoPrintNewOrders) return
+    if (settings.mode !== 'qz-tray' || (!settings.autoPrintNewOrders && !force)) return
+    if (!activePrintRestaurantId) {
+      recordPrinterDiagnostic('auto_print_skipped', {
+        reason: 'restaurant_not_selected',
+        isPlatformOwner,
+      })
+      return
+    }
     if (autoPrintSweepRunningRef.current) return
     autoPrintSweepRunningRef.current = true
 
     try {
-      const ledger = readAutoPrintLedger(true)
-      autoPrintedOrderIdsRef.current = ledger.printedOrderIds
-      const pending = currentOrders.filter(
-        (order) => qualifiesForAutoPrint(order) && shouldAutoPrintOrder(order, ledger),
-      )
-      const qualifying = pending.slice(0, maxAutoPrintJobsPerSweep)
+      const identity = printStationIdentityRef.current
+      await withPrintStationLeadership(identity.stationKey, identity.clientInstanceId, async () => {
+        const runtime = await getQzRuntimeInfo().catch(() => ({ connected: false, version: null }))
+        const connectionType = settings.qzTargetType
+        const printerName = settings.qzTargetType === 'printer'
+          ? settings.qzPrinterName
+          : settings.qzTargetType === 'network'
+            ? `${settings.qzNetworkHost}:${settings.qzNetworkPort}`
+            : settings.qzSerialPort
 
-      if (pending.length > 0) {
-        recordPrinterDiagnostic('auto_print_sweep', {
-          loadedOrders: currentOrders.length,
-          pendingOrders: pending.length,
-          selectedOrders: qualifying.length,
-          deferredOrders: Math.max(pending.length - qualifying.length, 0),
-          enabledAt: ledger.enabledAt === null ? null : new Date(ledger.enabledAt).toISOString(),
+        const station = await upsertPrintStation(identity.stationKey, identity.stationName, {
+          autoPrintEnabled: settings.autoPrintNewOrders,
+          restaurantId: activePrintRestaurantId,
+          clientInstanceId: identity.clientInstanceId,
+          qzStatus: runtime.connected ? 'connected' : 'disconnected',
+          printerStatus: 'unknown',
+          printerName,
+          connectionType,
+          qzVersion: runtime.version ?? undefined,
+          lastError: lastPrintErrorRef.current ?? undefined,
         })
-      }
+        setPrintStationLeaseHeld(station.leaseHeldByAnotherClient)
+        if (station.leaseHeldByAnotherClient) return
 
-      for (const order of qualifying) {
-        if (autoPrintedOrderIdsRef.current.has(order.id)) continue
+        const claimed = await claimPrintJobs({
+          stationKey: identity.stationKey,
+          clientInstanceId: identity.clientInstanceId,
+          restaurantId: activePrintRestaurantId,
+          maxJobs: 5,
+        })
+        setPrintStationLeaseHeld(false)
+        setPrintJobs((current) => ({
+          ...current,
+          pendingCount: claimed.pendingCount,
+          failedCount: claimed.failedCount,
+        }))
 
-        // New-order sound once per order, regardless of whether printing succeeds.
-        if (!autoPrintNotifiedIdsRef.current.has(order.id)) {
-          autoPrintNotifiedIdsRef.current.add(order.id)
-          if (audioEnabledRef.current && audioContextRef.current) {
-            playNewOrderSound(audioContextRef.current)
+        for (const job of claimed.jobs) {
+          if (!job.leaseToken) continue
+          const leaseToken = job.leaseToken
+
+          if (hasPrintJobTransportReceipt(job.id)) {
+            await updatePrintJobStatus(job.id, leaseToken, 'Completed', {
+              detail: 'Recovered a durable client receipt; ticket was already accepted by the print transport.',
+            })
+            recordPrinterDiagnostic('auto_print_job_receipt_recovered', {
+              jobId: job.id,
+              orderId: job.orderId,
+            })
+            continue
+          }
+
+          if (!autoPrintNotifiedIdsRef.current.has(job.orderId)) {
+            autoPrintNotifiedIdsRef.current.add(job.orderId)
+            if (audioEnabledRef.current && audioContextRef.current) {
+              playNewOrderSound(audioContextRef.current)
+            }
+          }
+
+          recordPrinterDiagnostic('auto_print_job_claimed', {
+            jobId: job.id,
+            orderId: job.orderId,
+            orderNumber: job.order.orderNumber,
+            attempt: job.attempts,
+            stationKey: identity.stationKey,
+          })
+
+          await updatePrintJobStatus(job.id, leaseToken, 'Sending', {
+            detail: `${connectionType} send started`,
+          })
+
+          const printed = await printOrderTicketRef.current(job.order)
+          if (printed) {
+            markPrintJobTransportAccepted(job.id)
+            await updatePrintJobStatus(job.id, leaseToken, 'Completed', {
+              detail: `${connectionType} transport accepted the ticket; physical paper output is not confirmed`,
+            })
+            recordPrinterDiagnostic('auto_print_job_completed', {
+              jobId: job.id,
+              orderId: job.orderId,
+              attempt: job.attempts,
+            })
+          } else {
+            await updatePrintJobStatus(job.id, leaseToken, 'Failed', {
+              detail: `${connectionType} send failed`,
+              error: lastPrintErrorRef.current ?? 'The print transport rejected the ticket.',
+            })
           }
         }
-
-        const retry = autoPrintAttemptsRef.current.get(order.id) ?? { attempts: 0, nextAttemptAt: 0 }
-        if (Date.now() < retry.nextAttemptAt) continue
-
-        const attempt = retry.attempts + 1
-        recordPrinterDiagnostic('auto_print_attempt', {
-          orderId: order.id,
-          orderNumber: order.orderNumber,
-          attempt,
-        })
-
-        const printed = await printOrderTicketRef.current(order)
-        if (printed) {
-          autoPrintedOrderIdsRef.current.add(order.id)
-          autoPrintAttemptsRef.current.delete(order.id)
-          recordPrinterDiagnostic('auto_print_completed', {
-            orderId: order.id,
-            orderNumber: order.orderNumber,
-            attempt,
-          })
-        } else {
-          const retryDelayMs = Math.min(15_000 * (2 ** Math.min(attempt - 1, 5)), 5 * 60_000)
-          autoPrintAttemptsRef.current.set(order.id, {
-            attempts: attempt,
-            nextAttemptAt: Date.now() + retryDelayMs,
-          })
-          recordPrinterDiagnostic('auto_print_retry_scheduled', {
-            orderId: order.id,
-            orderNumber: order.orderNumber,
-            attempt,
-            retryDelayMs,
-          })
-        }
+      })
+      await refreshPrintJobs()
+    } catch (sweepError) {
+      if (sweepError instanceof Error && /another browser tab or computer|station_lease_held/i.test(sweepError.message)) {
+        setPrintStationLeaseHeld(true)
       }
+      recordPrinterDiagnostic('auto_print_sweep_failed', {
+        message: sweepError instanceof Error ? sweepError.message : String(sweepError),
+        stationKey: printStationIdentityRef.current.stationKey,
+      })
     } finally {
       autoPrintSweepRunningRef.current = false
     }
-  }, [qualifiesForAutoPrint])
+  }, [activePrintRestaurantId, isPlatformOwner, refreshPrintJobs])
 
   useEffect(() => {
-    autoPrintSweepRef.current = runAutoPrintSweep
+    autoPrintSweepRef.current = () => runAutoPrintSweep()
   }, [runAutoPrintSweep])
 
   useEffect(() => {
     if (printerSettings.mode === 'qz-tray' && printerSettings.autoPrintNewOrders) {
-      void runAutoPrintSweep(ordersRef.current)
+      const initialTimer = window.setTimeout(() => void runAutoPrintSweep(), 0)
+      const timer = window.setInterval(() => void runAutoPrintSweep(), autoPrintPollIntervalMs)
+      return () => {
+        window.clearTimeout(initialTimer)
+        window.clearInterval(timer)
+      }
     }
   }, [printerSettings.autoPrintNewOrders, printerSettings.mode, runAutoPrintSweep])
+
+  useEffect(() => {
+    if (!activePrintRestaurantId) return
+    const identity = printStationIdentityRef.current
+    void (async () => {
+      const runtime = await getQzRuntimeInfo().catch(() => ({ connected: false, version: null }))
+      await upsertPrintStation(identity.stationKey, identity.stationName, {
+        autoPrintEnabled: printerSettings.mode === 'qz-tray' && printerSettings.autoPrintNewOrders,
+        restaurantId: activePrintRestaurantId,
+        clientInstanceId: identity.clientInstanceId,
+        qzStatus: runtime.connected ? 'connected' : 'disconnected',
+        printerStatus: 'unknown',
+        connectionType: printerSettings.mode === 'qz-tray' ? printerSettings.qzTargetType : printerSettings.mode,
+        qzVersion: runtime.version ?? undefined,
+      })
+      await refreshPrintJobs()
+    })().catch((stationError) => {
+      recordPrinterDiagnostic('print_station_registration_failed', {
+        message: stationError instanceof Error ? stationError.message : String(stationError),
+      })
+    })
+  }, [
+    activePrintRestaurantId,
+    printerSettings.autoPrintNewOrders,
+    printerSettings.mode,
+    printerSettings.qzTargetType,
+    refreshPrintJobs,
+  ])
 
   useEffect(() => {
     if (!isPlatformOwner) return
@@ -1001,6 +1141,108 @@ export function StaffOrdersPage() {
     }
   }
 
+  const retryQueuedPrint = useCallback(async (jobId: string) => {
+    try {
+      await retryPrintJob(jobId, 'Retried by staff from the print task centre.')
+      toast.success('Print job queued again')
+      await refreshPrintJobs()
+      void runAutoPrintSweep(true)
+    } catch (retryError) {
+      toast.error('Could not retry print job', {
+        description: retryError instanceof Error ? retryError.message : 'The request failed.',
+      })
+    }
+  }, [refreshPrintJobs, runAutoPrintSweep])
+
+  const printOrQueueOrder = useCallback(async (order: AdminOrder) => {
+    if (printerSettings.mode !== 'qz-tray' || !activePrintRestaurantId) {
+      await dispatchOrderTicket(order)
+      return
+    }
+
+    try {
+      const identity = printStationIdentityRef.current
+      await upsertPrintStation(identity.stationKey, identity.stationName, {
+        autoPrintEnabled: printerSettings.autoPrintNewOrders,
+        restaurantId: activePrintRestaurantId,
+        clientInstanceId: identity.clientInstanceId,
+        qzStatus: isQzTrayConnected() ? 'connected' : 'disconnected',
+        printerStatus: 'unknown',
+        printerName: printerSettings.qzPrinterName || undefined,
+        connectionType: printerSettings.qzTargetType,
+      })
+      await requestOrderReprint(order.id, {
+        stationKey: identity.stationKey,
+        restaurantId: activePrintRestaurantId,
+        reason: 'Manual print requested from the staff order card.',
+      })
+      toast.success('Print job queued', { description: order.orderNumber })
+      await refreshPrintJobs()
+      await runAutoPrintSweep(true)
+    } catch (queueError) {
+      toast.error('Could not queue the print job', {
+        description: queueError instanceof Error ? queueError.message : 'The request failed.',
+      })
+    }
+  }, [
+    activePrintRestaurantId,
+    dispatchOrderTicket,
+    printerSettings.mode,
+    printerSettings.autoPrintNewOrders,
+    printerSettings.qzPrinterName,
+    printerSettings.qzTargetType,
+    refreshPrintJobs,
+    runAutoPrintSweep,
+  ])
+
+  const printTestTicket = useCallback(async () => {
+    const now = new Date()
+    const operation = printDispatchChainRef.current
+      .catch(() => undefined)
+      .then(() => printKitchenTicketWithQzTray({
+        orderNumber: 'TEST-001',
+        restaurantName: restaurantName === 'All restaurants' ? 'DineFlow' : restaurantName,
+        orderScope: 'Printer diagnostics',
+        status: 'TEST',
+        createdAt: now,
+        printedAt: now,
+        itemCount: 2,
+        orderNote: 'English + 中文 encoding check',
+        items: [
+          {
+            quantity: 1,
+            name: 'TEST ITEM / 测试项目',
+            note: 'If this line is readable, encoding is correct.',
+            optionGroups: [{ groupName: 'Connection', options: [printerSettings.qzTargetType] }],
+          },
+          {
+            quantity: 1,
+            name: '0123456789 !@#$%',
+            optionGroups: [],
+          },
+        ],
+      }, printerSettings))
+    printDispatchChainRef.current = operation.then(() => undefined, () => undefined)
+
+    try {
+      await operation
+      toast.success('Test ticket sent')
+      recordPrinterDiagnostic('test_ticket_succeeded', {
+        target: printerSettings.qzTargetType,
+        encoding: printerSettings.qzEncoding,
+      })
+    } catch (testError) {
+      toast.error('Test ticket failed', {
+        description: testError instanceof Error ? testError.message : 'The print request failed.',
+      })
+      recordPrinterDiagnostic('test_ticket_failed', {
+        target: printerSettings.qzTargetType,
+        encoding: printerSettings.qzEncoding,
+        message: testError instanceof Error ? testError.message : String(testError),
+      })
+    }
+  }, [printerSettings, restaurantName])
+
   return (
     <main className="content-grid">
       <Card>
@@ -1054,6 +1296,24 @@ export function StaffOrdersPage() {
             </Button>
           </div>
         </CardHeader>
+        {printJobs.failedCount + printJobs.deadLetterCount > 0 ? (
+          <div className="mx-6 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-destructive">
+            <span className="flex items-center gap-2 text-sm">
+              <AlertCircle className="size-4 shrink-0" />
+              {printJobs.failedCount + printJobs.deadLetterCount} print job
+              {printJobs.failedCount + printJobs.deadLetterCount === 1 ? '' : 's'} need attention.
+            </span>
+            <Button type="button" variant="outline" size="sm" onClick={() => setPrinterSettingsOpen(true)}>
+              Open print tasks
+            </Button>
+          </div>
+        ) : null}
+        {printStationLeaseHeld ? (
+          <div className="mx-6 mb-3 flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
+            <AlertCircle className="size-4 shrink-0" />
+            Another tab or computer currently owns this print station. This page is standing by to prevent duplicate tickets.
+          </div>
+        ) : null}
         <CardContent className="space-y-5">
           <Tabs value={viewMode} onValueChange={(value) => setViewMode(value as StaffOrdersViewMode)} className="staff-orders-view-tabs">
             <TabsList aria-label="Staff order display mode">
@@ -1227,7 +1487,7 @@ export function StaffOrdersPage() {
                                 <PrintTicketButton
                                   disabled={printingOrderId === order.id}
                                   modeLabel={printerModeLabels[printerSettings.mode]}
-                                  onClick={() => void printOrderTicket(order)}
+                                  onClick={() => void printOrQueueOrder(order)}
                                 />
                               </div>
                             </div>
@@ -1368,7 +1628,7 @@ export function StaffOrdersPage() {
                             <PrintTicketButton
                               disabled={printingOrderId === order.id}
                               modeLabel={printerModeLabels[printerSettings.mode]}
-                              onClick={() => void printOrderTicket(order)}
+                              onClick={() => void printOrQueueOrder(order)}
                             />
                           </div>
                         </div>
@@ -1510,8 +1770,13 @@ export function StaffOrdersPage() {
       <PrinterSettingsDialog
         open={printerSettingsOpen}
         settings={printerSettings}
+        printJobs={printJobs}
+        printJobsLoading={printJobsLoading}
         onOpenChange={setPrinterSettingsOpen}
         onSettingsChange={updatePrinterSettings}
+        onRefreshPrintJobs={() => void refreshPrintJobs(true)}
+        onRetryPrintJob={(jobId) => void retryQueuedPrint(jobId)}
+        onPrintTestTicket={() => void printTestTicket()}
       />
 
       <Dialog open={pendingTransition !== null} onOpenChange={(open) => {
@@ -1611,15 +1876,26 @@ async function withSettingsTimeout<T>(operation: Promise<T>, message: string): P
 function PrinterSettingsDialog({
   open,
   settings,
+  printJobs,
+  printJobsLoading,
   onOpenChange,
   onSettingsChange,
+  onRefreshPrintJobs,
+  onRetryPrintJob,
+  onPrintTestTicket,
 }: {
   open: boolean
   settings: ThermalPrinterSettings
+  printJobs: PrintJobList
+  printJobsLoading: boolean
   onOpenChange: (open: boolean) => void
   onSettingsChange: (updates: Partial<ThermalPrinterSettings>) => void
+  onRefreshPrintJobs: () => void
+  onRetryPrintJob: (jobId: string) => void
+  onPrintTestTicket: () => void
 }) {
   const [qzStatus, setQzStatus] = useState<QzTrayConnectionStatus | 'checking' | 'unknown'>('unknown')
+  const [qzVersion, setQzVersion] = useState<string | null>(null)
   const [qzPrinters, setQzPrinters] = useState<QzTrayPrinterDescriptor[]>([])
   const [qzSerialPorts, setQzSerialPorts] = useState<string[]>([])
   const [qzPrintersLoading, setQzPrintersLoading] = useState(false)
@@ -1767,6 +2043,7 @@ function PrinterSettingsDialog({
       setQzSerialPorts(serialPorts)
       setQzHostSubnet(hostNetwork?.subnetPrefix ?? null)
       setQzStatus('connected')
+      void getQzRuntimeInfo().then((runtime) => setQzVersion(runtime.version))
 
       if (!qzPrinterNameRef.current.trim() && printers.length > 0) {
         const defaultPrinter = await getQzTrayDefaultPrinter()
@@ -1784,6 +2061,7 @@ function PrinterSettingsDialog({
       setQzPrinters([])
       setQzSerialPorts([])
       setQzHostSubnet(null)
+      setQzVersion(null)
       recordPrinterDiagnostic('qz_settings_discovery_failed', {
         message: error instanceof Error ? error.message : String(error),
       })
@@ -1806,6 +2084,7 @@ function PrinterSettingsDialog({
       if (cancelled) return
       setQzStatus(status)
       if (status !== 'connected') {
+        setQzVersion(null)
         qzDiscoveryGenerationRef.current += 1
         setQzPrintersLoading(false)
       }
@@ -2294,7 +2573,9 @@ function PrinterSettingsDialog({
                       qzConnected ? 'bg-emerald-500' : qzStatus === 'checking' ? 'bg-amber-500' : 'bg-muted-foreground/40',
                     )}
                   />
-                  <span className="text-muted-foreground">{qzStatusLabel}</span>
+                  <span className="text-muted-foreground">
+                    {qzStatusLabel}{qzVersion ? ` · v${qzVersion}` : ''}
+                  </span>
                   <Button
                     type="button"
                     variant="ghost"
@@ -2319,7 +2600,8 @@ function PrinterSettingsDialog({
                   </Button>
                   <p className="text-[0.7rem] leading-snug text-muted-foreground">
                     QZ Tray is a small desktop app for silent printing. Install and launch it, then use the refresh
-                    button above to connect.
+                    button above to connect. If QZ is running but remains unavailable in Edge/Chrome, open this
+                    site's permissions and allow <strong>Local network access</strong>, then reload.
                   </p>
                 </div>
               ) : null}
@@ -2569,6 +2851,31 @@ function PrinterSettingsDialog({
                 </>
               ) : null}
 
+              <div className="flex flex-wrap items-end justify-between gap-2 rounded-md border border-border/70 p-2">
+                <div className="staff-printer-field min-w-44">
+                  <span>Text encoding</span>
+                  <Select
+                    value={settings.qzEncoding}
+                    onValueChange={(value) => onSettingsChange({ qzEncoding: value as QzPrintEncoding })}
+                  >
+                    <SelectTrigger aria-label="QZ print encoding">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent position="popper">
+                      <SelectItem value="UTF-8">UTF-8</SelectItem>
+                      <SelectItem value="GBK">GBK (简体中文)</SelectItem>
+                      <SelectItem value="GB2312">GB2312</SelectItem>
+                      <SelectItem value="CP1252">CP1252 (Western)</SelectItem>
+                      <SelectItem value="ISO-8859-1">ISO-8859-1</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button type="button" variant="outline" size="sm" onClick={onPrintTestTicket}>
+                  <Printer size={14} />
+                  Print test ticket
+                </Button>
+              </div>
+
               {settings.autoPrintNewOrders ? (
                 <div className="flex flex-col items-start gap-2 rounded-md border border-amber-300/70 bg-amber-50/70 p-2 dark:border-amber-700/70 dark:bg-amber-950/30">
                   <p className="text-[0.7rem] leading-snug text-amber-800 dark:text-amber-200">
@@ -2588,6 +2895,74 @@ function PrinterSettingsDialog({
                   </Button>
                 </div>
               ) : null}
+
+              <details className="rounded-md border border-border bg-background/60 p-2">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-medium">
+                  <span className="flex items-center gap-2">
+                    <ListChecks size={14} />
+                    Print tasks
+                    {printJobs.pendingCount > 0 ? (
+                      <Badge variant="secondary">{printJobs.pendingCount} waiting</Badge>
+                    ) : null}
+                    {printJobs.failedCount + printJobs.deadLetterCount > 0 ? (
+                      <Badge variant="destructive">
+                        {printJobs.failedCount + printJobs.deadLetterCount} failed
+                      </Badge>
+                    ) : null}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="Refresh print tasks"
+                    onClick={(event) => {
+                      event.preventDefault()
+                      onRefreshPrintJobs()
+                    }}
+                    disabled={printJobsLoading}
+                  >
+                    <RefreshCw size={14} className={cn(printJobsLoading && 'animate-spin')} />
+                  </Button>
+                </summary>
+                <div className="mt-2 max-h-52 space-y-1.5 overflow-y-auto">
+                  {printJobs.jobs.length === 0 ? (
+                    <p className="text-[0.7rem] text-muted-foreground">No print jobs recorded for this restaurant.</p>
+                  ) : printJobs.jobs.map((job) => (
+                    <div
+                      key={job.id}
+                      className="flex items-start justify-between gap-2 rounded-md border border-border/70 px-2 py-1.5"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                          <strong>{job.order.orderNumber}</strong>
+                          <Badge
+                            variant={
+                              job.state === 'Completed'
+                                ? 'secondary'
+                                : job.state === 'Failed' || job.state === 'DeadLetter'
+                                  ? 'destructive'
+                                  : 'outline'
+                            }
+                          >
+                            {job.state}
+                          </Badge>
+                          <span className="text-muted-foreground">attempt {job.attempts}</span>
+                        </div>
+                        {job.lastError || job.lastStatusDetail ? (
+                          <p className="mt-0.5 truncate text-[0.68rem] text-muted-foreground" title={job.lastError ?? job.lastStatusDetail ?? undefined}>
+                            {job.lastError ?? job.lastStatusDetail}
+                          </p>
+                        ) : null}
+                      </div>
+                      {job.state === 'Failed' || job.state === 'DeadLetter' ? (
+                        <Button type="button" variant="outline" size="sm" onClick={() => onRetryPrintJob(job.id)}>
+                          Retry
+                        </Button>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </details>
 
               <div className="flex flex-wrap items-center gap-2 border-t border-border pt-2">
                 <Button

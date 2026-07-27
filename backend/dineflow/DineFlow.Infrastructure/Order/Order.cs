@@ -42,6 +42,8 @@ public class Order
 
     public DateTime? UpdatedAt { get; set; }
 
+    public int TicketRevision { get; set; } = 1;
+
     public ICollection<OrderItem> OrderItems { get; set; } = [];
 
     public ICollection<OrderStatusHistory> StatusHistory { get; set; } = [];

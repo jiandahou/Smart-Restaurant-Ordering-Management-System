@@ -498,6 +498,7 @@ public class OrderController : ControllerBase
         existingOrder.TotalAmount = PricingCalculator.CalculateTotal(buildResult.OrderItems.Select(item => (item.Quantity, item.UnitPrice)));
         existingOrder.CustomerNote = request.CustomerNote;
         existingOrder.ScheduledTime = request.ScheduledTime;
+        existingOrder.TicketRevision += 1;
         existingOrder.UpdatedAt = DateTime.UtcNow;
 
         foreach (var orderItem in buildResult.OrderItems)

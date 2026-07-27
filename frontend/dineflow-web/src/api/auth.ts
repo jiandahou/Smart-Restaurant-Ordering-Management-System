@@ -1146,7 +1146,7 @@ function isAuthRetryExempt(path: string) {
   return authRetryExemptPaths.some((exempt) => path.startsWith(exempt))
 }
 
-async function request<T>(path: string, options: RequestInit = {}) {
+export async function request<T>(path: string, options: RequestInit = {}) {
   const performFetch = async () => {
     const token = getStoredToken()
     const headers = new Headers(options.headers)
