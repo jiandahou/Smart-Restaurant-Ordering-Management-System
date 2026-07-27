@@ -24,7 +24,10 @@ export type OrderRealtimeHandlers = {
   onOrderUpdated?: (update: OrderRealtimeUpdate) => void
   onOrderPaymentUpdated?: (update: OrderRealtimeUpdate) => void
   onOrderDeleted?: (update: OrderRealtimeUpdate) => void
+  onConnected?: () => void | Promise<void>
+  onReconnecting?: (error?: Error) => void | Promise<void>
   onReconnected?: () => void | Promise<void>
+  onClosed?: (error?: Error) => void | Promise<void>
 }
 
 export type OrderRealtimeClient = {
@@ -55,8 +58,16 @@ export function createOrderRealtimeClient(handlers: OrderRealtimeHandlers): Orde
     handlers.onOrderDeleted?.(update),
   )
 
+  connection.onreconnecting(async (error) => {
+    await handlers.onReconnecting?.(error)
+  })
+
   connection.onreconnected(async () => {
     await handlers.onReconnected?.()
+  })
+
+  connection.onclose(async (error) => {
+    await handlers.onClosed?.(error)
   })
 
   return {
@@ -67,6 +78,7 @@ export function createOrderRealtimeClient(handlers: OrderRealtimeHandlers): Orde
       }
 
       await connection.start()
+      await handlers.onConnected?.()
     },
     stop: async () => {
       await connection.stop()

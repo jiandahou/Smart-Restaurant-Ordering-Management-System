@@ -66,6 +66,7 @@ builder.Services.Configure<DataProtectionTokenProviderOptions>(options =>
     options.TokenLifespan = UnconfirmedCustomerCleanupService.ConfirmationWindow;
 });
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
+builder.Services.AddScoped<IRefreshTokenService, RefreshTokenService>();
 builder.Services.AddScoped<CartAccessService>();
 builder.Services.AddScoped<CartRealtimeNotifier>();
 builder.Services.AddScoped<OrderRealtimeNotifier>();

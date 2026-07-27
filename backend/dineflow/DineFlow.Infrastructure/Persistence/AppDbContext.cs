@@ -36,6 +36,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<PaymentEventLog> PaymentEventLogs => Set<PaymentEventLog>();
     public DbSet<UserPasskey> UserPasskeys => Set<UserPasskey>();
     public DbSet<UserMfaSettings> UserMfaSettings => Set<UserMfaSettings>();
+    public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
 
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
@@ -69,6 +70,23 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasOne(passkey => passkey.User)
                 .WithMany()
                 .HasForeignKey(passkey => passkey.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<RefreshToken>(entity =>
+        {
+            entity.HasKey(refreshToken => refreshToken.Id);
+            entity.Property(refreshToken => refreshToken.TokenHash)
+                .HasMaxLength(128)
+                .IsRequired();
+            entity.Property(refreshToken => refreshToken.CreatedByIp).HasMaxLength(64);
+            entity.Property(refreshToken => refreshToken.RevokedByIp).HasMaxLength(64);
+            entity.Property(refreshToken => refreshToken.ReplacedByTokenHash).HasMaxLength(128);
+            entity.HasIndex(refreshToken => refreshToken.TokenHash).IsUnique();
+            entity.HasIndex(refreshToken => refreshToken.UserId);
+            entity.HasOne(refreshToken => refreshToken.User)
+                .WithMany()
+                .HasForeignKey(refreshToken => refreshToken.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

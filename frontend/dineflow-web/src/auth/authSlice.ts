@@ -1,13 +1,16 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from '@reduxjs/toolkit'
 import {
+  clearStoredRefreshToken,
   clearStoredToken,
   confirmEmail as confirmEmailRequest,
   exchangeOAuthCode as exchangeOAuthCodeRequest,
   getMe,
+  getStoredRefreshToken,
   getStoredToken,
   login as loginRequest,
   magicLinkLogin as magicLinkLoginRequest,
   passkeyLogin as passkeyLoginRequest,
+  storeRefreshToken,
   storeToken,
   updateCurrentUser as updateCurrentUserRequest,
   uploadCurrentUserAvatar as uploadCurrentUserAvatarRequest,
@@ -24,6 +27,7 @@ import {
 type AuthState = {
   user: AuthUser | null
   token: string | null
+  refreshToken: string | null
   loading: boolean
 }
 
@@ -32,6 +36,7 @@ const initialToken = getStoredToken()
 const initialState: AuthState = {
   user: null,
   token: initialToken,
+  refreshToken: getStoredRefreshToken(),
   loading: Boolean(initialToken),
 }
 
@@ -44,6 +49,7 @@ export const loginUser = createAsyncThunk(
 
     if ('token' in response) {
       storeToken(response.token)
+      storeRefreshToken(response.refreshToken)
     }
 
     return response
@@ -55,6 +61,7 @@ export const verifyMfaLogin = createAsyncThunk(
   async (payload: VerifyMfaLoginRequest) => {
     const response = await verifyMfaLoginRequest(payload)
     storeToken(response.token)
+    storeRefreshToken(response.refreshToken)
     return response
   },
 )
@@ -64,8 +71,9 @@ export const confirmEmail = createAsyncThunk(
   async (payload: ConfirmEmailRequest) => {
     const response = await confirmEmailRequest(payload)
 
-    if (response.token) {
+    if (response.token && response.refreshToken) {
       storeToken(response.token)
+      storeRefreshToken(response.refreshToken)
     }
 
     return response
@@ -77,6 +85,7 @@ export const magicLinkLogin = createAsyncThunk(
   async (payload: MagicLinkLoginRequest) => {
     const response = await magicLinkLoginRequest(payload)
     storeToken(response.token)
+    storeRefreshToken(response.refreshToken)
     return response
   },
 )
@@ -86,6 +95,7 @@ export const passkeyLogin = createAsyncThunk(
   async () => {
     const response = await passkeyLoginRequest()
     storeToken(response.token)
+    storeRefreshToken(response.refreshToken)
     return response
   },
 )
@@ -95,6 +105,7 @@ export const exchangeOAuthCode = createAsyncThunk(
   async (payload: ExchangeOAuthCodeRequest) => {
     const response = await exchangeOAuthCodeRequest(payload)
     storeToken(response.token)
+    storeRefreshToken(response.refreshToken)
     return response
   },
 )
@@ -115,7 +126,9 @@ const authSlice = createSlice({
   reducers: {
     logout(state) {
       clearStoredToken()
+      clearStoredRefreshToken()
       state.token = null
+      state.refreshToken = null
       state.user = null
       state.loading = false
     },
@@ -125,7 +138,9 @@ const authSlice = createSlice({
     },
     setAuthenticated(state, action: PayloadAction<LoginResponse>) {
       storeToken(action.payload.token)
+      storeRefreshToken(action.payload.refreshToken)
       state.token = action.payload.token
+      state.refreshToken = action.payload.refreshToken
       state.user = action.payload.user
       state.loading = false
     },
@@ -140,8 +155,13 @@ const authSlice = createSlice({
         state.loading = false
       })
       .addCase(loadCurrentUser.rejected, (state) => {
+        // request() already tried a silent refresh before this rejection fired
+        // (see auth.ts), so getting here means the refresh token itself is gone
+        // or invalid — a real logout is the only remaining option.
         clearStoredToken()
+        clearStoredRefreshToken()
         state.token = null
+        state.refreshToken = null
         state.user = null
         state.loading = false
       })
@@ -151,6 +171,7 @@ const authSlice = createSlice({
       .addCase(loginUser.fulfilled, (state, action) => {
         if ('token' in action.payload) {
           state.token = action.payload.token
+          state.refreshToken = action.payload.refreshToken
           state.user = action.payload.user
         }
 
@@ -164,6 +185,7 @@ const authSlice = createSlice({
       })
       .addCase(confirmEmail.fulfilled, (state, action) => {
         state.token = action.payload.token ?? state.token
+        state.refreshToken = action.payload.refreshToken ?? state.refreshToken
         state.user = action.payload.user ?? state.user
         state.loading = false
       })
@@ -175,6 +197,7 @@ const authSlice = createSlice({
       })
       .addCase(magicLinkLogin.fulfilled, (state, action) => {
         state.token = action.payload.token
+        state.refreshToken = action.payload.refreshToken
         state.user = action.payload.user
         state.loading = false
       })
@@ -186,6 +209,7 @@ const authSlice = createSlice({
       })
       .addCase(passkeyLogin.fulfilled, (state, action) => {
         state.token = action.payload.token
+        state.refreshToken = action.payload.refreshToken
         state.user = action.payload.user
         state.loading = false
       })
@@ -197,6 +221,7 @@ const authSlice = createSlice({
       })
       .addCase(exchangeOAuthCode.fulfilled, (state, action) => {
         state.token = action.payload.token
+        state.refreshToken = action.payload.refreshToken
         state.user = action.payload.user
         state.loading = false
       })
@@ -208,6 +233,7 @@ const authSlice = createSlice({
       })
       .addCase(verifyMfaLogin.fulfilled, (state, action) => {
         state.token = action.payload.token
+        state.refreshToken = action.payload.refreshToken
         state.user = action.payload.user
         state.loading = false
       })

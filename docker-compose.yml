@@ -76,6 +76,7 @@ services:
       Jwt__Audience: ${JWT_AUDIENCE:-DineFlow.Client}
       Jwt__SecretKey: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required. Set it in a local .env file.}
       Jwt__ExpirationMinutes: ${JWT_EXPIRATION_MINUTES:-60}
+      Jwt__RefreshTokenExpirationDays: ${JWT_REFRESH_TOKEN_EXPIRATION_DAYS:-90}
       Email__From: ${AUTH_EMAIL_FROM:-noreply@theunknownfish.com}
       Email__Server: ${EMAIL_SERVER:-}
       Email__ResendApiKey: ${RESEND_API_KEY:-}

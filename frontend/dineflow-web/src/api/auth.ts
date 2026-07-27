@@ -12,6 +12,7 @@ export type AuthUser = {
 export type LoginResponse = {
   message: string
   token: string
+  refreshToken: string
   user: AuthUser
 }
 
@@ -1041,6 +1042,7 @@ export type UpdateMfaSettingsResponse = {
 }
 
 const tokenKey = 'dineflow.auth.token'
+const refreshTokenKey = 'dineflow.auth.refreshToken'
 
 export function getStoredToken() {
   return localStorage.getItem(tokenKey)
@@ -1054,28 +1056,130 @@ export function clearStoredToken() {
   localStorage.removeItem(tokenKey)
 }
 
+export function getStoredRefreshToken() {
+  return localStorage.getItem(refreshTokenKey)
+}
+
+export function storeRefreshToken(refreshToken: string) {
+  localStorage.setItem(refreshTokenKey, refreshToken)
+}
+
+export function clearStoredRefreshToken() {
+  localStorage.removeItem(refreshTokenKey)
+}
+
+// Single-flight guard: many requests can 401 around the same moment (e.g. a
+// batch of calls firing right after the access token expires). Without this,
+// each would race its own POST /api/auth/refresh, and the rotating refresh
+// token means only the first one to land would succeed — the rest would get
+// "reused token" failures and force a real logout. Concurrent callers instead
+// await the same in-flight attempt and share its result.
+let refreshInFlight: Promise<boolean> | null = null
+
+/**
+ * Exchange the stored refresh token for a new access token + refresh token
+ * (rotation). Used both by the request()/requestBlob() 401 handler below and
+ * by call sites outside this module (e.g. the QZ Tray print-signing request)
+ * that need a guaranteed-fresh token before an operation that cannot itself
+ * retry. Clears both tokens on failure so the app falls back to a real login.
+ */
+export function refreshAccessToken(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = performTokenRefresh().finally(() => {
+      refreshInFlight = null
+    })
+  }
+  return refreshInFlight
+}
+
+async function performTokenRefresh(): Promise<boolean> {
+  const refreshToken = getStoredRefreshToken()
+  if (!refreshToken) {
+    return false
+  }
+
+  try {
+    const response = await fetch('/api/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    })
+
+    if (!response.ok) {
+      clearStoredToken()
+      clearStoredRefreshToken()
+      return false
+    }
+
+    const payload = await response.json() as LoginResponse
+    storeToken(payload.token)
+    storeRefreshToken(payload.refreshToken)
+    return true
+  } catch {
+    // Network failure: leave existing tokens in place and let the caller's
+    // original request fail normally — a transient blip shouldn't log anyone out.
+    return false
+  }
+}
+
+/** Best-effort server-side revoke of the refresh token; never throws. Local
+ * session state is cleared by the caller regardless of whether this succeeds. */
+export async function logoutRequest(refreshToken: string): Promise<void> {
+  try {
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    })
+  } catch {
+    // Best-effort — the token still expires on its own, and local state is
+    // cleared unconditionally by the caller.
+  }
+}
+
+// Endpoints the 401-retry logic must never touch: retrying /api/auth/refresh
+// would recurse into itself, and a 401 from /api/auth/login is "wrong
+// password" (a normal outcome to show the user), not an expired session.
+const authRetryExemptPaths = ['/api/auth/refresh', '/api/auth/login']
+
+function isAuthRetryExempt(path: string) {
+  return authRetryExemptPaths.some((exempt) => path.startsWith(exempt))
+}
+
 async function request<T>(path: string, options: RequestInit = {}) {
-  const token = getStoredToken()
-  const headers = new Headers(options.headers)
-  const body = options.body
+  const performFetch = async () => {
+    const token = getStoredToken()
+    const headers = new Headers(options.headers)
+    const body = options.body
 
-  headers.set('Accept', 'application/json')
+    headers.set('Accept', 'application/json')
 
-  const isFormData = typeof FormData !== 'undefined' && body instanceof FormData
-  if (isFormData) {
-    headers.delete('Content-Type')
-  } else if (body != null && !headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json')
+    const isFormData = typeof FormData !== 'undefined' && body instanceof FormData
+    if (isFormData) {
+      headers.delete('Content-Type')
+    } else if (body != null && !headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json')
+    }
+
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`)
+    }
+
+    return fetch(path, { ...options, headers })
   }
 
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`)
-  }
+  let response = await performFetch()
 
-  const response = await fetch(path, {
-    ...options,
-    headers,
-  })
+  // The access token expired mid-session: silently refresh and retry once
+  // rather than bouncing the user to the login screen. This is the core of
+  // "stay logged in" — as long as the refresh token is still valid, an expired
+  // access token is invisible to the user.
+  if (response.status === 401 && !isAuthRetryExempt(path)) {
+    const refreshed = await refreshAccessToken()
+    if (refreshed) {
+      response = await performFetch()
+    }
+  }
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => null)
@@ -1101,19 +1205,27 @@ async function request<T>(path: string, options: RequestInit = {}) {
 }
 
 async function requestBlob(path: string, options: RequestInit = {}) {
-  const token = getStoredToken()
-  const headers = new Headers(options.headers)
+  const performFetch = async () => {
+    const token = getStoredToken()
+    const headers = new Headers(options.headers)
 
-  headers.set('Accept', 'text/csv')
+    headers.set('Accept', 'text/csv')
 
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`)
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`)
+    }
+
+    return fetch(path, { ...options, headers })
   }
 
-  const response = await fetch(path, {
-    ...options,
-    headers,
-  })
+  let response = await performFetch()
+
+  if (response.status === 401 && !isAuthRetryExempt(path)) {
+    const refreshed = await refreshAccessToken()
+    if (refreshed) {
+      response = await performFetch()
+    }
+  }
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => '')

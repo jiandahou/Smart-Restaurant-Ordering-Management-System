@@ -39,6 +39,7 @@ public class AuthController : ControllerBase
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly SignInManager<ApplicationUser> _signInManager;
     private readonly IJwtTokenService _jwtTokenService;
+    private readonly IRefreshTokenService _refreshTokenService;
     private readonly IEmailSender _emailSender;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IOAuthLoginCodeStore _oauthLoginCodeStore;
@@ -56,6 +57,7 @@ public class AuthController : ControllerBase
         UserManager<ApplicationUser> userManager,
         SignInManager<ApplicationUser> signInManager,
         IJwtTokenService jwtTokenService,
+        IRefreshTokenService refreshTokenService,
         IEmailSender emailSender,
         IHttpClientFactory httpClientFactory,
         IOAuthLoginCodeStore oauthLoginCodeStore,
@@ -72,6 +74,7 @@ public class AuthController : ControllerBase
         _userManager = userManager;
         _signInManager = signInManager;
         _jwtTokenService = jwtTokenService;
+        _refreshTokenService = refreshTokenService;
         _emailSender = emailSender;
         _httpClientFactory = httpClientFactory;
         _oauthLoginCodeStore = oauthLoginCodeStore;
@@ -548,6 +551,74 @@ public class AuthController : ControllerBase
         }
 
         return await BuildAuthenticatedResponseAsync(user, "Login successful.");
+    }
+
+    [AllowAnonymous]
+    [HttpPost("refresh")]
+    public async Task<IActionResult> Refresh(RefreshTokenRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.RefreshToken))
+        {
+            return Unauthorized(new { message = "Refresh token is required." });
+        }
+
+        var result = await _refreshTokenService.RotateAsync(request.RefreshToken, GetClientIpAddress());
+
+        if (!result.Succeeded || result.UserId is null || result.NewRawToken is null)
+        {
+            return Unauthorized(new
+            {
+                message = result.FailureReason switch
+                {
+                    RefreshTokenFailureReason.Reused =>
+                        "This session was signed out because the refresh token was reused. Please log in again.",
+                    RefreshTokenFailureReason.Revoked =>
+                        "You have been signed out. Please log in again.",
+                    _ => "Session expired. Please log in again."
+                }
+            });
+        }
+
+        var user = await _userManager.FindByIdAsync(result.UserId);
+        if (user is null)
+        {
+            return Unauthorized(new { message = "Session expired. Please log in again." });
+        }
+
+        var roles = await _userManager.GetRolesAsync(user);
+        var userPayload = await BuildUserPayloadAsync(user, roles);
+        var token = _jwtTokenService.GenerateToken(user.Id, user.Email, user.UserName, roles);
+
+        _reportLogWriter.AddAudit(
+            "Auth.TokenRefreshed",
+            "User",
+            user.Id,
+            user.RestaurantId,
+            "Access token refreshed via refresh token.");
+        await _dbContext.SaveChangesAsync();
+
+        return Ok(new
+        {
+            message = "Token refreshed.",
+            token,
+            refreshToken = result.NewRawToken,
+            user = userPayload
+        });
+    }
+
+    [AllowAnonymous]
+    [HttpPost("logout")]
+    public async Task<IActionResult> Logout(RefreshTokenRequest request)
+    {
+        // Anonymous on purpose: logout must work even when the access token has
+        // already expired. Revocation is idempotent, so this never leaks whether
+        // the supplied token was valid.
+        if (!string.IsNullOrWhiteSpace(request.RefreshToken))
+        {
+            await _refreshTokenService.RevokeAsync(request.RefreshToken, GetClientIpAddress());
+        }
+
+        return Ok(new { message = "Logged out." });
     }
 
     [AllowAnonymous]
@@ -1711,6 +1782,7 @@ public class AuthController : ControllerBase
             user.Email,
             user.UserName,
             roles);
+        var refreshToken = await _refreshTokenService.IssueAsync(user.Id, GetClientIpAddress());
 
         _reportLogWriter.AddAudit(
             GetAuthenticatedResponseAuditAction(message),
@@ -1730,9 +1802,12 @@ public class AuthController : ControllerBase
         {
             message,
             token,
+            refreshToken,
             user = userPayload
         });
     }
+
+    private string? GetClientIpAddress() => HttpContext.Connection.RemoteIpAddress?.ToString();
 
     private async Task<object> BuildUserPayloadAsync(ApplicationUser user, IEnumerable<string> roles)
     {

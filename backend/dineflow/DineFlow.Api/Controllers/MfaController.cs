@@ -28,6 +28,7 @@ public sealed class MfaController : ControllerBase
     private readonly IEmailSender _emailSender;
     private readonly IMfaEmailSetupCodeStore _emailSetupCodeStore;
     private readonly IJwtTokenService _jwtTokenService;
+    private readonly IRefreshTokenService _refreshTokenService;
     private readonly IMfaLoginChallengeStore _loginChallengeStore;
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly ReportLogWriter _reportLogWriter;
@@ -37,6 +38,7 @@ public sealed class MfaController : ControllerBase
         IEmailSender emailSender,
         IMfaEmailSetupCodeStore emailSetupCodeStore,
         IJwtTokenService jwtTokenService,
+        IRefreshTokenService refreshTokenService,
         IMfaLoginChallengeStore loginChallengeStore,
         UserManager<ApplicationUser> userManager,
         ReportLogWriter reportLogWriter)
@@ -45,6 +47,7 @@ public sealed class MfaController : ControllerBase
         _emailSender = emailSender;
         _emailSetupCodeStore = emailSetupCodeStore;
         _jwtTokenService = jwtTokenService;
+        _refreshTokenService = refreshTokenService;
         _loginChallengeStore = loginChallengeStore;
         _userManager = userManager;
         _reportLogWriter = reportLogWriter;
@@ -705,6 +708,9 @@ public sealed class MfaController : ControllerBase
             user.Email,
             user.UserName,
             roles);
+        var refreshToken = await _refreshTokenService.IssueAsync(
+            user.Id,
+            HttpContext.Connection.RemoteIpAddress?.ToString());
 
         _reportLogWriter.AddAudit(
             "Auth.MfaLoginSucceeded",
@@ -724,6 +730,7 @@ public sealed class MfaController : ControllerBase
         {
             message,
             token,
+            refreshToken,
             user = new
             {
                 id = user.Id,

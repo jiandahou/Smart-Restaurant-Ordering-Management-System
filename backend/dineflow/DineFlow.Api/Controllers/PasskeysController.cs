@@ -22,6 +22,7 @@ public sealed class PasskeysController : ControllerBase
     private readonly AppDbContext _dbContext;
     private readonly Fido2 _fido2;
     private readonly IJwtTokenService _jwtTokenService;
+    private readonly IRefreshTokenService _refreshTokenService;
     private readonly IMfaEmailSetupCodeStore _mfaEmailCodeStore;
     private readonly IPasskeyAssertionOptionsStore _assertionOptionsStore;
     private readonly IPasskeyRegistrationOptionsStore _registrationOptionsStore;
@@ -32,6 +33,7 @@ public sealed class PasskeysController : ControllerBase
         AppDbContext dbContext,
         Fido2 fido2,
         IJwtTokenService jwtTokenService,
+        IRefreshTokenService refreshTokenService,
         IMfaEmailSetupCodeStore mfaEmailCodeStore,
         IPasskeyAssertionOptionsStore assertionOptionsStore,
         IPasskeyRegistrationOptionsStore registrationOptionsStore,
@@ -41,6 +43,7 @@ public sealed class PasskeysController : ControllerBase
         _dbContext = dbContext;
         _fido2 = fido2;
         _jwtTokenService = jwtTokenService;
+        _refreshTokenService = refreshTokenService;
         _mfaEmailCodeStore = mfaEmailCodeStore;
         _assertionOptionsStore = assertionOptionsStore;
         _registrationOptionsStore = registrationOptionsStore;
@@ -431,6 +434,9 @@ public sealed class PasskeysController : ControllerBase
             user.Email,
             user.UserName,
             roles);
+        var refreshToken = await _refreshTokenService.IssueAsync(
+            user.Id,
+            HttpContext.Connection.RemoteIpAddress?.ToString());
 
         _reportLogWriter.AddAudit(
             "Auth.PasskeyLoginSucceeded",
@@ -450,6 +456,7 @@ public sealed class PasskeysController : ControllerBase
         {
             message,
             token,
+            refreshToken,
             user = new
             {
                 id = user.Id,

@@ -49,6 +49,7 @@ const demoIdentities = [
 
 type StoredOwnerSession = {
   token: string
+  refreshToken: string
   user: AuthUser
 }
 
@@ -81,12 +82,12 @@ function hasPlatformOwnerRole(user: AuthUser | null) {
 export function DemoIdentitySwitcher() {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
-  const { user, token } = useAuth()
+  const { user, token, refreshToken } = useAuth()
   const [open, setOpen] = useState(false)
   const [switchingEmail, setSwitchingEmail] = useState<string | null>(null)
   const [restoring, setRestoring] = useState(false)
   const [storedOwnerSession, setStoredOwnerSession] = useState<StoredOwnerSession | null>(() => readOwnerSession())
-  const canStoreOwner = hasPlatformOwnerRole(user) && Boolean(token)
+  const canStoreOwner = hasPlatformOwnerRole(user) && Boolean(token) && Boolean(refreshToken)
   const canShowSwitcher = demoLoginEnabled && (canStoreOwner || storedOwnerSession)
 
   const currentRoleLabel = useMemo(() => {
@@ -104,9 +105,9 @@ export function DemoIdentitySwitcher() {
       return
     }
 
-    if (canStoreOwner && user && token) {
-      writeOwnerSession({ token, user })
-      setStoredOwnerSession({ token, user })
+    if (canStoreOwner && user && token && refreshToken) {
+      writeOwnerSession({ token, refreshToken, user })
+      setStoredOwnerSession({ token, refreshToken, user })
     }
 
     setSwitchingEmail(identity.email)
@@ -139,6 +140,7 @@ export function DemoIdentitySwitcher() {
     dispatch(setAuthenticated({
       message: 'Restored PlatformOwner demo session.',
       token: storedOwnerSession.token,
+      refreshToken: storedOwnerSession.refreshToken,
       user: storedOwnerSession.user,
     }))
     clearOwnerSession()
