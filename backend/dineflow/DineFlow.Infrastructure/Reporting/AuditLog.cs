@@ -12,6 +12,12 @@ public class AuditLog
 
     public string? ActorRoles { get; set; }
 
+    public string? ActorType { get; set; }
+
+    public string? Source { get; set; }
+
+    public string? CorrelationId { get; set; }
+
     public string Action { get; set; } = string.Empty;
 
     public string EntityType { get; set; } = string.Empty;

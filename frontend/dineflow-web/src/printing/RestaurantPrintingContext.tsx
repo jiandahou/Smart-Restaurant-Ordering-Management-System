@@ -10,7 +10,13 @@ import {
   type ReactNode,
 } from 'react'
 import { toast } from 'sonner'
-import { getRestaurants, type AdminOrder, type Restaurant } from '@/api/auth'
+import {
+  getRestaurants,
+  getRestaurantOperations,
+  updateRestaurantAutoAccept,
+  type AdminOrder,
+  type Restaurant,
+} from '@/api/auth'
 import {
   claimPrintJobs,
   getPrintJobs,
@@ -41,13 +47,16 @@ import {
   printKitchenTicketWithWebUsb,
   QZ_TRAY_DOWNLOAD_URL,
   QzTrayError,
+  readStoredFrontCounterPrinterSettings,
   readStoredThermalPrinterSettings,
   releaseWebSerialSession,
   startQzKeepAlive,
   startWebSerialKeepAlive,
   stopQzKeepAlive,
   stopWebSerialKeepAlive,
+  storeFrontCounterPrinterSettings,
   storeThermalPrinterSettings,
+  type KitchenTicket,
   type QzTrayErrorReason,
   type ThermalPrinterMode,
   type ThermalPrinterSettings,
@@ -134,10 +143,13 @@ function readPlatformRestaurantId(): string | undefined {
 }
 
 export type GlobalPrintResult = 'browser' | 'queued' | 'sent' | 'failed'
+export type OrderRealtimeState = 'connecting' | 'connected' | 'reconnecting' | 'offline'
 
 type RestaurantPrintingContextValue = {
   settings: ThermalPrinterSettings
   updateSettings: (updates: Partial<ThermalPrinterSettings>) => void
+  frontCounterSettings: ThermalPrinterSettings
+  updateFrontCounterSettings: (updates: Partial<ThermalPrinterSettings>) => void
   settingsOpen: boolean
   setSettingsOpen: (open: boolean) => void
   audioEnabled: boolean
@@ -147,14 +159,19 @@ type RestaurantPrintingContextValue = {
   printStationLeaseHeld: boolean
   printingOrderId: string | null
   orderEventRevision: number
+  orderRealtimeState: OrderRealtimeState
   isPlatformOwner: boolean
   activeRestaurantId?: string
   printRestaurants: Restaurant[]
   setPlatformRestaurantId: (restaurantId?: string) => void
+  autoAcceptOrders: boolean
+  autoAcceptUpdating: boolean
+  setAutoAcceptOrders: (enabled: boolean) => Promise<void>
   refreshPrintJobs: (showError?: boolean) => Promise<void>
   retryQueuedPrint: (jobId: string) => Promise<void>
   printOrder: (order: AdminOrder) => Promise<GlobalPrintResult>
-  printTestTicket: (restaurantName: string) => Promise<void>
+  printFrontCounterTicket: (ticket: KitchenTicket) => Promise<GlobalPrintResult>
+  printTestTicket: (target: 'kitchen' | 'front-counter', restaurantName: string) => Promise<void>
 }
 
 const RestaurantPrintingContext = createContext<RestaurantPrintingContextValue | null>(null)
@@ -167,11 +184,17 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
     readPlatformRestaurantId,
   )
   const [printRestaurants, setPrintRestaurants] = useState<Restaurant[]>([])
+  const [autoAcceptOrders, setAutoAcceptOrdersState] = useState(false)
+  const [autoAcceptUpdating, setAutoAcceptUpdating] = useState(false)
   const activeRestaurantId = user?.restaurantId
     ?? (isPlatformOwner ? platformRestaurantId : undefined)
 
   const [settings, setSettings] = useState<ThermalPrinterSettings>(readStoredThermalPrinterSettings)
   const settingsRef = useRef(settings)
+  const [frontCounterSettings, setFrontCounterSettings] = useState<ThermalPrinterSettings>(
+    readStoredFrontCounterPrinterSettings,
+  )
+  const frontCounterSettingsRef = useRef(frontCounterSettings)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [audioEnabled, setAudioEnabled] = useState(true)
   const audioEnabledRef = useRef(true)
@@ -186,9 +209,11 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
   const [printStationLeaseHeld, setPrintStationLeaseHeld] = useState(false)
   const [printingOrderId, setPrintingOrderId] = useState<string | null>(null)
   const [orderEventRevision, setOrderEventRevision] = useState(0)
+  const [orderRealtimeState, setOrderRealtimeState] = useState<OrderRealtimeState>('offline')
   const stationIdentityRef = useRef(getPrintStationIdentity())
   const lastPrintErrorRef = useRef<string | null>(null)
   const dispatchChainRef = useRef<Promise<void>>(Promise.resolve())
+  const frontCounterDispatchChainRef = useRef<Promise<void>>(Promise.resolve())
   const sweepRunningRef = useRef(false)
   const notifiedOrderIdsRef = useRef(new Set<string>())
   const runSweepRef = useRef<(force?: boolean) => Promise<void>>(() => Promise.resolve())
@@ -226,6 +251,51 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
   }, [isPlatformOwner])
 
   useEffect(() => {
+    if (!canUseRestaurantPrinting || !activeRestaurantId) return
+
+    let cancelled = false
+    void getRestaurantOperations(activeRestaurantId)
+      .then((operations) => {
+        if (!cancelled) setAutoAcceptOrdersState(operations.autoAcceptOrders)
+      })
+      .catch((error) => {
+        recordPrinterDiagnostic('restaurant_operations_load_failed', {
+          restaurantId: activeRestaurantId,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeRestaurantId, canUseRestaurantPrinting])
+
+  const setAutoAcceptOrders = useCallback(async (enabled: boolean) => {
+    if (!activeRestaurantId || autoAcceptUpdating) return
+    setAutoAcceptUpdating(true)
+    try {
+      const response = await updateRestaurantAutoAccept(activeRestaurantId, enabled)
+      setAutoAcceptOrdersState(response.autoAcceptOrders)
+      setPrintRestaurants((restaurants) => restaurants.map((restaurant) => (
+        restaurant.id === response.id
+          ? { ...restaurant, autoAcceptOrders: response.autoAcceptOrders }
+          : restaurant
+      )))
+      toast.success(enabled ? 'Automatic acceptance enabled' : 'Manual acceptance enabled', {
+        description: enabled
+          ? 'Eligible new orders will move to Accepted automatically.'
+          : 'New orders will wait for a staff member to accept them.',
+      })
+    } catch (error) {
+      toast.error('Could not update automatic acceptance', {
+        description: error instanceof Error ? error.message : 'The request failed.',
+      })
+    } finally {
+      setAutoAcceptUpdating(false)
+    }
+  }, [activeRestaurantId, autoAcceptUpdating])
+
+  useEffect(() => {
     audioEnabledRef.current = audioEnabled
   }, [audioEnabled])
 
@@ -233,6 +303,11 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
     settingsRef.current = settings
     storeThermalPrinterSettings(settings)
   }, [settings])
+
+  useEffect(() => {
+    frontCounterSettingsRef.current = frontCounterSettings
+    storeFrontCounterPrinterSettings(frontCounterSettings)
+  }, [frontCounterSettings])
 
   useEffect(() => {
     try {
@@ -284,28 +359,53 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
     setSettings(next)
   }, [])
 
+  const updateFrontCounterSettings = useCallback((updates: Partial<ThermalPrinterSettings>) => {
+    const next = {
+      ...frontCounterSettingsRef.current,
+      ...updates,
+      autoPrintNewOrders: false,
+    }
+    frontCounterSettingsRef.current = next
+    setFrontCounterSettings(next)
+  }, [])
+
   useEffect(() => {
     stopQzKeepAlive()
     stopWebSerialKeepAlive()
     if (!canUseRestaurantPrinting) return
 
-    if (settings.mode === 'qz-tray') {
+    if (settings.mode === 'qz-tray' || frontCounterSettings.mode === 'qz-tray') {
       startQzKeepAlive()
       return () => stopQzKeepAlive()
     }
-    if (settings.mode === 'web-serial') {
-      startWebSerialKeepAlive(() => settingsRef.current.serialBaudRate || 9600)
+    if (settings.mode === 'web-serial' || frontCounterSettings.mode === 'web-serial') {
+      startWebSerialKeepAlive(() => (
+        settingsRef.current.mode === 'web-serial'
+          ? settingsRef.current.serialBaudRate
+          : frontCounterSettingsRef.current.serialBaudRate
+      ) || 9600)
       return () => stopWebSerialKeepAlive()
     }
-  }, [canUseRestaurantPrinting, settings.mode])
+  }, [canUseRestaurantPrinting, frontCounterSettings.mode, settings.mode])
 
   useEffect(() => {
-    const usingQzSerial = settings.mode === 'qz-tray' && settings.qzTargetType === 'serial'
-    const usingQzNetwork = settings.mode === 'qz-tray' && settings.qzTargetType === 'network'
-    if (settings.mode !== 'web-serial') void releaseWebSerialSession()
+    const usingQzSerial =
+      (settings.mode === 'qz-tray' && settings.qzTargetType === 'serial')
+      || (frontCounterSettings.mode === 'qz-tray' && frontCounterSettings.qzTargetType === 'serial')
+    const usingQzNetwork =
+      (settings.mode === 'qz-tray' && settings.qzTargetType === 'network')
+      || (frontCounterSettings.mode === 'qz-tray' && frontCounterSettings.qzTargetType === 'network')
+    if (settings.mode !== 'web-serial' && frontCounterSettings.mode !== 'web-serial') {
+      void releaseWebSerialSession()
+    }
     if (!usingQzSerial) void closeQzSerialPorts()
     if (!usingQzNetwork) void closeQzNetworkSockets()
-  }, [settings.mode, settings.qzTargetType])
+  }, [
+    frontCounterSettings.mode,
+    frontCounterSettings.qzTargetType,
+    settings.mode,
+    settings.qzTargetType,
+  ])
 
   useEffect(() => {
     if (settings.qzTargetType === 'serial') void closeQzSerialPorts()
@@ -555,6 +655,7 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
 
   useEffect(() => {
     if (!canUseRestaurantPrinting || !user) return
+    void Promise.resolve().then(() => setOrderRealtimeState('connecting'))
     let hiddenAt = document.hidden ? Date.now() : null
     let recoveryTimer: number | null = null
 
@@ -598,25 +699,55 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
       onOrderUpdated: (update) => notifyOrderActivity('updated', update.restaurantId ?? undefined),
       onOrderPaymentUpdated: (update) => notifyOrderActivity('payment', update.restaurantId ?? undefined),
       onOrderDeleted: (update) => notifyOrderActivity('deleted', update.restaurantId ?? undefined),
-      onConnected: () => recordPrinterDiagnostic('global_signalr_connected'),
-      onReconnecting: (error) => recordPrinterDiagnostic('global_signalr_reconnecting', {
-        message: error?.message,
-      }),
+      onConnected: () => {
+        setOrderRealtimeState('connected')
+        recordPrinterDiagnostic('global_signalr_connected')
+      },
+      onReconnecting: (error) => {
+        setOrderRealtimeState('reconnecting')
+        recordPrinterDiagnostic('global_signalr_reconnecting', {
+          message: error?.message,
+        })
+      },
       onReconnected: () => {
+        setOrderRealtimeState('connected')
         recordPrinterDiagnostic('global_signalr_reconnected')
         notifyOrderActivity('reconnected', activeRestaurantId)
       },
-      onClosed: (error) => recordPrinterDiagnostic('global_signalr_closed', {
-        message: error?.message,
-      }),
+      onClosed: (error) => {
+        setOrderRealtimeState('offline')
+        recordPrinterDiagnostic('global_signalr_closed', {
+          message: error?.message,
+        })
+      },
     })
-    void client.start().catch((error) => {
-      recordPrinterDiagnostic('global_signalr_start_failed', {
-        message: error instanceof Error ? error.message : String(error),
-      })
-    })
+    let disposed = false
+    let inFlightStart: Promise<void> | null = null
+    const startRealtime = (reportFailure: boolean) => {
+      if (inFlightStart) return inFlightStart
+
+      const attempt = client.start()
+        .catch((error) => {
+          setOrderRealtimeState('offline')
+          if (reportFailure) {
+            recordPrinterDiagnostic('global_signalr_start_failed', {
+              message: error instanceof Error ? error.message : String(error),
+            })
+          }
+        })
+        .finally(() => {
+          if (inFlightStart === attempt) inFlightStart = null
+        })
+      inFlightStart = attempt
+      return attempt
+    }
+    const startTimer = window.setTimeout(() => {
+      if (disposed) return
+      void startRealtime(true)
+    }, 150)
 
     const recover = (trigger: string) => {
+      if (disposed) return
       const hiddenDurationMs = hiddenAt === null ? null : Date.now() - hiddenAt
       hiddenAt = null
       recordPrinterDiagnostic('global_printing_recovering', {
@@ -625,7 +756,7 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
         visibilityState: document.visibilityState,
       })
       setOrderEventRevision((current) => current + 1)
-      void client.start().catch(() => undefined)
+      void startRealtime(false)
       void runSweepRef.current()
     }
     const onVisibilityChange = () => {
@@ -642,11 +773,17 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
     window.addEventListener('online', onOnline)
 
     return () => {
+      disposed = true
+      window.clearTimeout(startTimer)
       if (recoveryTimer !== null) window.clearTimeout(recoveryTimer)
       document.removeEventListener('visibilitychange', onVisibilityChange)
       window.removeEventListener('focus', onFocus)
       window.removeEventListener('online', onOnline)
-      void client.stop()
+      if (inFlightStart) {
+        void inFlightStart.finally(() => client.stop())
+      } else {
+        void client.stop()
+      }
     }
   }, [activeRestaurantId, canUseRestaurantPrinting, isPlatformOwner, user])
 
@@ -699,31 +836,94 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
     }
   }, [activeRestaurantId, dispatchOrderTicket, refreshPrintJobs, runPrintSweep])
 
-  const printTestTicket = useCallback(async (restaurantName: string) => {
-    const now = new Date()
-    const currentSettings = settingsRef.current
-    const operation = dispatchChainRef.current
+  const printFrontCounterTicket = useCallback(async (
+    ticket: KitchenTicket,
+  ): Promise<GlobalPrintResult> => {
+    const currentSettings = frontCounterSettingsRef.current
+    if (currentSettings.mode === 'browser') return 'browser'
+
+    const operation = frontCounterDispatchChainRef.current
       .catch(() => undefined)
-      .then(() => printKitchenTicketWithQzTray({
-        orderNumber: 'TEST-001',
-        restaurantName: restaurantName === 'All restaurants' ? 'DineFlow' : restaurantName,
-        orderScope: 'Printer diagnostics',
-        status: 'TEST',
-        createdAt: now,
-        printedAt: now,
-        itemCount: 2,
-        orderNote: 'English + 中文 encoding check',
-        items: [
-          {
-            quantity: 1,
-            name: 'TEST ITEM / 测试项目',
-            note: 'If this line is readable, encoding is correct.',
-            optionGroups: [{ groupName: 'Connection', options: [currentSettings.qzTargetType] }],
-          },
-          { quantity: 1, name: '0123456789 !@#$%', optionGroups: [] },
-        ],
-      }, currentSettings))
-    dispatchChainRef.current = operation.then(() => undefined, () => undefined)
+      .then(async () => {
+        if (currentSettings.mode === 'qz-tray') {
+          await printKitchenTicketWithQzTray(ticket, currentSettings)
+        } else if (currentSettings.mode === 'web-serial') {
+          await printKitchenTicketWithWebSerial(ticket, currentSettings)
+        } else if (currentSettings.mode === 'web-usb') {
+          await printKitchenTicketWithWebUsb(ticket, currentSettings)
+        } else {
+          await printKitchenTicketWithWebBluetooth(ticket, currentSettings)
+        }
+      })
+    frontCounterDispatchChainRef.current = operation.then(() => undefined, () => undefined)
+
+    try {
+      await operation
+      toast.success('Front counter receipt sent', {
+        description: `${ticket.orderNumber} via ${printerModeLabels[currentSettings.mode]}.`,
+      })
+      recordPrinterDiagnostic('front_counter_print_succeeded', {
+        orderNumber: ticket.orderNumber,
+        mode: currentSettings.mode,
+      })
+      return 'sent'
+    } catch (error) {
+      recordPrinterDiagnostic('front_counter_print_failed', {
+        orderNumber: ticket.orderNumber,
+        mode: currentSettings.mode,
+        message: error instanceof Error ? error.message : String(error),
+      })
+      toast.error('Front counter receipt could not be printed', {
+        description: error instanceof Error ? error.message : 'The print request failed.',
+      })
+      return 'failed'
+    }
+  }, [])
+
+  const printTestTicket = useCallback(async (
+    target: 'kitchen' | 'front-counter',
+    restaurantName: string,
+  ) => {
+    const now = new Date()
+    const currentSettings = target === 'kitchen'
+      ? settingsRef.current
+      : frontCounterSettingsRef.current
+    const chainRef = target === 'kitchen' ? dispatchChainRef : frontCounterDispatchChainRef
+    const operation = chainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const ticket: KitchenTicket = {
+          orderNumber: 'TEST-001',
+          restaurantName: restaurantName === 'All restaurants' ? 'DineFlow' : restaurantName,
+          orderScope: target === 'kitchen' ? 'Kitchen printer diagnostics' : 'Front counter diagnostics',
+          status: 'TEST',
+          createdAt: now,
+          printedAt: now,
+          itemCount: 2,
+          orderNote: 'English + 中文 encoding check',
+          items: [
+            {
+              quantity: 1,
+              name: 'TEST ITEM / 测试项目',
+              note: 'If this line is readable, encoding is correct.',
+              optionGroups: [{ groupName: 'Connection', options: [currentSettings.qzTargetType] }],
+            },
+            { quantity: 1, name: '0123456789 !@#$%', optionGroups: [] },
+          ],
+        }
+        if (currentSettings.mode === 'qz-tray') {
+          await printKitchenTicketWithQzTray(ticket, currentSettings)
+        } else if (currentSettings.mode === 'web-serial') {
+          await printKitchenTicketWithWebSerial(ticket, currentSettings)
+        } else if (currentSettings.mode === 'web-usb') {
+          await printKitchenTicketWithWebUsb(ticket, currentSettings)
+        } else if (currentSettings.mode === 'web-bluetooth') {
+          await printKitchenTicketWithWebBluetooth(ticket, currentSettings)
+        } else {
+          throw new Error('Browser printing does not support a direct test ticket.')
+        }
+      })
+    chainRef.current = operation.then(() => undefined, () => undefined)
     try {
       await operation
       toast.success('Test ticket sent')
@@ -737,6 +937,8 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
   const value = useMemo<RestaurantPrintingContextValue>(() => ({
     settings,
     updateSettings,
+    frontCounterSettings,
+    updateFrontCounterSettings,
     settingsOpen,
     setSettingsOpen,
     audioEnabled,
@@ -746,22 +948,31 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
     printStationLeaseHeld,
     printingOrderId,
     orderEventRevision,
+    orderRealtimeState,
     isPlatformOwner,
     activeRestaurantId,
     printRestaurants,
     setPlatformRestaurantId,
+    autoAcceptOrders,
+    autoAcceptUpdating,
+    setAutoAcceptOrders,
     refreshPrintJobs,
     retryQueuedPrint,
     printOrder,
+    printFrontCounterTicket,
     printTestTicket,
   }), [
     activeRestaurantId,
+    autoAcceptOrders,
+    autoAcceptUpdating,
     audioEnabled,
     isPlatformOwner,
     orderEventRevision,
+    orderRealtimeState,
     printJobs,
     printJobsLoading,
     printOrder,
+    printFrontCounterTicket,
     printRestaurants,
     printStationLeaseHeld,
     printTestTicket,
@@ -769,10 +980,13 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
     refreshPrintJobs,
     retryQueuedPrint,
     setPlatformRestaurantId,
+    setAutoAcceptOrders,
     settings,
+    frontCounterSettings,
     settingsOpen,
     toggleAudio,
     updateSettings,
+    updateFrontCounterSettings,
   ])
 
   return (

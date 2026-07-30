@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations;
+
 namespace DineFlow.Api.Contracts.Order;
 
 public sealed class FrontCounterListRequest
@@ -5,11 +7,22 @@ public sealed class FrontCounterListRequest
     public Guid? RestaurantId { get; set; }
 
     public string? Search { get; set; }
+
+    [Range(25, 500)]
+    public int PageSize { get; set; } = 100;
 }
 
 public sealed class FrontCounterTakeawayResponse
 {
     public DateTime GeneratedAt { get; set; }
+
+    /// <summary>
+    /// The restaurant's current business day, used by the UI to label pickup dates as
+    /// today / yesterday. Pickup numbers restart at 1 on this boundary.
+    /// </summary>
+    public DateOnly BusinessDate { get; set; }
+
+    public int TotalOrders { get; set; }
 
     public List<AdminOrderResponse> Orders { get; set; } = [];
 }
@@ -132,7 +145,34 @@ public sealed class FrontCounterSettleOrderResponse
     public AdminOrderResponse Order { get; set; } = new();
 }
 
+public sealed class FrontCounterRecordPaymentRequest
+{
+    public string Tender { get; set; } = "Card";
+
+    public decimal? AmountReceived { get; set; }
+}
+
+public sealed class FrontCounterRecordPaymentResponse
+{
+    public AdminOrderResponse Order { get; set; } = new();
+
+    public decimal AmountReceived { get; set; }
+
+    public decimal ChangeDue { get; set; }
+}
+
+public sealed class FrontCounterSettleTableSessionRequest
+{
+    public string Tender { get; set; } = "Card";
+
+    public decimal? AmountReceived { get; set; }
+}
+
 public sealed class FrontCounterSettleTableSessionResponse
 {
     public FrontCounterTableSessionDetailResponse TableSession { get; set; } = new();
+
+    public decimal AmountReceived { get; set; }
+
+    public decimal ChangeDue { get; set; }
 }

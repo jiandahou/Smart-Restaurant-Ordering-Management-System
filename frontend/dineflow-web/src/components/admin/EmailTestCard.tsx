@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Check, ChevronsUpDown, Mail, Send } from 'lucide-react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { toast } from 'sonner'
 import { z } from 'zod'
 import { sendTestEmail, type UserListItem } from '../../api/auth'
@@ -30,9 +30,16 @@ type EmailTestFormValues = z.infer<typeof emailTestSchema>
 type EmailTestCardProps = {
   users: UserListItem[]
   canSendEmail: boolean
+  usersLoading?: boolean
+  usersError?: string | null
 }
 
-export function EmailTestCard({ users, canSendEmail }: EmailTestCardProps) {
+export function EmailTestCard({
+  users,
+  canSendEmail,
+  usersLoading = false,
+  usersError,
+}: EmailTestCardProps) {
   const [recipientOpen, setRecipientOpen] = useState(false)
   const recipientOptions = useMemo(() => {
     return users
@@ -49,7 +56,7 @@ export function EmailTestCard({ users, canSendEmail }: EmailTestCardProps) {
     },
   })
 
-  const selectedEmail = form.watch('to')
+  const selectedEmail = useWatch({ control: form.control, name: 'to' })
 
   const handleSubmit = async (values: EmailTestFormValues) => {
     if (!canSendEmail) {
@@ -86,6 +93,11 @@ export function EmailTestCard({ users, canSendEmail }: EmailTestCardProps) {
         {!canSendEmail && (
           <p className="form-error">Only platform owners can send test emails.</p>
         )}
+        {usersError && (
+          <p className="form-error" role="alert">
+            The user picker could not be loaded. You can still enter a recipient manually.
+          </p>
+        )}
         <Form {...form}>
           <form className="form-grid email-test-form" onSubmit={form.handleSubmit(handleSubmit)}>
             <FormField
@@ -104,10 +116,11 @@ export function EmailTestCard({ users, canSendEmail }: EmailTestCardProps) {
                           type="button"
                           variant="outline"
                           className="recipient-picker-trigger"
-                          disabled={recipientOptions.length === 0}
+                          disabled={usersLoading || recipientOptions.length === 0}
+                          aria-label="Choose a user recipient"
                         >
                           <Mail size={16} />
-                          User
+                          {usersLoading ? 'Loading users' : 'User'}
                           <ChevronsUpDown size={14} />
                         </Button>
                       </PopoverTrigger>

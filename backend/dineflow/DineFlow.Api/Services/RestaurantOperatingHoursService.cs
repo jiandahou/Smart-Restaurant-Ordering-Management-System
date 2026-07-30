@@ -6,33 +6,164 @@ namespace DineFlow.Api.Services;
 
 public sealed class RestaurantOperatingHoursService
 {
+    /// <summary>How far ahead to look for the next open/close flip. Covers a week of closures.</summary>
+    private const int TransitionLookaheadDays = 14;
+
     public const string DefaultOpeningHoursJson =
         "[{\"dayOfWeek\":0,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":1,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":2,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":3,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":4,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":5,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":6,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]}]";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public RestaurantOrderingAvailability GetAvailability(Restaurant restaurant, DateTime? utcNow = null)
+    /// <summary>
+    /// A timed pause lapses on its own, so the stored flag alone is not the answer — callers must
+    /// use this rather than reading <see cref="Restaurant.AcceptingOrders"/> directly.
+    /// </summary>
+    public static bool IsAcceptingOrders(Restaurant restaurant, DateTime? utcNow = null)
     {
-        if (!restaurant.IsActive)
+        if (restaurant.AcceptingOrders)
         {
-            return new RestaurantOrderingAvailability(
-                false,
-                false,
-                restaurant.AcceptingOrders,
-                "Inactive",
-                "Restaurant is not available for ordering.");
+            return true;
         }
 
-        if (!restaurant.AcceptingOrders)
+        return restaurant.AcceptingOrdersPausedUntil.HasValue &&
+            restaurant.AcceptingOrdersPausedUntil.Value <= (utcNow ?? DateTime.UtcNow);
+    }
+
+    /// <summary>The restaurant's own wall clock, which is the only clock its schedule is written in.</summary>
+    public static DateTime GetLocalNow(Restaurant restaurant, DateTime? utcNow = null) =>
+        ConvertToRestaurantTime(utcNow ?? DateTime.UtcNow, restaurant.Timezone);
+
+    public RestaurantOrderingAvailability GetAvailability(Restaurant restaurant, DateTime? utcNow = null) =>
+        GetAvailability(
+            restaurant.IsActive,
+            restaurant.AcceptingOrders,
+            restaurant.AcceptingOrdersPausedUntil,
+            restaurant.Timezone,
+            restaurant.OpeningHoursJson,
+            restaurant.SpecialOpeningDaysJson,
+            utcNow);
+
+    /// <summary>
+    /// Field-based overload for call sites that only have a projection (for example the paged list
+    /// endpoint) rather than a tracked entity.
+    /// </summary>
+    public RestaurantOrderingAvailability GetAvailability(
+        bool isActive,
+        bool acceptingOrdersFlag,
+        DateTime? pausedUntilUtc,
+        string timezone,
+        string openingHoursJson,
+        string specialOpeningDaysJson,
+        DateTime? utcNow = null)
+    {
+        var now = utcNow ?? DateTime.UtcNow;
+        var acceptingOrders = acceptingOrdersFlag ||
+            (pausedUntilUtc.HasValue && pausedUntilUtc.Value <= now);
+
+        if (!isActive)
         {
             return new RestaurantOrderingAvailability(
                 false,
                 false,
+                acceptingOrders,
+                "Inactive",
+                "Restaurant is not available for ordering.",
+                null,
+                null,
+                null);
+        }
+
+        var localNow = ConvertToRestaurantTime(now, timezone);
+        var openingHours = TryParseOpeningHours(openingHoursJson, out var parsedHours, out _)
+            ? parsedHours
+            : CreateDefaultOpeningHours();
+        var specialOpeningDays = TryParseSpecialOpeningDays(specialOpeningDaysJson, out var parsedSpecialDays, out _)
+            ? parsedSpecialDays
+            : [];
+        var isWithinOpeningHours = IsWithinOpeningHours(openingHours, specialOpeningDays, localNow);
+        var (nextTransition, nextOpening) = GetUpcomingMoments(
+            openingHours,
+            specialOpeningDays,
+            localNow,
+            isWithinOpeningHours);
+
+        if (!acceptingOrders)
+        {
+            return new RestaurantOrderingAvailability(
+                false,
+                isWithinOpeningHours,
                 false,
                 "Paused",
-                "Restaurant is paused and is not accepting orders right now.");
+                pausedUntilUtc.HasValue
+                    ? "Restaurant is paused and will resume automatically."
+                    : "Restaurant is paused and is not accepting orders right now.",
+                nextTransition,
+                nextOpening,
+                pausedUntilUtc);
         }
 
+        return isWithinOpeningHours
+            ? new RestaurantOrderingAvailability(
+                true,
+                true,
+                true,
+                "Open",
+                "Restaurant is accepting orders.",
+                nextTransition,
+                nextOpening,
+                null)
+            : new RestaurantOrderingAvailability(
+                false,
+                false,
+                true,
+                "Closed",
+                "Restaurant is outside opening hours and is not accepting orders right now.",
+                nextTransition,
+                nextOpening,
+                null);
+    }
+
+    /// <summary>
+    /// The next open/closed flip and the next opening, in restaurant-local time.
+    ///
+    /// These differ while trading: the next flip is today's closing time, whereas the next opening
+    /// is tomorrow's. Both are null when the lookahead shows no such moment (for example 24/7).
+    /// </summary>
+    private static (DateTime? NextTransition, DateTime? NextOpening) GetUpcomingMoments(
+        IReadOnlyList<RestaurantOpeningHoursDay> openingHours,
+        IReadOnlyList<RestaurantSpecialOpeningDay> specialOpeningDays,
+        DateTime localNow,
+        bool isOpenNow)
+    {
+        var (intervals, horizonEnd) = BuildOpeningIntervals(openingHours, specialOpeningDays, localNow);
+
+        if (!isOpenNow)
+        {
+            // While closed the next flip is itself the next opening.
+            var upcoming = NextStartAfter(intervals, localNow);
+            return (upcoming, upcoming);
+        }
+
+        var runEnd = GetContiguousRunEnd(intervals, localNow, horizonEnd);
+        return runEnd is null
+            ? (null, null)
+            : (runEnd, NextStartAfter(intervals, runEnd.Value));
+    }
+
+    private static DateTime? NextStartAfter(List<OpeningInterval> intervals, DateTime moment) =>
+        intervals
+            .Where(interval => interval.Start > moment)
+            .Select(interval => (DateTime?)interval.Start)
+            .Min();
+
+    /// <summary>
+    /// The next time the restaurant opens after <paramref name="utcNow"/>, as a UTC instant. When it
+    /// is currently open this skips past the current trading run, so "pause until we next open"
+    /// means tomorrow's opening rather than right now. Null when the schedule shows no upcoming
+    /// opening within the lookahead.
+    /// </summary>
+    public DateTime? GetNextOpeningUtc(Restaurant restaurant, DateTime? utcNow = null)
+    {
         var localNow = ConvertToRestaurantTime(utcNow ?? DateTime.UtcNow, restaurant.Timezone);
         var openingHours = TryParseOpeningHours(restaurant.OpeningHoursJson, out var parsedHours, out _)
             ? parsedHours
@@ -40,16 +171,111 @@ public sealed class RestaurantOperatingHoursService
         var specialOpeningDays = TryParseSpecialOpeningDays(restaurant.SpecialOpeningDaysJson, out var parsedSpecialDays, out _)
             ? parsedSpecialDays
             : [];
-        var isWithinOpeningHours = IsWithinOpeningHours(openingHours, specialOpeningDays, localNow);
 
-        return isWithinOpeningHours
-            ? new RestaurantOrderingAvailability(true, true, true, "Open", "Restaurant is accepting orders.")
-            : new RestaurantOrderingAvailability(
-                false,
-                false,
-                true,
-                "Closed",
-                "Restaurant is outside opening hours and is not accepting orders right now.");
+        var isOpenNow = IsWithinOpeningHours(openingHours, specialOpeningDays, localNow);
+        var (_, nextOpeningLocal) = GetUpcomingMoments(openingHours, specialOpeningDays, localNow, isOpenNow);
+
+        return nextOpeningLocal is null
+            ? null
+            : ConvertToUtc(nextOpeningLocal.Value, restaurant.Timezone);
+    }
+
+    /// <summary>
+    /// Walks to the end of the run of back-to-back windows containing <paramref name="localNow"/>,
+    /// so 09:00-14:00 followed by 14:00-21:00 reports one closure at 21:00 rather than two.
+    /// Null when not inside a window, or when the run reaches the end of the lookahead.
+    /// </summary>
+    private static DateTime? GetContiguousRunEnd(
+        List<OpeningInterval> intervals,
+        DateTime localNow,
+        DateTime horizonEnd)
+    {
+        var runEnd = intervals
+            .Where(interval => interval.Start <= localNow && interval.End > localNow)
+            .Select(interval => interval.End)
+            .DefaultIfEmpty(DateTime.MinValue)
+            .Max();
+
+        if (runEnd == DateTime.MinValue)
+        {
+            return null;
+        }
+
+        var extended = true;
+        while (extended)
+        {
+            extended = false;
+            foreach (var interval in intervals.Where(interval => interval.Start <= runEnd && interval.End > runEnd))
+            {
+                runEnd = interval.End;
+                extended = true;
+            }
+        }
+
+        // Running off the end of the lookahead means no closure is visible (for example 24/7),
+        // not that the restaurant closes when the horizon happens to stop.
+        return runEnd >= horizonEnd ? null : runEnd;
+    }
+
+    private static DateTime ConvertToUtc(DateTime localDateTime, string timezone)
+    {
+        var timeZoneInfo = ResolveTimeZone(timezone);
+        var unspecified = DateTime.SpecifyKind(localDateTime, DateTimeKind.Unspecified);
+
+        // A DST spring-forward can make a wall-clock time not exist; nudging past the gap is
+        // better than throwing at the caller.
+        if (timeZoneInfo.IsInvalidTime(unspecified))
+        {
+            unspecified = unspecified.AddHours(1);
+        }
+
+        return TimeZoneInfo.ConvertTimeToUtc(unspecified, timeZoneInfo);
+    }
+
+    private static (List<OpeningInterval> Intervals, DateTime HorizonEnd) BuildOpeningIntervals(
+        IReadOnlyList<RestaurantOpeningHoursDay> openingHours,
+        IReadOnlyList<RestaurantSpecialOpeningDay> specialOpeningDays,
+        DateTime localNow)
+    {
+        var intervals = new List<OpeningInterval>();
+        var startDate = DateOnly.FromDateTime(localNow).AddDays(-1);
+        var horizonEnd = startDate.AddDays(TransitionLookaheadDays).ToDateTime(TimeOnly.MinValue).AddDays(1);
+
+        for (var offset = 0; offset <= TransitionLookaheadDays; offset++)
+        {
+            var date = startDate.AddDays(offset);
+            var definition = ResolveOpeningDefinition(date, openingHours, specialOpeningDays);
+
+            if (!definition.IsOpen)
+            {
+                continue;
+            }
+
+            var dayStart = date.ToDateTime(TimeOnly.MinValue);
+
+            foreach (var window in definition.Windows)
+            {
+                if (IsFullDayWindow(window))
+                {
+                    intervals.Add(new OpeningInterval(dayStart, dayStart.AddDays(1)));
+                    continue;
+                }
+
+                var opensAt = ParseTime(window.OpensAt);
+                var closesAt = ParseTime(window.ClosesAt);
+                var start = dayStart.Add(opensAt.ToTimeSpan());
+                var end = dayStart.Add(closesAt.ToTimeSpan());
+
+                if (closesAt <= opensAt)
+                {
+                    end = end.AddDays(1);
+                }
+
+                intervals.Add(new OpeningInterval(start, end));
+            }
+        }
+
+        return (intervals, horizonEnd);
     }
 
     public bool TryNormalizeOpeningHoursJson(
@@ -599,9 +825,20 @@ internal sealed record OpeningWindowRange(int Start, int End);
 
 internal sealed record RestaurantResolvedOpeningDay(bool IsOpen, IReadOnlyList<RestaurantOpeningHoursWindow> Windows);
 
+internal sealed record OpeningInterval(DateTime Start, DateTime End);
+
 public sealed record RestaurantOrderingAvailability(
     bool IsOrderingAvailable,
     bool IsWithinOpeningHours,
     bool AcceptingOrders,
     string Reason,
-    string Message);
+    string Message,
+    /// <summary>Restaurant-local time the open/closed state next flips; null when it never does.</summary>
+    DateTime? NextTransitionLocal,
+    /// <summary>
+    /// Restaurant-local time of the next opening. While trading this is the *next* opening, not the
+    /// current one, so it can be offered as "closed for today, back tomorrow".
+    /// </summary>
+    DateTime? NextOpeningLocal,
+    /// <summary>UTC instant a timed pause lapses; null when not paused or paused indefinitely.</summary>
+    DateTime? PausedUntilUtc);

@@ -21,6 +21,8 @@ public class OrderController : ControllerBase
     private readonly AppDbContext _dbContext;
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
     private readonly OrderPickupNumberService _orderPickupNumberService;
+    private readonly MenuItemStockService _menuItemStockService;
+    private readonly OrderAutoAcceptanceService _orderAutoAcceptanceService;
     private readonly ReportLogWriter _reportLogWriter;
     private readonly TableSessionService _tableSessionService;
     private readonly ILogger<OrderController> _logger;
@@ -29,6 +31,8 @@ public class OrderController : ControllerBase
         AppDbContext dbContext,
         OrderRealtimeNotifier orderRealtimeNotifier,
         OrderPickupNumberService orderPickupNumberService,
+        MenuItemStockService menuItemStockService,
+        OrderAutoAcceptanceService orderAutoAcceptanceService,
         ReportLogWriter reportLogWriter,
         TableSessionService tableSessionService,
         ILogger<OrderController> logger)
@@ -36,6 +40,8 @@ public class OrderController : ControllerBase
         _dbContext = dbContext;
         _orderRealtimeNotifier = orderRealtimeNotifier;
         _orderPickupNumberService = orderPickupNumberService;
+        _menuItemStockService = menuItemStockService;
+        _orderAutoAcceptanceService = orderAutoAcceptanceService;
         _reportLogWriter = reportLogWriter;
         _tableSessionService = tableSessionService;
         _logger = logger;
@@ -194,7 +200,8 @@ public class OrderController : ControllerBase
             });
         }
 
-        if (order.RefundRequests.Any(item => item.Status == PaymentRefundRequestStatus.Pending))
+        if (order.RefundRequests.Any(item =>
+                item.Status is PaymentRefundRequestStatus.Pending or PaymentRefundRequestStatus.Processing))
         {
             return Conflict(new { message = "A refund request is already waiting for review." });
         }
@@ -373,6 +380,24 @@ public class OrderController : ControllerBase
             CreatedAt = now
         };
 
+        // The reservation must commit with the order, so both live in one transaction. It also
+        // covers the pickup-number allocation below.
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+        var unavailableItemIds = await _menuItemStockService.TryReserveAsync(
+            BuildRequestedQuantities(buildResult.OrderItems),
+            cancellationToken);
+
+        if (unavailableItemIds.Count > 0)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Conflict(new
+            {
+                message = "Some items sold out while the order was being placed.",
+                items = DescribeUnavailableItems(unavailableItemIds, buildResult.OrderItems)
+            });
+        }
+
         await _orderPickupNumberService.AssignPickupNumberAsync(order, restaurant, now, cancellationToken);
 
         foreach (var orderItem in buildResult.OrderItems)
@@ -381,6 +406,7 @@ public class OrderController : ControllerBase
             order.OrderItems.Add(orderItem);
         }
 
+        await _orderAutoAcceptanceService.TryAcceptAsync(order, cancellationToken);
         await _dbContext.Orders.AddAsync(order, cancellationToken);
         _reportLogWriter.AddAudit(
             "Order.Created",
@@ -414,6 +440,7 @@ public class OrderController : ControllerBase
                 order.TotalAmount
             });
         await _dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
 
         await _dbContext.Entry(order).Reference(item => item.Restaurant).LoadAsync(cancellationToken);
 
@@ -427,6 +454,36 @@ public class OrderController : ControllerBase
 
         return CreatedAtAction(nameof(GetOrder), new { id = order.Id }, MapToResponse(order));
     }
+
+    /// <summary>
+    /// Totals per menu item, since the same item can appear on several order lines. Lines whose
+    /// menu item has since been deleted carry no id and cannot be stock-tracked, so they are
+    /// skipped.
+    /// </summary>
+    internal static Dictionary<Guid, int> BuildRequestedQuantities(IEnumerable<OrderItem> orderItems)
+    {
+        var quantities = new Dictionary<Guid, int>();
+
+        foreach (var orderItem in orderItems)
+        {
+            if (orderItem.MenuItemId is not { } menuItemId)
+            {
+                continue;
+            }
+
+            quantities[menuItemId] = quantities.GetValueOrDefault(menuItemId) + orderItem.Quantity;
+        }
+
+        return quantities;
+    }
+
+    internal static IReadOnlyList<string> DescribeUnavailableItems(
+        IReadOnlyList<Guid> menuItemIds,
+        IEnumerable<OrderItem> orderItems) =>
+        menuItemIds
+            .Select(id => orderItems.FirstOrDefault(item => item.MenuItemId == id)?.MenuItemNameSnapshot ?? "Unknown item")
+            .Distinct()
+            .ToList();
 
     [HttpPut("{id:guid}")]
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]

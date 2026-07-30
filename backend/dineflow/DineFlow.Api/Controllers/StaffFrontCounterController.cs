@@ -45,6 +45,15 @@ public sealed class StaffFrontCounterController(
         }
 
         var restaurantId = scope.RestaurantId!.Value;
+        var timezone = await dbContext.Restaurants
+            .AsNoTracking()
+            .Where(item => item.Id == restaurantId)
+            .Select(item => item.Timezone)
+            .FirstOrDefaultAsync(cancellationToken);
+        var businessDate = OrderPickupNumberService.GetBusinessDate(timezone ?? string.Empty, DateTime.UtcNow);
+
+        // Dine-in orders share the daily pickup sequence, so they are listed here too — the UI
+        // distinguishes them. Hiding them made the sequence look like it had gaps.
         var query = dbContext.Orders
             .AsNoTracking()
             .Include(order => order.OrderItems)
@@ -56,21 +65,36 @@ public sealed class StaffFrontCounterController(
             .Include(order => order.Table)
             .Where(order =>
                 order.RestaurantId == restaurantId &&
-                order.OrderType == OrderType.Takeaway &&
                 ActiveOrderStatuses.Contains(order.Status));
 
         query = ApplyOrderSearch(query, request.Search);
 
+        var totalOrders = await query.CountAsync(cancellationToken);
+
+        // Current work comes first. Carried-over orders remain available, but can no longer bury
+        // today's pickup queue below days of unresolved historical data.
         var orders = await query
-            .OrderBy(order => order.PickupNumber ?? int.MaxValue)
+            .OrderBy(order =>
+                order.PickupDate == businessDate
+                    ? 0
+                    : order.PickupDate.HasValue && order.PickupDate.Value > businessDate
+                        ? 1
+                        : order.PickupDate.HasValue
+                            ? 2
+                            : 3)
+            .ThenByDescending(order => order.PickupDate)
+            .ThenBy(order => order.PickupNumber ?? int.MaxValue)
             .ThenBy(order => order.CreatedAt)
             .ThenBy(order => order.Id)
+            .Take(request.PageSize)
             .AsSplitQuery()
             .ToListAsync(cancellationToken);
 
         return Ok(new FrontCounterTakeawayResponse
         {
             GeneratedAt = DateTime.UtcNow,
+            BusinessDate = businessDate,
+            TotalOrders = totalOrders,
             Orders = orders.Select(AdminOrdersController.MapToAdminResponse).ToList()
         });
     }
@@ -267,6 +291,14 @@ public sealed class StaffFrontCounterController(
             return NotFound(new { message = "Order not found." });
         }
 
+        if (OrderPaymentEligibility.IsCounterPaymentDue(order.PaymentMethod, order.PaymentStatus))
+        {
+            return Conflict(new
+            {
+                message = "Record the counter tender first, then complete the Ready order."
+            });
+        }
+
         var result = SettleAndCompleteOrder(order, DateTime.UtcNow);
         if (result.Error is not null)
         {
@@ -293,9 +325,116 @@ public sealed class StaffFrontCounterController(
         });
     }
 
+    [HttpPost("orders/{orderId:guid}/record-payment")]
+    public async Task<ActionResult<FrontCounterRecordPaymentResponse>> RecordOrderPayment(
+        Guid orderId,
+        FrontCounterRecordPaymentRequest request,
+        [FromQuery] Guid? restaurantId,
+        CancellationToken cancellationToken)
+    {
+        var scope = await ResolveRestaurantIdAsync(restaurantId, cancellationToken);
+        if (scope.Error is not null)
+        {
+            return scope.Error;
+        }
+
+        var order = await LoadTrackedOrderQuery(scope.RestaurantId!.Value)
+            .FirstOrDefaultAsync(item => item.Id == orderId, cancellationToken);
+
+        if (order is null)
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
+        if (!FrontCounterOrderPolicy.CanRecordCounterPayment(
+                order.Status,
+                order.PaymentMethod,
+                order.PaymentStatus))
+        {
+            return Conflict(new
+            {
+                message = order.PaymentStatus == PaymentStatus.Refunded
+                    ? "Fully refunded orders cannot be charged again."
+                    : "This order does not have an outstanding counter payment."
+            });
+        }
+
+        var amountDue = FrontCounterOrderPolicy.AmountDue(
+            order.TotalAmount,
+            order.PaymentMethod,
+            order.PaymentStatus);
+        var tender = ValidateTender(request.Tender, request.AmountReceived, amountDue);
+        if (tender.Error is not null)
+        {
+            return tender.Error;
+        }
+
+        var now = DateTime.UtcNow;
+        RecordCounterPayment(
+            order,
+            now,
+            tender.Provider!,
+            tender.AmountReceived,
+            tender.ChangeDue);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
+
+        return Ok(new FrontCounterRecordPaymentResponse
+        {
+            Order = AdminOrdersController.MapToAdminResponse(order),
+            AmountReceived = tender.AmountReceived,
+            ChangeDue = tender.ChangeDue
+        });
+    }
+
+    [HttpPost("orders/{orderId:guid}/complete")]
+    public async Task<ActionResult<FrontCounterSettleOrderResponse>> CompleteOrder(
+        Guid orderId,
+        [FromQuery] Guid? restaurantId,
+        CancellationToken cancellationToken)
+    {
+        var scope = await ResolveRestaurantIdAsync(restaurantId, cancellationToken);
+        if (scope.Error is not null)
+        {
+            return scope.Error;
+        }
+
+        var order = await LoadTrackedOrderQuery(scope.RestaurantId!.Value)
+            .FirstOrDefaultAsync(item => item.Id == orderId, cancellationToken);
+
+        if (order is null)
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
+        if (!FrontCounterOrderPolicy.CanComplete(
+                order.Status,
+                order.PaymentMethod,
+                order.PaymentStatus))
+        {
+            return Conflict(new
+            {
+                message = order.Status != OrderStatus.Ready
+                    ? "Only orders marked Ready can be completed at the front counter."
+                    : "Payment must be settled before pickup can be completed."
+            });
+        }
+
+        CompleteReadyOrder(order, DateTime.UtcNow);
+        await CloseTableSessionIfCompleteAsync(order.TableSessionId, order.Id, DateTime.UtcNow, cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await orderRealtimeNotifier.OrderUpdatedAsync(order, cancellationToken);
+
+        return Ok(new FrontCounterSettleOrderResponse
+        {
+            Order = AdminOrdersController.MapToAdminResponse(order)
+        });
+    }
+
     [HttpPost("table-sessions/{sessionId:guid}/settle-complete")]
     public async Task<ActionResult<FrontCounterSettleTableSessionResponse>> SettleCompleteTableSession(
         Guid sessionId,
+        FrontCounterSettleTableSessionRequest request,
         [FromQuery] Guid? restaurantId,
         CancellationToken cancellationToken)
     {
@@ -321,9 +460,44 @@ public sealed class StaffFrontCounterController(
             .ThenBy(order => order.Id)
             .ToList();
 
+        if (activeOrders.Count == 0)
+        {
+            return Conflict(new { message = "This table has no active orders to settle." });
+        }
+
+        if (activeOrders.Any(order => order.Status != OrderStatus.Ready))
+        {
+            return Conflict(new
+            {
+                message = "Every active table order must be marked Ready before the table can be completed."
+            });
+        }
+
+        var amountDue = activeOrders.Sum(order =>
+            FrontCounterOrderPolicy.AmountDue(
+                order.TotalAmount,
+                order.PaymentMethod,
+                order.PaymentStatus));
+        var hasPaymentHold = activeOrders.Any(order =>
+            !OrderPaymentEligibility.IsSettledForFulfillment(order.PaymentStatus)
+            && !OrderPaymentEligibility.IsCounterPaymentDue(order.PaymentMethod, order.PaymentStatus));
+        if (hasPaymentHold)
+        {
+            return Conflict(new
+            {
+                message = "One or more table orders have an online payment issue or were fully refunded."
+            });
+        }
+
+        var tender = ValidateTender(request.Tender, request.AmountReceived, amountDue);
+        if (tender.Error is not null)
+        {
+            return tender.Error;
+        }
+
         foreach (var order in activeOrders)
         {
-            var result = SettleAndCompleteOrder(order, DateTime.UtcNow);
+            var result = SettleAndCompleteOrder(order, DateTime.UtcNow, tender.Provider!);
             if (result.Error is not null)
             {
                 return result.Error;
@@ -359,7 +533,9 @@ public sealed class StaffFrontCounterController(
 
         return Ok(new FrontCounterSettleTableSessionResponse
         {
-            TableSession = MapTableSessionDetail(session)
+            TableSession = MapTableSessionDetail(session),
+            AmountReceived = tender.AmountReceived,
+            ChangeDue = tender.ChangeDue
         });
     }
 
@@ -409,99 +585,110 @@ public sealed class StaffFrontCounterController(
 
     private (bool PaymentChanged, bool StatusChanged, ActionResult? Error) SettleAndCompleteOrder(
         Order order,
-        DateTime now)
+        DateTime now,
+        string counterProvider = PaymentProviders.Counter)
     {
-        if (order.Status is OrderStatus.Cancelled or OrderStatus.Rejected)
+        if (order.Status != OrderStatus.Ready)
         {
             return (false, false, Conflict(new
             {
-                message = "Cancelled or rejected orders cannot be settled at the front counter."
+                message = "Only orders marked Ready can be completed at the front counter."
             }));
         }
 
         var paymentChanged = false;
-        if (order.PaymentStatus != PaymentStatus.Paid)
+        if (OrderPaymentEligibility.IsCounterPaymentDue(order.PaymentMethod, order.PaymentStatus))
         {
-            if (order.PaymentMethod != PaymentMethod.PayAtCounter)
-            {
-                return (false, false, Conflict(new
-                {
-                    message = "Online orders must be paid online before the front counter can complete them.",
-                    paymentStatus = order.PaymentStatus.ToString(),
-                    paymentMethod = order.PaymentMethod.ToString()
-                }));
-            }
-
-            var previousPaymentStatus = order.PaymentStatus;
-            order.PaymentStatus = PaymentStatus.Paid;
-            order.UpdatedAt = now;
-            var counterPayment = new Payment
-            {
-                Id = Guid.NewGuid(),
-                OrderId = order.Id,
-                Order = order,
-                Provider = PaymentProviders.Counter,
-                AmountCents = PricingCalculator.ToMinorCurrencyUnits(order.TotalAmount),
-                Currency = string.IsNullOrWhiteSpace(order.Restaurant?.Currency)
-                    ? "aud"
-                    : order.Restaurant.Currency.ToLowerInvariant(),
-                Status = PaymentStatus.Paid,
-                CreatedAt = now,
-                UpdatedAt = now,
-                PaidAt = now,
-                RecordedByUserId = User.FindFirstValue(ClaimTypes.NameIdentifier)
-            };
-            dbContext.Payments.Add(counterPayment);
+            RecordCounterPayment(order, now, counterProvider, order.TotalAmount, 0m);
             paymentChanged = true;
-
-            reportLogWriter.AddAudit(
-                "Payment.CounterRecorded",
-                "Order",
-                order.Id.ToString(),
-                order.RestaurantId,
-                $"Counter payment recorded for {order.OrderNumber}.",
-                before: new
-                {
-                    paymentStatus = previousPaymentStatus.ToString()
-                },
-                after: new
-                {
-                    paymentStatus = order.PaymentStatus.ToString(),
-                    paymentId = counterPayment.Id,
-                    counterPayment.AmountCents,
-                    counterPayment.Currency
-                });
-            reportLogWriter.AddOrderEvent(
-                order,
-                "payment.counter_recorded",
-                $"Counter payment recorded for {order.OrderNumber}.",
-                new
-                {
-                    paymentId = counterPayment.Id,
-                    counterPayment.AmountCents,
-                    counterPayment.Currency
-                });
-            reportLogWriter.AddPaymentEvent(
-                order,
-                counterPayment,
-                null,
-                "counter.recorded",
-                null,
-                counterPayment.Status.ToString(),
-                "Counter payment recorded.",
-                new
-                {
-                    counterPayment.AmountCents,
-                    counterPayment.Currency
-                },
-                PaymentProviders.Counter);
         }
-
-        if (order.Status == OrderStatus.Completed)
+        else if (!OrderPaymentEligibility.IsSettledForFulfillment(order.PaymentStatus))
         {
-            return (paymentChanged, false, null);
+            return (false, false, Conflict(new
+            {
+                message = order.PaymentStatus == PaymentStatus.Refunded
+                    ? "Fully refunded orders cannot be completed."
+                    : "Online payment must be settled before the front counter can complete this order.",
+                paymentStatus = order.PaymentStatus.ToString(),
+                paymentMethod = order.PaymentMethod.ToString()
+            }));
         }
 
+        CompleteReadyOrder(order, now);
+        return (paymentChanged, true, null);
+    }
+
+    private void RecordCounterPayment(
+        Order order,
+        DateTime now,
+        string provider,
+        decimal amountReceived,
+        decimal changeDue)
+    {
+        var previousPaymentStatus = order.PaymentStatus;
+        order.PaymentStatus = PaymentStatus.Paid;
+        order.UpdatedAt = now;
+        var counterPayment = new Payment
+        {
+            Id = Guid.NewGuid(),
+            OrderId = order.Id,
+            Order = order,
+            Provider = provider,
+            AmountCents = PricingCalculator.ToMinorCurrencyUnits(order.TotalAmount),
+            Currency = string.IsNullOrWhiteSpace(order.Restaurant?.Currency)
+                ? "aud"
+                : order.Restaurant.Currency.ToLowerInvariant(),
+            Status = PaymentStatus.Paid,
+            CreatedAt = now,
+            UpdatedAt = now,
+            PaidAt = now,
+            RecordedByUserId = User.FindFirstValue(ClaimTypes.NameIdentifier)
+        };
+        dbContext.Payments.Add(counterPayment);
+
+        var paymentMetadata = new
+        {
+            paymentId = counterPayment.Id,
+            counterPayment.AmountCents,
+            counterPayment.Currency,
+            provider,
+            amountReceived,
+            changeDue
+        };
+        reportLogWriter.AddAudit(
+            "Payment.CounterRecorded",
+            "Order",
+            order.Id.ToString(),
+            order.RestaurantId,
+            $"Counter payment recorded for {order.OrderNumber}.",
+            before: new
+            {
+                paymentStatus = previousPaymentStatus.ToString()
+            },
+            after: new
+            {
+                paymentStatus = order.PaymentStatus.ToString(),
+                paymentMetadata
+            });
+        reportLogWriter.AddOrderEvent(
+            order,
+            "payment.counter_recorded",
+            $"Counter payment recorded for {order.OrderNumber}.",
+            paymentMetadata);
+        reportLogWriter.AddPaymentEvent(
+            order,
+            counterPayment,
+            null,
+            "counter.recorded",
+            null,
+            counterPayment.Status.ToString(),
+            "Counter payment recorded.",
+            paymentMetadata,
+            provider);
+    }
+
+    private void CompleteReadyOrder(Order order, DateTime now)
+    {
         var previousStatus = order.Status;
         order.Status = OrderStatus.Completed;
         order.UpdatedAt = now;
@@ -540,8 +727,41 @@ public sealed class StaffFrontCounterController(
                 nextStatus = OrderStatus.Completed.ToString(),
                 action = OrderTransitionAction.Complete.ToString()
             });
+    }
 
-        return (paymentChanged, true, null);
+    private (string? Provider, decimal AmountReceived, decimal ChangeDue, ActionResult? Error) ValidateTender(
+        string? tender,
+        decimal? amountReceived,
+        decimal amountDue)
+    {
+        if (amountDue <= 0)
+        {
+            return (PaymentProviders.Counter, 0m, 0m, null);
+        }
+
+        var normalizedTender = tender?.Trim();
+        if (string.Equals(normalizedTender, "Cash", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!amountReceived.HasValue || amountReceived.Value < amountDue)
+            {
+                return (null, 0m, 0m, BadRequest(new
+                {
+                    message = $"Cash received must be at least {amountDue:0.00}."
+                }));
+            }
+
+            return (PaymentProviders.CounterCash, amountReceived.Value, amountReceived.Value - amountDue, null);
+        }
+
+        if (string.Equals(normalizedTender, "Card", StringComparison.OrdinalIgnoreCase))
+        {
+            return (PaymentProviders.CounterCard, amountDue, 0m, null);
+        }
+
+        return (null, 0m, 0m, BadRequest(new
+        {
+            message = "Tender must be Cash or Card."
+        }));
     }
 
     private async Task CloseTableSessionIfCompleteAsync(
@@ -609,8 +829,10 @@ public sealed class StaffFrontCounterController(
             ItemCount = itemCount,
             TotalAmount = activeOrders.Sum(order => order.TotalAmount),
             AmountDue = activeOrders
-                .Where(order => order.PaymentStatus != PaymentStatus.Paid)
-                .Sum(order => order.TotalAmount),
+                .Sum(order => FrontCounterOrderPolicy.AmountDue(
+                    order.TotalAmount,
+                    order.PaymentMethod,
+                    order.PaymentStatus)),
             LatestOrderStatus = activeOrders
                 .OrderByDescending(order => order.UpdatedAt ?? order.CreatedAt)
                 .ThenByDescending(order => order.Id)
@@ -651,8 +873,10 @@ public sealed class StaffFrontCounterController(
             ItemCount = itemCount,
             TotalAmount = activeOrders.Sum(order => order.TotalAmount),
             AmountDue = activeOrders
-                .Where(order => order.PaymentStatus != PaymentStatus.Paid)
-                .Sum(order => order.TotalAmount),
+                .Sum(order => FrontCounterOrderPolicy.AmountDue(
+                    order.TotalAmount,
+                    order.PaymentMethod,
+                    order.PaymentStatus)),
             LatestOrderStatus = activeOrders
                 .OrderByDescending(order => order.UpdatedAt ?? order.CreatedAt)
                 .ThenByDescending(order => order.Id)
@@ -794,6 +1018,9 @@ public sealed class StaffFrontCounterController(
         return query.Where(order =>
             EF.Functions.ILike(order.OrderNumber, pattern) ||
             (order.Table != null && EF.Functions.ILike(order.Table.TableNumber, pattern)) ||
+            (order.Customer != null &&
+                ((order.Customer.FullName != null && EF.Functions.ILike(order.Customer.FullName, pattern)) ||
+                 (order.Customer.Email != null && EF.Functions.ILike(order.Customer.Email, pattern)))) ||
             order.OrderItems.Any(item => EF.Functions.ILike(item.MenuItemNameSnapshot, pattern)) ||
             (hasPickupNumber && order.PickupNumber == pickupNumber));
     }

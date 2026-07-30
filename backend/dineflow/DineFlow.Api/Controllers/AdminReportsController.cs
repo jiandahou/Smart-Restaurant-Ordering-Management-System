@@ -4,6 +4,7 @@ using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Common;
 using DineFlow.Api.Contracts.Reports;
 using DineFlow.Api.Extensions;
+using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Persistence;
@@ -24,12 +25,144 @@ public class AdminReportsController : ControllerBase
 
     private readonly AppDbContext _dbContext;
     private readonly UserManager<ApplicationUser> _userManager;
+    private readonly AdminActivityReportService _activityReportService;
 
-    public AdminReportsController(AppDbContext dbContext, UserManager<ApplicationUser> userManager)
+    public AdminReportsController(
+        AppDbContext dbContext,
+        UserManager<ApplicationUser> userManager,
+        AdminActivityReportService activityReportService)
     {
         _dbContext = dbContext;
         _userManager = userManager;
+        _activityReportService = activityReportService;
     }
+
+    [HttpGet("activity")]
+    public async Task<ActionResult<PagedResponse<ActivityLogResponse>>> GetActivity(
+        [FromQuery] ActivityLogListRequest request,
+        CancellationToken cancellationToken)
+    {
+        var currentRestaurantId = await GetCurrentRestaurantIdAsync();
+        var isPlatformOwner = User.IsInRole(ApplicationRoles.PlatformOwner);
+        if (!isPlatformOwner && currentRestaurantId is null)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Current user is not assigned to a restaurant." });
+        }
+
+        return Ok(await _activityReportService.GetActivityAsync(
+            request,
+            currentRestaurantId,
+            isPlatformOwner,
+            includeTechnicalDetails: isPlatformOwner,
+            cancellationToken));
+    }
+
+    [HttpGet("activity/summary")]
+    public async Task<ActionResult<ActivitySummaryResponse>> GetActivitySummary(
+        [FromQuery] Guid? restaurantId,
+        CancellationToken cancellationToken)
+    {
+        var currentRestaurantId = await GetCurrentRestaurantIdAsync();
+        var isPlatformOwner = User.IsInRole(ApplicationRoles.PlatformOwner);
+        if (!isPlatformOwner && currentRestaurantId is null)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Current user is not assigned to a restaurant." });
+        }
+
+        return Ok(await _activityReportService.GetSummaryAsync(
+            restaurantId,
+            currentRestaurantId,
+            isPlatformOwner,
+            cancellationToken));
+    }
+
+    [HttpGet("activity/export")]
+    public async Task<IActionResult> ExportActivity(
+        [FromQuery] ActivityLogListRequest request,
+        CancellationToken cancellationToken)
+    {
+        var currentRestaurantId = await GetCurrentRestaurantIdAsync();
+        var isPlatformOwner = User.IsInRole(ApplicationRoles.PlatformOwner);
+        if (!isPlatformOwner && currentRestaurantId is null)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Current user is not assigned to a restaurant." });
+        }
+
+        var rows = new List<ActivityLogResponse>();
+        var page = 1;
+        var totalItems = 0;
+        do
+        {
+            request.Page = page;
+            request.PageSize = 100;
+            var result = await _activityReportService.GetActivityAsync(
+                request,
+                currentRestaurantId,
+                isPlatformOwner,
+                includeTechnicalDetails: isPlatformOwner,
+                cancellationToken);
+            totalItems = result.TotalItems;
+            rows.AddRange(result.Items);
+            page++;
+        }
+        while (rows.Count < Math.Min(totalItems, MaxExportRows));
+
+        var truncated = totalItems > MaxExportRows;
+        return BuildCsvFile(
+            "activity-report.csv",
+            [
+                "OccurredAt",
+                "Restaurant",
+                "Category",
+                "Outcome",
+                "ActorType",
+                "Actor",
+                "Roles",
+                "Source",
+                "Action",
+                "Description",
+                "OrderNumber",
+                "PaymentId",
+                "Status",
+                "AmountCents",
+                "Currency",
+                "CorrelationId",
+                "TechnicalJson"
+            ],
+            rows.Take(MaxExportRows).Select(row => new object?[]
+            {
+                row.OccurredAt,
+                row.RestaurantName,
+                row.Category,
+                row.Severity,
+                row.ActorType,
+                row.ActorName,
+                row.ActorRoles,
+                row.Source,
+                row.ActionLabel,
+                row.Description,
+                row.OrderNumber,
+                row.PaymentId,
+                row.Status,
+                row.AmountCents,
+                row.Currency,
+                row.CorrelationId,
+                row.TechnicalJson
+            }),
+            truncated);
+    }
+
+    [HttpGet("policy")]
+    public ActionResult<ReportPolicyResponse> GetReportPolicy() =>
+        Ok(new ReportPolicyResponse
+        {
+            MaxExportRows = MaxExportRows,
+            AuditRetentionDays = AdminActivityReportService.AuditRetentionDays,
+            OrderEventRetentionDays = AdminActivityReportService.OrderEventRetentionDays,
+            PaymentEventRetentionDays = AdminActivityReportService.PaymentEventRetentionDays,
+            LogsAreImmutable = true,
+            SensitiveTechnicalDetailsRequirePlatformOwner = true
+        });
 
     [HttpGet("audit")]
     public async Task<ActionResult<PagedResponse<AuditLogResponse>>> GetAuditLogs(
@@ -59,7 +192,9 @@ public class AdminReportsController : ControllerBase
         var page = await sortedQuery.ToPagedResponseAsync(request.Page, request.PageSize, cancellationToken);
         return Ok(new PagedResponse<AuditLogResponse>
         {
-            Items = page.Items.Select(MapAuditLog).ToList(),
+            Items = page.Items
+                .Select(log => MapAuditLog(log, User.IsInRole(ApplicationRoles.PlatformOwner)))
+                .ToList(),
             Page = page.Page,
             PageSize = page.PageSize,
             TotalItems = page.TotalItems
@@ -94,7 +229,9 @@ public class AdminReportsController : ControllerBase
         var page = await sortedQuery.ToPagedResponseAsync(request.Page, request.PageSize, cancellationToken);
         return Ok(new PagedResponse<OrderEventLogResponse>
         {
-            Items = page.Items.Select(MapOrderEventLog).ToList(),
+            Items = page.Items
+                .Select(log => MapOrderEventLog(log, User.IsInRole(ApplicationRoles.PlatformOwner)))
+                .ToList(),
             Page = page.Page,
             PageSize = page.PageSize,
             TotalItems = page.TotalItems
@@ -129,7 +266,9 @@ public class AdminReportsController : ControllerBase
         var page = await sortedQuery.ToPagedResponseAsync(request.Page, request.PageSize, cancellationToken);
         return Ok(new PagedResponse<PaymentEventLogResponse>
         {
-            Items = page.Items.Select(MapPaymentEventLog).ToList(),
+            Items = page.Items
+                .Select(log => MapPaymentEventLog(log, User.IsInRole(ApplicationRoles.PlatformOwner)))
+                .ToList(),
             Page = page.Page,
             PageSize = page.PageSize,
             TotalItems = page.TotalItems
@@ -156,38 +295,61 @@ public class AdminReportsController : ControllerBase
             return BadRequest(new { message = "Unsupported sortBy value." });
         }
 
-        var rows = await sortedQuery.Take(MaxExportRows).ToListAsync(cancellationToken);
+        var exportRows = await sortedQuery.Take(MaxExportRows + 1).ToListAsync(cancellationToken);
+        var truncated = exportRows.Count > MaxExportRows;
+        var rows = exportRows.Take(MaxExportRows).ToList();
+        var includeSensitiveDetails = User.IsInRole(ApplicationRoles.PlatformOwner);
+        var headers = new List<string>
+        {
+            "CreatedAt",
+            "Action",
+            "ActorEmail",
+            "ActorRoles",
+            "ActorType",
+            "Source",
+            "CorrelationId",
+            "EntityType",
+            "EntityId",
+            "RestaurantId",
+            "Summary"
+        };
+        if (includeSensitiveDetails)
+        {
+            headers.Add("BeforeJson");
+            headers.Add("AfterJson");
+            headers.Add("IpAddress");
+            headers.Add("UserAgent");
+        }
+
         return BuildCsvFile(
             "audit-logs.csv",
-            [
-                "CreatedAt",
-                "Action",
-                "ActorEmail",
-                "ActorRoles",
-                "EntityType",
-                "EntityId",
-                "RestaurantId",
-                "Summary",
-                "BeforeJson",
-                "AfterJson",
-                "IpAddress",
-                "UserAgent"
-            ],
-            rows.Select(log => new object?[]
+            headers,
+            rows.Select(log =>
             {
-                log.CreatedAt,
-                log.Action,
-                log.ActorEmail,
-                log.ActorRoles,
-                log.EntityType,
-                log.EntityId,
-                log.RestaurantId,
-                log.Summary,
-                log.BeforeJson,
-                log.AfterJson,
-                log.IpAddress,
-                log.UserAgent
-            }));
+                var values = new List<object?>
+                {
+                    log.CreatedAt,
+                    log.Action,
+                    log.ActorEmail,
+                    log.ActorRoles,
+                    log.ActorType,
+                    log.Source,
+                    log.CorrelationId,
+                    log.EntityType,
+                    log.EntityId,
+                    log.RestaurantId,
+                    log.Summary
+                };
+                if (includeSensitiveDetails)
+                {
+                    values.Add(log.BeforeJson);
+                    values.Add(log.AfterJson);
+                    values.Add(log.IpAddress);
+                    values.Add(log.UserAgent);
+                }
+                return values.ToArray();
+            }),
+            truncated);
     }
 
     [HttpGet("orders/export")]
@@ -210,7 +372,9 @@ public class AdminReportsController : ControllerBase
             return BadRequest(new { message = "Unsupported sortBy value." });
         }
 
-        var rows = await sortedQuery.Take(MaxExportRows).ToListAsync(cancellationToken);
+        var exportRows = await sortedQuery.Take(MaxExportRows + 1).ToListAsync(cancellationToken);
+        var truncated = exportRows.Count > MaxExportRows;
+        var rows = exportRows.Take(MaxExportRows).ToList();
         return BuildCsvFile(
             "order-event-logs.csv",
             [
@@ -221,6 +385,9 @@ public class AdminReportsController : ControllerBase
                 "RestaurantId",
                 "ActorDisplayName",
                 "ActorRoles",
+                "ActorType",
+                "Source",
+                "CorrelationId",
                 "Message",
                 "DataJson"
             ],
@@ -233,9 +400,13 @@ public class AdminReportsController : ControllerBase
                 log.RestaurantId,
                 log.ActorDisplayName,
                 log.ActorRoles,
+                log.ActorType,
+                log.Source,
+                log.CorrelationId,
                 log.Message,
-                log.DataJson
-            }));
+                User.IsInRole(ApplicationRoles.PlatformOwner) ? log.DataJson : null
+            }),
+            truncated);
     }
 
     [HttpGet("payments/export")]
@@ -258,7 +429,9 @@ public class AdminReportsController : ControllerBase
             return BadRequest(new { message = "Unsupported sortBy value." });
         }
 
-        var rows = await sortedQuery.Take(MaxExportRows).ToListAsync(cancellationToken);
+        var exportRows = await sortedQuery.Take(MaxExportRows + 1).ToListAsync(cancellationToken);
+        var truncated = exportRows.Count > MaxExportRows;
+        var rows = exportRows.Take(MaxExportRows).ToList();
         return BuildCsvFile(
             "payment-event-logs.csv",
             [
@@ -274,6 +447,9 @@ public class AdminReportsController : ControllerBase
                 "RestaurantId",
                 "ActorDisplayName",
                 "ActorRoles",
+                "ActorType",
+                "Source",
+                "CorrelationId",
                 "Message",
                 "DataJson"
             ],
@@ -291,15 +467,20 @@ public class AdminReportsController : ControllerBase
                 log.RestaurantId,
                 log.ActorDisplayName,
                 log.ActorRoles,
+                log.ActorType,
+                log.Source,
+                log.CorrelationId,
                 log.Message,
-                log.DataJson
-            }));
+                User.IsInRole(ApplicationRoles.PlatformOwner) ? log.DataJson : null
+            }),
+            truncated);
     }
 
     private FileContentResult BuildCsvFile(
         string fileName,
         IReadOnlyList<string> headers,
-        IEnumerable<object?[]> rows)
+        IEnumerable<object?[]> rows,
+        bool truncated)
     {
         var builder = new StringBuilder();
         AppendCsvRow(builder, headers);
@@ -312,6 +493,8 @@ public class AdminReportsController : ControllerBase
         var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true)
             .GetBytes(builder.ToString());
 
+        Response.Headers["X-Export-Row-Limit"] = MaxExportRows.ToString();
+        Response.Headers["X-Export-Truncated"] = truncated ? "true" : "false";
         return File(bytes, "text/csv; charset=utf-8", fileName);
     }
 
@@ -329,6 +512,11 @@ public class AdminReportsController : ControllerBase
             DateTimeOffset dateTimeOffset => dateTimeOffset.ToString("O"),
             _ => value.ToString() ?? string.Empty
         };
+
+        if (text.Length > 0 && text[0] is '=' or '+' or '-' or '@' or '\t' or '\r')
+        {
+            text = $"'{text}";
+        }
 
         return text.Contains('"') || text.Contains(',') || text.Contains('\n') || text.Contains('\r')
             ? $"\"{text.Replace("\"", "\"\"")}\""
@@ -580,7 +768,7 @@ public class AdminReportsController : ControllerBase
         return currentUser?.RestaurantId;
     }
 
-    private static AuditLogResponse MapAuditLog(AuditLog log) =>
+    private static AuditLogResponse MapAuditLog(AuditLog log, bool includeSensitiveDetails) =>
         new()
         {
             Id = log.Id,
@@ -588,18 +776,21 @@ public class AdminReportsController : ControllerBase
             ActorUserId = log.ActorUserId,
             ActorEmail = log.ActorEmail,
             ActorRoles = log.ActorRoles,
+            ActorType = log.ActorType,
+            Source = log.Source,
+            CorrelationId = log.CorrelationId,
             Action = log.Action,
             EntityType = log.EntityType,
             EntityId = log.EntityId,
             Summary = log.Summary,
             BeforeJson = log.BeforeJson,
             AfterJson = log.AfterJson,
-            IpAddress = log.IpAddress,
-            UserAgent = log.UserAgent,
+            IpAddress = includeSensitiveDetails ? log.IpAddress : null,
+            UserAgent = includeSensitiveDetails ? log.UserAgent : null,
             CreatedAt = log.CreatedAt
         };
 
-    private static OrderEventLogResponse MapOrderEventLog(OrderEventLog log) =>
+    private static OrderEventLogResponse MapOrderEventLog(OrderEventLog log, bool includeTechnicalDetails) =>
         new()
         {
             Id = log.Id,
@@ -609,13 +800,16 @@ public class AdminReportsController : ControllerBase
             ActorUserId = log.ActorUserId,
             ActorDisplayName = log.ActorDisplayName,
             ActorRoles = log.ActorRoles,
+            ActorType = log.ActorType,
+            Source = log.Source,
+            CorrelationId = log.CorrelationId,
             EventType = log.EventType,
             Message = log.Message,
-            DataJson = log.DataJson,
+            DataJson = includeTechnicalDetails ? log.DataJson : null,
             CreatedAt = log.CreatedAt
         };
 
-    private static PaymentEventLogResponse MapPaymentEventLog(PaymentEventLog log) =>
+    private static PaymentEventLogResponse MapPaymentEventLog(PaymentEventLog log, bool includeTechnicalDetails) =>
         new()
         {
             Id = log.Id,
@@ -629,10 +823,13 @@ public class AdminReportsController : ControllerBase
             ProviderEventId = log.ProviderEventId,
             Status = log.Status,
             Message = log.Message,
-            DataJson = log.DataJson,
+            DataJson = includeTechnicalDetails ? log.DataJson : null,
             ActorUserId = log.ActorUserId,
             ActorDisplayName = log.ActorDisplayName,
             ActorRoles = log.ActorRoles,
+            ActorType = log.ActorType,
+            Source = log.Source,
+            CorrelationId = log.CorrelationId,
             CreatedAt = log.CreatedAt
         };
 }

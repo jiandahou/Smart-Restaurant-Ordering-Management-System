@@ -101,15 +101,25 @@ services:
       Stripe__SecretKey: ${STRIPE_SECRET_KEY:-}
       Stripe__PublishableKey: ${STRIPE_PUBLISHABLE_KEY:-}
       Stripe__WebhookSecret: ${STRIPE_WEBHOOK_SECRET:-}
+      Stripe__ConnectWebhookSecret: ${STRIPE_CONNECT_WEBHOOK_SECRET:-}
       Stripe__Currency: ${STRIPE_CURRENCY:-aud}
       Stripe__SuccessUrl: ${STRIPE_SUCCESS_URL:-http://localhost:5173/payment/success}
       Stripe__CancelUrl: ${STRIPE_CANCEL_URL:-http://localhost:5173/payment/cancelled}
+      Stripe__ConnectReturnUrl: ${STRIPE_CONNECT_RETURN_URL:-http://localhost:5173/admin/restaurants?stripeConnect=return}
+      Stripe__ConnectRefreshUrl: ${STRIPE_CONNECT_REFRESH_URL:-http://localhost:5173/admin/restaurants?stripeConnect=refresh}
+      Stripe__PlatformFeeSuccessUrl: ${STRIPE_PLATFORM_FEE_SUCCESS_URL:-http://localhost:5173/admin/restaurants?platformFee=success}
+      Stripe__PlatformFeeCancelUrl: ${STRIPE_PLATFORM_FEE_CANCEL_URL:-http://localhost:5173/admin/restaurants?platformFee=cancelled}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_CONNECT_WEBHOOK_SECRET: ${STRIPE_CONNECT_WEBHOOK_SECRET:-}
       STRIPE_CURRENCY: ${STRIPE_CURRENCY:-aud}
       STRIPE_SUCCESS_URL: ${STRIPE_SUCCESS_URL:-http://localhost:5173/payment/success}
       STRIPE_CANCEL_URL: ${STRIPE_CANCEL_URL:-http://localhost:5173/payment/cancelled}
+      STRIPE_CONNECT_RETURN_URL: ${STRIPE_CONNECT_RETURN_URL:-http://localhost:5173/admin/restaurants?stripeConnect=return}
+      STRIPE_CONNECT_REFRESH_URL: ${STRIPE_CONNECT_REFRESH_URL:-http://localhost:5173/admin/restaurants?stripeConnect=refresh}
+      STRIPE_PLATFORM_FEE_SUCCESS_URL: ${STRIPE_PLATFORM_FEE_SUCCESS_URL:-http://localhost:5173/admin/restaurants?platformFee=success}
+      STRIPE_PLATFORM_FEE_CANCEL_URL: ${STRIPE_PLATFORM_FEE_CANCEL_URL:-http://localhost:5173/admin/restaurants?platformFee=cancelled}
       AvatarStorage__Provider: ${AVATAR_STORAGE_PROVIDER:-S3}
       AvatarStorage__Bucket: ${AVATAR_STORAGE_BUCKET:-dineflow-avatars-local}
       AvatarStorage__Region: ${AVATAR_STORAGE_REGION:-ap-southeast-2}

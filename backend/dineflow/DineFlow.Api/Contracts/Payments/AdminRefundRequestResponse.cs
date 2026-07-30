@@ -24,6 +24,16 @@ public sealed class AdminRefundRequestResponse
 
     public long RequestedAmountCents { get; set; }
 
+    public long OriginalPaymentAmountCents { get; set; }
+
+    public long AlreadyRefundedAmountCents { get; set; }
+
+    public long RefundableAmountCents { get; set; }
+
+    public int PreviousRefundCount { get; set; }
+
+    public string? ProviderPaymentIntentId { get; set; }
+
     public string Currency { get; set; } = string.Empty;
 
     public string? Reason { get; set; }

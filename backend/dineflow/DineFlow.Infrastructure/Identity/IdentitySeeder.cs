@@ -35,7 +35,9 @@ public static class IdentitySeeder
             ["Masala Chai"] = "/seed-menu/masala-chai.svg",
             ["Fresh Lime Soda"] = "/seed-menu/fresh-lime-soda.svg",
             ["Gulab Jamun"] = "/seed-menu/gulab-jamun.svg",
-            ["Chocolate Lava Cake"] = "/seed-menu/chocolate-lava-cake.svg"
+            ["Chocolate Lava Cake"] = "/seed-menu/chocolate-lava-cake.svg",
+            ["Seasonal Dish"] = "/seed-menu/seasonal-dish.svg",
+            ["House Drink"] = "/seed-menu/house-drink.svg"
         };
     private static IReadOnlyDictionary<string, string> ResolvedSeedMenuImageUrls = SeedMenuImageUrls;
     private static readonly string[] DemoOrderItemNames =
@@ -747,16 +749,23 @@ public static class IdentitySeeder
             "Chicken Wings", "Veg Spring Rolls", "Grilled Salmon",
             "Mushroom Pasta", "Chocolate Lava Cake", "Fresh Lime Soda"
         };
+        var genericPlaceholderNames = new[] { "Seasonal Dish", "House Drink" };
         var categoryIds = restaurants
             .SelectMany((_, restaurantIndex) => Enumerable.Range(0, 3)
                 .Select(categoryIndex => CreateSeedGuid(4, restaurantIndex * 10 + categoryIndex + 1)))
             .ToArray();
-        var existingCategoryIds = (await dbContext.MenuCategories
+        var existingCategories = await dbContext.MenuCategories
             .Where(category => categoryIds.Contains(category.Id))
-            .Select(category => category.Id)
-            .ToListAsync())
-            .ToHashSet();
+            .ToListAsync();
+        var existingCategoryIds = existingCategories.Select(category => category.Id).ToHashSet();
         var newCategories = new List<MenuCategory>();
+
+        foreach (var category in existingCategories.Where(category =>
+                     category.Description != null &&
+                     category.Description.StartsWith("Seeded menu section for ", StringComparison.Ordinal)))
+        {
+            category.Description = "Seasonal favourites prepared fresh by the kitchen.";
+        }
 
         for (var restaurantIndex = 0; restaurantIndex < restaurants.Count; restaurantIndex++)
         {
@@ -773,7 +782,7 @@ public static class IdentitySeeder
                     Id = categoryId,
                     RestaurantId = restaurants[restaurantIndex].Id,
                     Name = categoryNames[restaurantIndex][categoryIndex],
-                    Description = $"Seeded menu section for {restaurants[restaurantIndex].Name}",
+                    Description = "Seasonal favourites prepared fresh by the kitchen.",
                     DisplayOrder = categoryIndex + 1,
                     IsActive = !(categoryIndex == 2 && restaurantIndex % 3 == 1),
                     CreatedAt = DateTime.UtcNow.AddDays(-60 + restaurantIndex)
@@ -791,11 +800,10 @@ public static class IdentitySeeder
             .SelectMany((_, restaurantIndex) => Enumerable.Range(0, 6)
                 .Select(itemIndex => CreateSeedGuid(5, restaurantIndex * 100 + itemIndex + 1)))
             .ToArray();
-        var existingItemIds = (await dbContext.MenuItems
+        var existingItems = await dbContext.MenuItems
             .Where(item => itemIds.Contains(item.Id))
-            .Select(item => item.Id)
-            .ToListAsync())
-            .ToHashSet();
+            .ToListAsync();
+        var existingItemsById = existingItems.ToDictionary(item => item.Id);
         var newItems = new List<MenuItem>();
 
         for (var restaurantIndex = 0; restaurantIndex < restaurants.Count; restaurantIndex++)
@@ -803,8 +811,32 @@ public static class IdentitySeeder
             for (var itemIndex = 0; itemIndex < 6; itemIndex++)
             {
                 var itemId = CreateSeedGuid(5, restaurantIndex * 100 + itemIndex + 1);
-                if (existingItemIds.Contains(itemId))
+                var itemProfile = BuildSeedMenuItemProfile(
+                    dishNames[restaurantIndex][itemIndex],
+                    itemIndex);
+
+                if (existingItemsById.TryGetValue(itemId, out var existingItem))
                 {
+                    var usesOriginalLegacyProfile =
+                        existingItem.Description?.StartsWith("A signature selection from ", StringComparison.Ordinal) == true;
+                    var usesSeedProfile =
+                        usesOriginalLegacyProfile ||
+                        string.Equals(existingItem.Description, itemProfile.Description, StringComparison.Ordinal);
+
+                    if (usesOriginalLegacyProfile)
+                    {
+                        ApplySeedMenuItemProfile(existingItem, itemProfile);
+                    }
+
+                    // Self-healing: an earlier build of this seeder briefly downgraded these items
+                    // to a shared generic placeholder. Restore the per-dish photo for any item
+                    // still sitting on that placeholder; items already on a bespoke photo (or a
+                    // user's own upload) are left untouched.
+                    if (usesSeedProfile && genericPlaceholderNames.Any(name =>
+                            string.Equals(existingItem.ImageUrl, GetSeedMenuImageUrl(name), StringComparison.OrdinalIgnoreCase)))
+                    {
+                        existingItem.ImageUrl = GetSeedMenuImageUrl(imageFallbackNames[itemIndex]);
+                    }
                     continue;
                 }
 
@@ -815,11 +847,21 @@ public static class IdentitySeeder
                     RestaurantId = restaurants[restaurantIndex].Id,
                     CategoryId = CreateSeedGuid(4, restaurantIndex * 10 + categoryIndex + 1),
                     Name = dishNames[restaurantIndex][itemIndex],
-                    Description = $"A signature selection from {restaurants[restaurantIndex].Name}.",
-                    Price = 8.50m + restaurantIndex * 1.25m + itemIndex * 4.75m,
+                    Description = itemProfile.Description,
+                    Price = itemProfile.Price,
                     ImageUrl = GetSeedMenuImageUrl(imageFallbackNames[itemIndex]),
                     IsAvailable = !(itemIndex == 4 && restaurantIndex % 2 == 0),
                     IsSoldOut = itemIndex == 2 && restaurantIndex % 3 == 0,
+                    IsVegetarian = itemProfile.IsVegetarian,
+                    IsVegan = itemProfile.IsVegan,
+                    IsGlutenFree = itemProfile.IsGlutenFree,
+                    IsHalal = itemProfile.IsHalal,
+                    Allergens = itemProfile.Allergens,
+                    SpiceLevel = itemProfile.SpiceLevel,
+                    ServingSize = itemProfile.ServingSize,
+                    Calories = itemProfile.Calories,
+                    IsPopular = itemProfile.IsPopular,
+                    IsRecommended = itemProfile.IsRecommended,
                     DisplayOrder = itemIndex % 2 + 1,
                     CreatedAt = DateTime.UtcNow.AddDays(-55 + restaurantIndex)
                 });
@@ -829,8 +871,84 @@ public static class IdentitySeeder
         if (newItems.Count > 0)
         {
             await dbContext.MenuItems.AddRangeAsync(newItems);
-            await dbContext.SaveChangesAsync();
         }
+
+        await dbContext.SaveChangesAsync();
+    }
+
+    private static SeedMenuItemProfile BuildSeedMenuItemProfile(string name, int itemIndex)
+    {
+        var normalizedName = name.ToLowerInvariant();
+        var isDrink = itemIndex == 5;
+        var isDessert = itemIndex == 4;
+        var isVegetarian = new[]
+        {
+            "tofu", "cucumber", "avocado", "ricotta", "pumpkin", "croissant", "burrata",
+            "focaccia", "margherita", "tiramisu", "halloumi", "cheesecake", "zucchini",
+            "beet", "mushroom", "gnocchi", "carrot", "arancini", "bruschetta", "vegetable",
+            "brownie", "croquette", "sundae", "olives", "crumble"
+        }.Any(normalizedName.Contains) || isDrink;
+        var isVegan = new[]
+        {
+            "cucumber", "pumpkin salad", "beet salad", "vegetable bowl", "olives",
+            "iced tea", "soda", "spritz", "cooler", "fizz", "lemonade", "tonic"
+        }.Any(normalizedName.Contains);
+        var allergens = normalizedName switch
+        {
+            var value when value.Contains("oyster") || value.Contains("prawn") || value.Contains("squid") =>
+                "Shellfish",
+            var value when value.Contains("tofu") || value.Contains("miso") || value.Contains("sesame") =>
+                "Soy, sesame",
+            var value when value.Contains("pizza") || value.Contains("focaccia") || value.Contains("croissant") =>
+                "Gluten, milk",
+            var value when value.Contains("tiramisu") || value.Contains("cheesecake") || value.Contains("brownie") =>
+                "Milk, egg, gluten",
+            _ => null
+        };
+
+        return new SeedMenuItemProfile(
+            Description: isDrink
+                ? "A refreshing house-made drink served chilled."
+                : isDessert
+                    ? "A house dessert made for a sweet finish."
+                    : "Prepared to order with seasonal produce and the kitchen's signature finish.",
+            Price: itemIndex switch
+            {
+                0 => 16.00m,
+                1 => 14.50m,
+                2 => 27.50m,
+                3 => 21.00m,
+                4 => 12.00m,
+                _ => 7.50m
+            },
+            IsVegetarian: isVegetarian,
+            IsVegan: isVegan,
+            IsGlutenFree: normalizedName.Contains("salad") || normalizedName.Contains("oyster"),
+            IsHalal: normalizedName.Contains("chicken") || isVegetarian,
+            Allergens: allergens,
+            SpiceLevel: normalizedName.Contains("spicy") || normalizedName.Contains("curry") ? 2 :
+                normalizedName.Contains("pepper") || normalizedName.Contains("flame") ? 1 : 0,
+            ServingSize: isDrink ? "330 ml" : "1 serving",
+            Calories: isDrink ? 140 : isDessert ? 480 : 320 + itemIndex * 70,
+            IsPopular: itemIndex == 2,
+            IsRecommended: itemIndex == 0);
+    }
+
+    private static void ApplySeedMenuItemProfile(MenuItem item, SeedMenuItemProfile profile)
+    {
+        item.Description = profile.Description;
+        item.Price = profile.Price;
+        item.IsVegetarian = profile.IsVegetarian;
+        item.IsVegan = profile.IsVegan;
+        item.IsGlutenFree = profile.IsGlutenFree;
+        item.IsHalal = profile.IsHalal;
+        item.Allergens = profile.Allergens;
+        item.SpiceLevel = profile.SpiceLevel;
+        item.ServingSize = profile.ServingSize;
+        item.Calories = profile.Calories;
+        item.IsPopular = profile.IsPopular;
+        item.IsRecommended = profile.IsRecommended;
+        item.UpdatedAt = DateTime.UtcNow;
     }
 
     private static async Task SeedMenuOptionsAsync(AppDbContext dbContext)
@@ -1310,6 +1428,20 @@ public static class IdentitySeeder
         string Reason,
         string? FailureReason,
         string Slug);
+
+    private sealed record SeedMenuItemProfile(
+        string Description,
+        decimal Price,
+        bool IsVegetarian,
+        bool IsVegan,
+        bool IsGlutenFree,
+        bool IsHalal,
+        string? Allergens,
+        int SpiceLevel,
+        string ServingSize,
+        int Calories,
+        bool IsPopular,
+        bool IsRecommended);
 
     private sealed record MenuOptionGroupSeed(
         string MenuItemName,

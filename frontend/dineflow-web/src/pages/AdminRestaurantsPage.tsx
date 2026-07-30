@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type HTMLAttributes } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type HTMLAttributes } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
 import {
   ArrowDownAZ,
@@ -7,14 +7,17 @@ import {
   Building2,
   CalendarDays,
   CalendarClock,
+  CircleCheck,
   ChevronLeft,
   ChevronRight,
   ChevronsUpDown,
   Copy,
+  CreditCard,
   Eye,
   ExternalLink,
   Globe2,
   ImageIcon,
+  Info,
   Link2,
   MapPin,
   Pencil,
@@ -23,10 +26,13 @@ import {
   RefreshCw,
   Search,
   SlidersHorizontal,
+  TestTube2,
   Trash2,
+  TriangleAlert,
   X,
 } from 'lucide-react'
-import { useForm, type FieldErrors } from 'react-hook-form'
+import { useForm, useWatch, type FieldErrors } from 'react-hook-form'
+import { useSearchParams } from 'react-router-dom'
 import {
   getCountryCallingCode,
   isSupportedCountry,
@@ -39,11 +45,20 @@ import { toast } from 'sonner'
 import { z } from 'zod'
 import {
   createRestaurant,
+  createRestaurantPlatformFeeCheckout,
+  createRestaurantStripeConnectLink,
   deleteRestaurant,
+  getPaymentEnvironment,
+  getRestaurantPaymentSettings,
   getRestaurantPage,
   getRestaurants,
+  refreshRestaurantStripeStatus,
+  runRestaurantStripeDiagnostics,
   updateRestaurant,
+  updateRestaurantPlatformFees,
   type Restaurant,
+  type StripeConnectDiagnostic,
+  type RestaurantPaymentSettings,
   type RestaurantRequest,
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
@@ -60,6 +75,7 @@ import {
   type CurrencyOption,
   type TimezoneOption,
 } from '../lib/localeOptions'
+import { buildFeePreview } from '../lib/platformFee'
 import { buildTakeawayPublicUrl } from '../lib/publicUrls'
 import { resolvePublicAssetUrl } from '../api/publicMenu'
 import {
@@ -100,68 +116,20 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Switch } from '../components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Textarea } from '../components/ui/textarea'
+import {
+  createDefaultOpeningHours,
+  openingHoursDaySchema,
+  parseOpeningHoursJson,
+  parseSpecialOpeningDaysJson,
+  serializeOpeningHours,
+  serializeSpecialOpeningDays,
+  specialOpeningDaySchema,
+  OpeningHoursEditor,
+  RestaurantOpeningHoursPanel,
+  RestaurantSpecialCalendarPanel,
+  getStatusHeadline,
+} from '../components/restaurant/openingHours'
 
-const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/
-
-const maximumOpeningWindowsPerDay = 4
-
-function isFullDayOpeningWindow(value: { opensAt: string; closesAt: string }) {
-  return value.opensAt === '00:00' && value.closesAt === '00:00'
-}
-
-const openingHoursWindowSchema = z.object({
-  opensAt: z.string().regex(timePattern, 'Use HH:mm time.'),
-  closesAt: z.string().regex(timePattern, 'Use HH:mm time.'),
-}).refine((value) => value.opensAt !== value.closesAt || isFullDayOpeningWindow(value), {
-  path: ['closesAt'],
-  message: 'Closing time must differ from opening time, except 00:00 to 00:00 for 24 hours.',
-})
-
-const openingHoursDaySchema = z.object({
-  dayOfWeek: z.number().int().min(0).max(6),
-  isOpen: z.boolean(),
-  windows: z.array(openingHoursWindowSchema).min(1, 'Add at least one opening window.').max(maximumOpeningWindowsPerDay),
-}).superRefine((day, context) => {
-  if (!day.isOpen) {
-    return
-  }
-
-  if (hasOverlappingOpeningWindows(day.windows)) {
-    context.addIssue({
-      code: 'custom',
-      path: ['windows'],
-      message: 'Opening windows must not overlap.',
-    })
-  }
-})
-
-const specialOpeningDaySchema = z.object({
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use yyyy-mm-dd date.'),
-  isClosed: z.boolean(),
-  note: z.string().trim().max(160, 'Note must be 160 characters or fewer.').optional().nullable(),
-  windows: z.array(openingHoursWindowSchema).max(maximumOpeningWindowsPerDay),
-}).superRefine((day, context) => {
-  if (day.isClosed) {
-    return
-  }
-
-  if (day.windows.length === 0) {
-    context.addIssue({
-      code: 'custom',
-      path: ['windows'],
-      message: 'Add at least one opening window.',
-    })
-    return
-  }
-
-  if (hasOverlappingOpeningWindows(day.windows)) {
-    context.addIssue({
-      code: 'custom',
-      path: ['windows'],
-      message: 'Opening windows must not overlap.',
-    })
-  }
-})
 
 const restaurantSchema = z.object({
   name: z.string().trim().min(2, 'Restaurant name must be at least 2 characters.').max(120),
@@ -189,104 +157,55 @@ const restaurantSchema = z.object({
   acceptingOrders: z.boolean(),
   openingHours: z.array(openingHoursDaySchema).length(7, 'Set opening hours for all seven days.'),
   specialOpeningDays: z.array(specialOpeningDaySchema),
+}).superRefine((values, context) => {
+  const countryCode = getSupportedPhoneCountryCode(values.phoneCountryCode)
+  const parsedPhone = parsePhoneNumberFromString(cleanNationalPhoneInput(values.phoneNationalNumber), countryCode)
+
+  if (!parsedPhone?.isValid()) {
+    context.addIssue({
+      code: 'custom',
+      path: ['phoneNationalNumber'],
+      message: 'Enter a valid phone number for the selected dialing country.',
+    })
+  }
 })
 
 type RestaurantFormValues = z.infer<typeof restaurantSchema>
-type OpeningHoursWindow = z.infer<typeof openingHoursWindowSchema>
-type OpeningHoursDay = z.infer<typeof openingHoursDaySchema>
-type SpecialOpeningDay = z.infer<typeof specialOpeningDaySchema>
 type SortKey = 'name' | 'status' | 'currency' | 'created'
 type SortDirection = 'asc' | 'desc'
 type StatusFilter = 'all' | 'active' | 'inactive'
 type RestaurantAdminTab = 'restaurants' | 'tables' | 'hours' | 'calendar'
 type RestaurantFormTab = 'basic' | 'advanced'
-type AutosaveState = 'idle' | 'pending' | 'saving' | 'saved' | 'error'
 
-const dayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const restaurantAdminTabs: RestaurantAdminTab[] = ['restaurants', 'tables', 'hours', 'calendar']
+const restaurantSortKeys: SortKey[] = ['name', 'status', 'currency', 'created']
+const restaurantPageSizes = [10, 20, 50]
 
-function createDefaultOpeningHours(): OpeningHoursDay[] {
-  return dayLabels.map((_, dayOfWeek) => ({
-    dayOfWeek,
-    isOpen: true,
-    windows: [createDefaultOpeningWindow()],
-  }))
+function getPositiveInteger(value: string | null, fallback: number) {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
-function createDefaultOpeningWindow(): OpeningHoursWindow {
-  return {
-    opensAt: '09:00',
-    closesAt: '21:00',
-  }
-}
-
-function createFullDayOpeningWindow(): OpeningHoursWindow {
-  return {
-    opensAt: '00:00',
-    closesAt: '00:00',
-  }
-}
-
-function isFullDayOpeningSchedule(windows: OpeningHoursWindow[]) {
-  return windows.length === 1 && isFullDayOpeningWindow(windows[0])
-}
-
-function createSuggestedOpeningWindow(existingWindows: OpeningHoursWindow[]): OpeningHoursWindow {
-  const lastWindow = existingWindows.at(-1)
-
-  if (!lastWindow) {
-    return createDefaultOpeningWindow()
+function getRestaurantOperationalStatus(restaurant: Restaurant) {
+  if (!restaurant.isActive) {
+    return { label: 'Inactive', variant: 'destructive' as const }
   }
 
-  const lastClosesAt = lastWindow.closesAt
-  if (timePattern.test(lastClosesAt) && timeToMinutes(lastClosesAt) < timeToMinutes('21:00')) {
+  if (restaurant.availability) {
+    const label = getStatusHeadline(restaurant.availability)
     return {
-      opensAt: lastClosesAt,
-      closesAt: '21:00',
+      label,
+      variant: restaurant.availability.isWithinOpeningHours && restaurant.availability.reason === 'Open'
+        ? 'secondary' as const
+        : 'outline' as const,
     }
   }
 
-  return {
-    opensAt: '17:00',
-    closesAt: '21:00',
-  }
+  return restaurant.acceptingOrders
+    ? { label: 'Schedule unavailable', variant: 'outline' as const }
+    : { label: 'Orders paused', variant: 'outline' as const }
 }
 
-function createClosedSpecialDay(date: string): SpecialOpeningDay {
-  return {
-    date,
-    isClosed: true,
-    note: '',
-    windows: [],
-  }
-}
-
-function createOpenSpecialDay(date: string, windows: OpeningHoursWindow[]): SpecialOpeningDay {
-  return {
-    date,
-    isClosed: false,
-    note: '',
-    windows: windows.length > 0 ? windows.map((window) => ({ ...window })) : [createDefaultOpeningWindow()],
-  }
-}
-
-function getSpecialOpeningSeedWindows(
-  regularDay: OpeningHoursDay,
-  preferredWindows: OpeningHoursWindow[] = [],
-): OpeningHoursWindow[] {
-  const seedWindows = preferredWindows.length > 0
-    ? preferredWindows
-    : regularDay.isOpen && regularDay.windows.length > 0
-      ? regularDay.windows
-      : [createDefaultOpeningWindow()]
-
-  return seedWindows.map((window) => ({ ...window }))
-}
-
-function normalizeSpecialOpeningDaysForDraft(specialOpeningDays: SpecialOpeningDay[]) {
-  return specialOpeningDays
-    .filter((day, index, days) => days.findIndex((candidate) => candidate.date === day.date) === index)
-    .sort((first, second) => first.date.localeCompare(second.date))
-}
 
 function createEmptyRestaurant(): RestaurantFormValues {
   return {
@@ -306,244 +225,7 @@ function createEmptyRestaurant(): RestaurantFormValues {
   }
 }
 
-function toDateKey(date: Date) {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
 
-function fromDateKey(dateKey: string) {
-  const [year, month, day] = dateKey.split('-').map(Number)
-  return new Date(year, month - 1, day)
-}
-
-function parseOpeningHoursJson(openingHoursJson?: string | null): OpeningHoursDay[] {
-  if (!openingHoursJson) {
-    return createDefaultOpeningHours()
-  }
-
-  try {
-    const parsed = JSON.parse(openingHoursJson)
-    if (!Array.isArray(parsed) || parsed.length !== 7) {
-      return createDefaultOpeningHours()
-    }
-
-    const normalized = parsed.map((entry) => normalizeOpeningHoursDay(entry))
-    const result = z.array(openingHoursDaySchema).length(7).safeParse(normalized)
-
-    return result.success
-      ? [...result.data].sort((first, second) => first.dayOfWeek - second.dayOfWeek)
-      : createDefaultOpeningHours()
-  } catch {
-    return createDefaultOpeningHours()
-  }
-}
-
-function serializeOpeningHours(openingHours: OpeningHoursDay[]) {
-  return JSON.stringify([...openingHours].sort((first, second) => first.dayOfWeek - second.dayOfWeek))
-}
-
-function parseSpecialOpeningDaysJson(specialOpeningDaysJson?: string | null): SpecialOpeningDay[] {
-  if (!specialOpeningDaysJson) {
-    return []
-  }
-
-  try {
-    const parsed = JSON.parse(specialOpeningDaysJson)
-    if (!Array.isArray(parsed)) {
-      return []
-    }
-
-    const result = z.array(specialOpeningDaySchema).safeParse(parsed.map(normalizeSpecialOpeningDay))
-    return result.success
-      ? [...result.data].sort((first, second) => first.date.localeCompare(second.date))
-      : []
-  } catch {
-    return []
-  }
-}
-
-function serializeSpecialOpeningDays(specialOpeningDays: SpecialOpeningDay[]) {
-  return JSON.stringify(
-    [...specialOpeningDays]
-      .sort((first, second) => first.date.localeCompare(second.date))
-      .map((day) => ({
-        date: day.date,
-        isClosed: day.isClosed,
-        note: day.note?.trim() || null,
-        windows: day.isClosed ? [] : day.windows,
-      })),
-  )
-}
-
-function normalizeSpecialOpeningDay(value: unknown): SpecialOpeningDay {
-  if (!value || typeof value !== 'object') {
-    return createClosedSpecialDay(toDateKey(new Date()))
-  }
-
-  const candidate = value as {
-    date?: unknown
-    isClosed?: unknown
-    note?: unknown
-    windows?: unknown
-  }
-  const date = typeof candidate.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(candidate.date)
-    ? candidate.date
-    : toDateKey(new Date())
-  const isClosed = typeof candidate.isClosed === 'boolean' ? candidate.isClosed : true
-  const windows = Array.isArray(candidate.windows)
-    ? candidate.windows
-        .map((window) => normalizeOpeningWindow(window))
-        .filter((window): window is OpeningHoursWindow => Boolean(window))
-        .slice(0, maximumOpeningWindowsPerDay)
-    : []
-
-  return {
-    date,
-    isClosed,
-    note: typeof candidate.note === 'string' ? candidate.note : null,
-    windows: isClosed ? [] : (windows.length > 0 ? windows : [createDefaultOpeningWindow()]),
-  }
-}
-
-function normalizeOpeningHoursDay(value: unknown): OpeningHoursDay {
-  if (!value || typeof value !== 'object') {
-    return createDefaultOpeningHours()[0]
-  }
-
-  const candidate = value as {
-    dayOfWeek?: unknown
-    isOpen?: unknown
-    opensAt?: unknown
-    closesAt?: unknown
-    windows?: unknown
-  }
-  const dayOfWeek = typeof candidate.dayOfWeek === 'number' && candidate.dayOfWeek >= 0 && candidate.dayOfWeek <= 6
-    ? candidate.dayOfWeek
-    : 0
-  const isOpen = typeof candidate.isOpen === 'boolean' ? candidate.isOpen : true
-  const parsedWindows = Array.isArray(candidate.windows)
-    ? candidate.windows
-        .map((window) => normalizeOpeningWindow(window))
-        .filter((window): window is OpeningHoursWindow => Boolean(window))
-    : []
-  const legacyWindow = typeof candidate.opensAt === 'string' && typeof candidate.closesAt === 'string'
-    ? normalizeOpeningWindow({ opensAt: candidate.opensAt, closesAt: candidate.closesAt })
-    : null
-  const windows = parsedWindows.length > 0
-    ? parsedWindows
-    : legacyWindow
-      ? [legacyWindow]
-      : [createDefaultOpeningWindow()]
-
-  return {
-    dayOfWeek,
-    isOpen,
-    windows: windows.slice(0, maximumOpeningWindowsPerDay),
-  }
-}
-
-function normalizeOpeningWindow(value: unknown): OpeningHoursWindow | null {
-  if (!value || typeof value !== 'object') {
-    return null
-  }
-
-  const candidate = value as { opensAt?: unknown; closesAt?: unknown }
-  if (typeof candidate.opensAt !== 'string' || typeof candidate.closesAt !== 'string') {
-    return null
-  }
-
-  const result = openingHoursWindowSchema.safeParse({
-    opensAt: candidate.opensAt,
-    closesAt: candidate.closesAt,
-  })
-
-  return result.success ? result.data : null
-}
-
-function hasOverlappingOpeningWindows(windows: OpeningHoursWindow[]) {
-  const ranges = windows
-    .map((window) => {
-      const opensAt = timeToMinutes(window.opensAt)
-      const closesAt = timeToMinutes(window.closesAt)
-      return {
-        start: opensAt,
-        end: closesAt > opensAt ? closesAt : closesAt + 24 * 60,
-      }
-    })
-    .sort((first, second) => first.start - second.start)
-
-  return ranges.some((range, index) => index > 0 && range.start < ranges[index - 1].end)
-}
-
-function timeToMinutes(value: string) {
-  const [hours, minutes] = value.split(':').map(Number)
-  return hours * 60 + minutes
-}
-
-function getMonthCalendarDates(monthDate: Date) {
-  const firstDay = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1)
-  const gridStart = new Date(firstDay)
-  gridStart.setDate(firstDay.getDate() - firstDay.getDay())
-
-  return Array.from({ length: 42 }, (_, index) => {
-    const date = new Date(gridStart)
-    date.setDate(gridStart.getDate() + index)
-    return date
-  })
-}
-
-function getRegularOpeningDayForDate(dateKey: string, openingHours: OpeningHoursDay[]) {
-  const date = fromDateKey(dateKey)
-  return openingHours.find((day) => day.dayOfWeek === date.getDay()) ?? createDefaultOpeningHours()[date.getDay()]
-}
-
-function getSpecialOpeningDay(dateKey: string, specialOpeningDays: SpecialOpeningDay[]) {
-  return specialOpeningDays.find((day) => day.date === dateKey) ?? null
-}
-
-function resolveCalendarDateStatus(
-  dateKey: string,
-  openingHours: OpeningHoursDay[],
-  specialOpeningDays: SpecialOpeningDay[],
-) {
-  const specialDay = getSpecialOpeningDay(dateKey, specialOpeningDays)
-
-  if (specialDay) {
-    return {
-      isOpen: !specialDay.isClosed,
-      isOverride: true,
-      label: specialDay.isClosed ? 'Closed' : 'Special',
-      windows: specialDay.isClosed ? [] : specialDay.windows,
-      note: specialDay.note ?? '',
-    }
-  }
-
-  const regularDay = getRegularOpeningDayForDate(dateKey, openingHours)
-  return {
-    isOpen: regularDay.isOpen,
-    isOverride: false,
-    label: regularDay.isOpen ? 'Open' : 'Closed',
-    windows: regularDay.isOpen ? regularDay.windows : [],
-    note: '',
-  }
-}
-
-function formatOpeningWindows(windows: OpeningHoursWindow[]) {
-  return windows.length > 0
-    ? windows.map((window) => `${window.opensAt}-${window.closesAt}`).join(', ')
-    : 'Closed'
-}
-
-function formatCalendarDate(dateKey: string) {
-  return new Intl.DateTimeFormat('en-AU', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-  }).format(fromDateKey(dateKey))
-}
 
 function toPayload(values: RestaurantFormValues): RestaurantRequest {
   return {
@@ -619,7 +301,13 @@ function RestaurantPublicAccessDialog({ restaurant }: { restaurant: Restaurant }
   return (
     <Dialog>
       <DialogTrigger asChild>
-        <Button type="button" variant="outline" size="icon" title="Public takeaway access" aria-label="Public takeaway access">
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          title={`Public ordering access for ${restaurant.name}`}
+          aria-label={`Public ordering access for ${restaurant.name}`}
+        >
           <Link2 size={16} />
         </Button>
       </DialogTrigger>
@@ -633,6 +321,380 @@ function RestaurantPublicAccessDialog({ restaurant }: { restaurant: Restaurant }
           description={`${restaurant.name} public ordering entry`}
           url={takeawayUrl}
         />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function RestaurantPaymentsDialog({
+  restaurant,
+  isPlatformOwner,
+  onUpdated,
+}: {
+  restaurant: Restaurant
+  isPlatformOwner: boolean
+  onUpdated: () => Promise<void> | void
+}) {
+  const [open, setOpen] = useState(false)
+  const [settings, setSettings] = useState<RestaurantPaymentSettings | null>(null)
+  const [orderFeePercent, setOrderFeePercent] = useState('0')
+  const [setupFeeAmount, setSetupFeeAmount] = useState('0')
+  const [loading, setLoading] = useState(false)
+  const [workingAction, setWorkingAction] = useState<string | null>(null)
+  const [stripeMode, setStripeMode] = useState<'Live' | 'Test' | 'Unconfigured'>('Unconfigured')
+  const [diagnostic, setDiagnostic] = useState<StripeConnectDiagnostic | null>(null)
+
+  const applySettings = useCallback((nextSettings: RestaurantPaymentSettings) => {
+    setSettings(nextSettings)
+    setOrderFeePercent(String(nextSettings.orderPlatformFeePercent))
+    setSetupFeeAmount((nextSettings.oneTimePlatformFeeCents / 100).toFixed(2))
+  }, [])
+
+  const loadSettings = useCallback(async (showSuccess = false) => {
+    setLoading(true)
+    try {
+      const [nextSettings, environment] = await Promise.all([
+        getRestaurantPaymentSettings(restaurant.id),
+        getPaymentEnvironment().catch(() => null),
+      ])
+      applySettings(nextSettings)
+      if (environment) setStripeMode(environment.mode)
+      if (showSuccess) toast.success('Payment settings refreshed')
+    } catch (loadError) {
+      toast.error('Could not load payment settings', {
+        description: loadError instanceof Error ? loadError.message : 'The request failed.',
+      })
+    } finally {
+      setLoading(false)
+    }
+  }, [applySettings, restaurant.id])
+
+  useEffect(() => {
+    if (!open) return
+    const loadTimer = window.setTimeout(() => void loadSettings(), 0)
+    return () => window.clearTimeout(loadTimer)
+  }, [loadSettings, open])
+
+  const runAction = async (action: string, callback: () => Promise<void>) => {
+    setWorkingAction(action)
+    try {
+      await callback()
+    } finally {
+      setWorkingAction(null)
+    }
+  }
+
+  const handleConnect = () => runAction('connect', async () => {
+    try {
+      const response = await createRestaurantStripeConnectLink(restaurant.id)
+      if (!response.url) throw new Error('Stripe did not return an onboarding link.')
+      window.location.assign(response.url)
+    } catch (connectError) {
+      toast.error('Could not open Stripe onboarding', {
+        description: connectError instanceof Error ? connectError.message : 'The request failed.',
+      })
+    }
+  })
+
+  const handleRefresh = () => runAction('refresh', async () => {
+    try {
+      applySettings(await refreshRestaurantStripeStatus(restaurant.id))
+      await onUpdated()
+      toast.success('Stripe status refreshed')
+    } catch (refreshError) {
+      toast.error('Could not refresh Stripe status', {
+        description: refreshError instanceof Error ? refreshError.message : 'The request failed.',
+      })
+    }
+  })
+
+  const handleDiagnostics = () => runAction('diagnostics', async () => {
+    try {
+      const result = await runRestaurantStripeDiagnostics(restaurant.id)
+      setDiagnostic(result)
+      applySettings(result.settings)
+      await onUpdated()
+      const failedChecks = result.checks.filter((check) => check.status === 'Failed').length
+      const warningChecks = result.checks.filter((check) => check.status === 'Warning').length
+      if (failedChecks > 0) {
+        toast.error('Stripe diagnostics found a blocking issue')
+      } else if (warningChecks > 0) {
+        toast.warning('Stripe diagnostics completed with warnings')
+      } else {
+        toast.success('Stripe diagnostics passed')
+      }
+    } catch (diagnosticError) {
+      toast.error('Could not run Stripe diagnostics', {
+        description: diagnosticError instanceof Error ? diagnosticError.message : 'The request failed.',
+      })
+    }
+  })
+
+  const orderFeePreview = buildFeePreview(Number(orderFeePercent), settings?.currency ?? 'AUD')
+
+  const handleSaveFees = () => runAction('fees', async () => {
+    const percentage = Number(orderFeePercent)
+    const dollars = Number(setupFeeAmount)
+    if (!Number.isFinite(percentage) || percentage < 0 || percentage > 100) {
+      toast.error('Per-order fee must be between 0% and 100%.')
+      return
+    }
+    if (!Number.isFinite(dollars) || dollars < 0) {
+      toast.error('One-time fee cannot be negative.')
+      return
+    }
+    if (dollars > 0 && dollars < 0.5) {
+      toast.error('A non-zero one-time fee must be at least 0.50.')
+      return
+    }
+
+    try {
+      applySettings(await updateRestaurantPlatformFees(restaurant.id, {
+        orderPlatformFeePercent: Math.round(percentage * 100) / 100,
+        oneTimePlatformFeeCents: Math.round(dollars * 100),
+      }))
+      await onUpdated()
+      toast.success('Platform fees saved')
+    } catch (saveError) {
+      toast.error('Could not save platform fees', {
+        description: saveError instanceof Error ? saveError.message : 'The request failed.',
+      })
+    }
+  })
+
+  const handleSetupFeeCheckout = () => runAction('setup-fee', async () => {
+    try {
+      const response = await createRestaurantPlatformFeeCheckout(restaurant.id)
+      if (!response.required || response.paid) {
+        toast.success(response.message)
+        await loadSettings()
+        return
+      }
+      if (!response.checkoutUrl) throw new Error('Stripe did not return a checkout link.')
+      window.location.assign(response.checkoutUrl)
+    } catch (checkoutError) {
+      toast.error('Could not open platform fee checkout', {
+        description: checkoutError instanceof Error ? checkoutError.message : 'The request failed.',
+      })
+    }
+  })
+
+  const statusLabel = settings?.stripeConnectStatus ?? restaurant.stripeConnectStatus ?? 'NotConnected'
+  const statusVariant = statusLabel === 'Ready'
+    ? 'secondary' as const
+    : statusLabel === 'Restricted'
+      ? 'destructive' as const
+      : 'outline' as const
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          title={`Payments for ${restaurant.name}`}
+          aria-label={`Payments for ${restaurant.name}`}
+        >
+          <CreditCard size={16} />
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="restaurant-payments-dialog">
+        <DialogHeader>
+          <DialogTitle>{restaurant.name} payments</DialogTitle>
+          <DialogDescription>
+            Connect this restaurant to Stripe and configure optional platform pricing. Both fees start at zero.
+          </DialogDescription>
+        </DialogHeader>
+
+        {loading && !settings ? (
+          <div className="restaurant-payment-loading" role="status">
+            <RefreshCw className="spinner" size={18} />
+            Loading payment settings...
+          </div>
+        ) : settings ? (
+          <div className="restaurant-payment-stack">
+            <section className="restaurant-payment-section">
+              <div className="restaurant-payment-section-heading">
+                <div>
+                  <strong>Stripe Connect</strong>
+                  <span>Customer payments settle directly into this restaurant's Stripe account.</span>
+                </div>
+                <Badge variant={statusVariant}>{statusLabel.replace(/([a-z])([A-Z])/g, '$1 $2')}</Badge>
+              </div>
+              <div className="restaurant-payment-capabilities">
+                <span data-ready={settings.stripeChargesEnabled}>Charges {settings.stripeChargesEnabled ? 'enabled' : 'pending'}</span>
+                <span data-ready={settings.stripePayoutsEnabled}>Payouts {settings.stripePayoutsEnabled ? 'enabled' : 'pending'}</span>
+                <span data-ready={settings.stripeDetailsSubmitted}>Details {settings.stripeDetailsSubmitted ? 'submitted' : 'incomplete'}</span>
+              </div>
+              {settings.stripeRestrictions.length > 0 ? (
+                <div className="restaurant-stripe-restrictions" aria-live="polite">
+                  <div className="restaurant-stripe-restrictions-heading">
+                    <div>
+                      <strong>
+                        {settings.stripeRestrictions.some((restriction) => restriction.actionRequired)
+                          ? 'Stripe needs attention'
+                          : 'Stripe review in progress'}
+                      </strong>
+                      <span>
+                        {settings.stripeCurrentDeadline
+                          ? `Resolve required items by ${formatDate(settings.stripeCurrentDeadline)}.`
+                          : 'These details come directly from the connected Stripe account.'}
+                      </span>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => void handleConnect()}
+                      disabled={workingAction !== null}
+                    >
+                      <ExternalLink size={15} />
+                      {settings.stripeRestrictions.some((restriction) => restriction.actionRequired)
+                        ? 'Resolve in Stripe'
+                        : 'View in Stripe'}
+                    </Button>
+                  </div>
+                  <div className="restaurant-stripe-restriction-list">
+                    {settings.stripeRestrictions.map((restriction, index) => (
+                      <article
+                        key={`${restriction.code}-${restriction.requirement ?? index}`}
+                        data-severity={restriction.severity.toLowerCase()}
+                      >
+                        {restriction.severity === 'Error' ? (
+                          <TriangleAlert size={17} />
+                        ) : restriction.severity === 'Warning' ? (
+                          <TriangleAlert size={17} />
+                        ) : (
+                          <Info size={17} />
+                        )}
+                        <div>
+                          <strong>{restriction.title}</strong>
+                          <span>{restriction.message}</span>
+                        </div>
+                        <Badge variant="outline">
+                          {restriction.actionRequired ? 'Action required' : 'No action'}
+                        </Badge>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {diagnostic ? (
+                <div className="restaurant-stripe-diagnostics" role="status">
+                  <div className="restaurant-stripe-diagnostics-heading">
+                    <div>
+                      <TestTube2 size={17} />
+                      <strong>Sandbox diagnostics</strong>
+                    </div>
+                    <span>{formatDate(diagnostic.checkedAt)}</span>
+                  </div>
+                  <div className="restaurant-stripe-diagnostic-list">
+                    {diagnostic.checks.map((check) => (
+                      <div key={check.code} data-status={check.status.toLowerCase()}>
+                        {check.status === 'Passed' ? <CircleCheck size={17} /> : <TriangleAlert size={17} />}
+                        <div>
+                          <strong>{check.label}</strong>
+                          <span>{check.message}</span>
+                        </div>
+                        <Badge variant="outline">{check.status}</Badge>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              <div className="restaurant-payment-actions">
+                <Button type="button" onClick={() => void handleConnect()} disabled={workingAction !== null}>
+                  <ExternalLink size={16} />
+                  {settings.stripeAccountId
+                    ? settings.stripeConnectStatus === 'Ready'
+                      ? 'Manage in Stripe'
+                      : 'Continue Stripe setup'
+                    : 'Connect Stripe'}
+                </Button>
+                <Button type="button" variant="outline" onClick={() => void handleRefresh()} disabled={workingAction !== null}>
+                  <RefreshCw size={16} className={workingAction === 'refresh' ? 'spinner' : undefined} />
+                  Refresh status
+                </Button>
+                {stripeMode === 'Test' && settings.stripeAccountId ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void handleDiagnostics()}
+                    disabled={workingAction !== null}
+                  >
+                    <TestTube2 size={16} className={workingAction === 'diagnostics' ? 'spinner' : undefined} />
+                    Run diagnostics
+                  </Button>
+                ) : null}
+              </div>
+            </section>
+
+            <section className="restaurant-payment-section">
+              <div className="restaurant-payment-section-heading">
+                <div>
+                  <strong>Platform pricing</strong>
+                  <span>These are platform fees, separate from Stripe's processing fees.</span>
+                </div>
+                <Badge variant="outline">{settings.currency}</Badge>
+              </div>
+              <div className="restaurant-payment-fee-grid">
+                <label>
+                  <span>Per-order fee</span>
+                  <div className="restaurant-payment-input">
+                    <Input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.01"
+                      inputMode="decimal"
+                      value={orderFeePercent}
+                      onChange={(event) => setOrderFeePercent(event.target.value)}
+                      disabled={!isPlatformOwner || workingAction !== null}
+                    />
+                    <span>%</span>
+                  </div>
+                  <small>Default 0%. Collected automatically from each successful online order.</small>
+                  {/* A bare "0.1" reads as ten cents; showing the worked amounts removes the doubt. */}
+                  {orderFeePreview && (
+                    <small className="restaurant-fee-preview">{orderFeePreview}</small>
+                  )}
+                </label>
+                <label>
+                  <span>One-time activation fee</span>
+                  <div className="restaurant-payment-input">
+                    <Input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      inputMode="decimal"
+                      value={setupFeeAmount}
+                      onChange={(event) => setSetupFeeAmount(event.target.value)}
+                      disabled={!isPlatformOwner || settings.oneTimePlatformFeeStatus === 'Paid' || workingAction !== null}
+                    />
+                    <span>{settings.currency}</span>
+                  </div>
+                  <small>
+                    Default {settings.currency} 0.00. Status: {settings.oneTimePlatformFeeStatus}.
+                  </small>
+                </label>
+              </div>
+              <div className="restaurant-payment-actions">
+                {isPlatformOwner ? (
+                  <Button type="button" onClick={() => void handleSaveFees()} disabled={workingAction !== null}>
+                    Save platform fees
+                  </Button>
+                ) : null}
+                {settings.oneTimePlatformFeeCents > 0 && settings.oneTimePlatformFeeStatus !== 'Paid' ? (
+                  <Button type="button" variant="outline" onClick={() => void handleSetupFeeCheckout()} disabled={workingAction !== null}>
+                    Pay one-time fee
+                  </Button>
+                ) : null}
+              </div>
+            </section>
+          </div>
+        ) : (
+          <p className="form-error">Payment settings could not be loaded.</p>
+        )}
       </DialogContent>
     </Dialog>
   )
@@ -725,14 +787,18 @@ function formatPhoneForPayload(countryCode: string, nationalNumber: string) {
   const cleanedNationalNumber = cleanNationalPhoneInput(nationalNumber).trim()
   const parsedNationalPhone = parsePhoneNumberFromString(cleanedNationalNumber, phoneCountryCode)
 
-  if (parsedNationalPhone?.isPossible()) {
+  if (parsedNationalPhone?.isValid()) {
     return parsedNationalPhone.formatInternational()
   }
 
   const rawInternationalNumber = `+${getPhoneCallingCode(phoneCountryCode)} ${cleanedNationalNumber}`
   const parsedPhone = parsePhoneNumberFromString(rawInternationalNumber, phoneCountryCode)
 
-  return parsedPhone?.isPossible() ? parsedPhone.formatInternational() : rawInternationalNumber
+  if (!parsedPhone?.isValid()) {
+    throw new Error('Enter a valid phone number for the selected dialing country.')
+  }
+
+  return parsedPhone.formatInternational()
 }
 
 function LocaleCombobox({
@@ -826,6 +892,7 @@ function PhoneCountryCombobox({
           variant="outline"
           role="combobox"
           aria-expanded={open}
+          aria-label="Phone dialing country"
           className="phone-country-trigger"
         >
           <span>
@@ -909,246 +976,11 @@ function InternationalPhoneInput({
   )
 }
 
-function OpeningHoursEditor({
-  value,
-  onChange,
-}: {
-  value: OpeningHoursDay[]
-  onChange: (value: OpeningHoursDay[]) => void
-}) {
-  const normalizedValue = value.length === 7 ? value : createDefaultOpeningHours()
-
-  const updateDay = (dayOfWeek: number, patch: Partial<OpeningHoursDay>) => {
-    onChange(
-      normalizedValue.map((day) =>
-        day.dayOfWeek === dayOfWeek
-          ? { ...day, ...patch }
-          : day,
-      ),
-    )
-  }
-  const updateWindow = (
-    dayOfWeek: number,
-    windowIndex: number,
-    patch: Partial<OpeningHoursWindow>,
-  ) => {
-    const day = normalizedValue.find((entry) => entry.dayOfWeek === dayOfWeek)
-    if (!day) {
-      return
-    }
-
-    updateDay(dayOfWeek, {
-      windows: day.windows.map((window, index) =>
-        index === windowIndex
-          ? { ...window, ...patch }
-          : window,
-      ),
-    })
-  }
-  const addWindow = (dayOfWeek: number) => {
-    const day = normalizedValue.find((entry) => entry.dayOfWeek === dayOfWeek)
-    if (!day || day.windows.length >= maximumOpeningWindowsPerDay) {
-      return
-    }
-
-    updateDay(dayOfWeek, {
-      windows: [...day.windows, createSuggestedOpeningWindow(day.windows)],
-    })
-  }
-  const removeWindow = (dayOfWeek: number, windowIndex: number) => {
-    const day = normalizedValue.find((entry) => entry.dayOfWeek === dayOfWeek)
-    if (!day || day.windows.length <= 1) {
-      return
-    }
-
-    updateDay(dayOfWeek, {
-      windows: day.windows.filter((_, index) => index !== windowIndex),
-    })
-  }
-
-  return (
-    <div className="opening-hours-editor">
-      {normalizedValue.map((day) => {
-        const isOpenAllDay = day.isOpen && isFullDayOpeningSchedule(day.windows)
-
-        return (
-          <div key={day.dayOfWeek} className="opening-hours-row">
-            <div className="opening-hours-day">
-              <Switch
-                checked={day.isOpen}
-                onCheckedChange={(checked) => updateDay(day.dayOfWeek, { isOpen: checked })}
-                aria-label={`${dayLabels[day.dayOfWeek]} open`}
-              />
-              <span>{dayLabels[day.dayOfWeek]}</span>
-              <small>
-                {day.isOpen
-                  ? isOpenAllDay
-                    ? 'Open 24 hours'
-                    : `${day.windows.length} segment${day.windows.length === 1 ? '' : 's'}`
-                  : 'Closed'}
-              </small>
-            </div>
-            <div className="opening-hours-windows">
-              {day.windows.map((window, windowIndex) => (
-                <div key={`${day.dayOfWeek}-${windowIndex}`} className="opening-hours-window">
-                  <Input
-                    type="time"
-                    value={window.opensAt}
-                    disabled={!day.isOpen}
-                    aria-label={`${dayLabels[day.dayOfWeek]} segment ${windowIndex + 1} opening time`}
-                    onChange={(event) => updateWindow(day.dayOfWeek, windowIndex, { opensAt: event.target.value })}
-                  />
-                  <span>to</span>
-                  <Input
-                    type="time"
-                    value={window.closesAt}
-                    disabled={!day.isOpen}
-                    aria-label={`${dayLabels[day.dayOfWeek]} segment ${windowIndex + 1} closing time`}
-                    onChange={(event) => updateWindow(day.dayOfWeek, windowIndex, { closesAt: event.target.value })}
-                  />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="opening-hours-remove-window"
-                    disabled={!day.isOpen || day.windows.length <= 1}
-                    aria-label={`Remove ${dayLabels[day.dayOfWeek]} segment ${windowIndex + 1}`}
-                    onClick={() => removeWindow(day.dayOfWeek, windowIndex)}
-                  >
-                    <Trash2 size={14} />
-                  </Button>
-                </div>
-              ))}
-              <div className="opening-hours-actions">
-                <Button
-                  type="button"
-                  variant={isOpenAllDay ? 'secondary' : 'outline'}
-                  size="sm"
-                  className="opening-hours-add-window"
-                  disabled={!day.isOpen}
-                  aria-pressed={isOpenAllDay}
-                  onClick={() => updateDay(day.dayOfWeek, {
-                    windows: [isOpenAllDay ? createDefaultOpeningWindow() : createFullDayOpeningWindow()],
-                  })}
-                >
-                  24 hours
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="opening-hours-add-window"
-                  disabled={!day.isOpen || isOpenAllDay || day.windows.length >= maximumOpeningWindowsPerDay}
-                  onClick={() => addWindow(day.dayOfWeek)}
-                >
-                  <Plus size={14} />
-                  Add segment
-                </Button>
-              </div>
-            </div>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-function OpeningWindowsEditor({
-  windows,
-  disabled,
-  onChange,
-}: {
-  windows: OpeningHoursWindow[]
-  disabled?: boolean
-  onChange: (windows: OpeningHoursWindow[]) => void
-}) {
-  const safeWindows = windows.length > 0 ? windows : [createDefaultOpeningWindow()]
-  const isOpenAllDay = isFullDayOpeningSchedule(safeWindows)
-
-  const updateWindow = (windowIndex: number, patch: Partial<OpeningHoursWindow>) => {
-    onChange(safeWindows.map((window, index) => (index === windowIndex ? { ...window, ...patch } : window)))
-  }
-
-  const addWindow = () => {
-    if (safeWindows.length >= maximumOpeningWindowsPerDay) {
-      return
-    }
-
-    onChange([...safeWindows, createSuggestedOpeningWindow(safeWindows)])
-  }
-
-  const removeWindow = (windowIndex: number) => {
-    if (safeWindows.length <= 1) {
-      return
-    }
-
-    onChange(safeWindows.filter((_, index) => index !== windowIndex))
-  }
-
-  return (
-    <div className="opening-hours-windows">
-      {safeWindows.map((window, windowIndex) => (
-        <div key={windowIndex} className="opening-hours-window">
-          <Input
-            type="time"
-            value={window.opensAt}
-            disabled={disabled}
-            aria-label={`Special opening segment ${windowIndex + 1} opening time`}
-            onChange={(event) => updateWindow(windowIndex, { opensAt: event.target.value })}
-          />
-          <span>to</span>
-          <Input
-            type="time"
-            value={window.closesAt}
-            disabled={disabled}
-            aria-label={`Special opening segment ${windowIndex + 1} closing time`}
-            onChange={(event) => updateWindow(windowIndex, { closesAt: event.target.value })}
-          />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="opening-hours-remove-window"
-            disabled={disabled || safeWindows.length <= 1}
-            aria-label={`Remove special opening segment ${windowIndex + 1}`}
-            onClick={() => removeWindow(windowIndex)}
-          >
-            <Trash2 size={14} />
-          </Button>
-        </div>
-      ))}
-      <div className="opening-hours-actions">
-        <Button
-          type="button"
-          variant={isOpenAllDay ? 'secondary' : 'outline'}
-          size="sm"
-          className="opening-hours-add-window"
-          disabled={disabled}
-          aria-pressed={isOpenAllDay}
-          onClick={() => onChange([
-            isOpenAllDay ? createDefaultOpeningWindow() : createFullDayOpeningWindow(),
-          ])}
-        >
-          24 hours
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="opening-hours-add-window"
-          disabled={disabled || isOpenAllDay || safeWindows.length >= maximumOpeningWindowsPerDay}
-          onClick={addWindow}
-        >
-          <Plus size={14} />
-          Add segment
-        </Button>
-      </div>
-    </div>
-  )
-}
 
 function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps) {
   const [open, setOpen] = useState(false)
+  const [discardDialogOpen, setDiscardDialogOpen] = useState(false)
+  const [failedImagePreviewUrl, setFailedImagePreviewUrl] = useState('')
   const [formTab, setFormTab] = useState<RestaurantFormTab>('basic')
   const editing = Boolean(restaurant)
   const timezoneOptions = useMemo(() => getTimezoneOptions(), [])
@@ -1156,8 +988,10 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
     resolver: zodResolver(restaurantSchema),
     defaultValues: createEmptyRestaurant(),
   })
-  const selectedCountryCode = form.watch('countryCode')
-  const selectedPhoneCountryCode = form.watch('phoneCountryCode')
+  const selectedCountryCode = useWatch({ control: form.control, name: 'countryCode' })
+  const selectedPhoneCountryCode = useWatch({ control: form.control, name: 'phoneCountryCode' })
+  const imageUrl = useWatch({ control: form.control, name: 'imageUrl' })
+  const { isDirty, isSubmitting } = form.formState
 
   useEffect(() => {
     if (!open) {
@@ -1306,28 +1140,39 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
   }
 
   const handleDialogOpenChange = (nextOpen: boolean) => {
-    setOpen(nextOpen)
+    if (!nextOpen && isDirty && !isSubmitting) {
+      setDiscardDialogOpen(true)
+      return
+    }
 
+    setOpen(nextOpen)
     if (nextOpen) {
       setFormTab('basic')
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={handleDialogOpenChange}>
-      <DialogTrigger asChild>
-        {editing ? (
-          <Button type="button" variant="outline" size="icon" title="Edit restaurant" aria-label="Edit restaurant">
-            <Pencil size={16} />
-          </Button>
-        ) : (
-          <Button type="button">
-            <Plus size={18} />
-            Create restaurant
-          </Button>
-        )}
-      </DialogTrigger>
-      <DialogContent className="restaurant-dialog">
+    <>
+      <Dialog open={open} onOpenChange={handleDialogOpenChange}>
+        <DialogTrigger asChild>
+          {editing ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              title={`Edit ${restaurant?.name ?? 'restaurant'}`}
+              aria-label={`Edit ${restaurant?.name ?? 'restaurant'}`}
+            >
+              <Pencil size={16} />
+            </Button>
+          ) : (
+            <Button type="button">
+              <Plus size={18} />
+              Create restaurant
+            </Button>
+          )}
+        </DialogTrigger>
+        <DialogContent className="restaurant-dialog">
         <DialogHeader>
           <DialogTitle>{editing ? 'Edit restaurant' : 'Create restaurant'}</DialogTitle>
           <DialogDescription>
@@ -1507,11 +1352,31 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
                             Restaurant image URL
                           </FormLabel>
                           <FormControl>
-                            <Input placeholder="/seed-menu/veg-spring-rolls.svg or https://..." {...field} />
+                            <Input
+                              placeholder="/seed-menu/veg-spring-rolls.svg or https://..."
+                              {...field}
+                              onChange={(event) => {
+                                field.onChange(event)
+                              }}
+                            />
                           </FormControl>
                           <p className="text-xs text-muted-foreground">
                             Used as the public ordering hero image. Leave blank to use the default gradient card.
                           </p>
+                          {imageUrl.trim() && failedImagePreviewUrl !== imageUrl ? (
+                            <div className="restaurant-image-preview">
+                              <img
+                                src={resolvePublicAssetUrl(imageUrl) ?? undefined}
+                                alt="Restaurant image preview"
+                                onError={() => setFailedImagePreviewUrl(imageUrl)}
+                              />
+                              <span>Preview</span>
+                            </div>
+                          ) : imageUrl.trim() && failedImagePreviewUrl === imageUrl ? (
+                            <p className="restaurant-image-preview-error" role="status">
+                              This image could not be loaded. Check the URL or app-relative path.
+                            </p>
+                          ) : null}
                           <FormMessage />
                         </FormItem>
                       )}
@@ -1524,7 +1389,7 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
                           <FormLabel>Customer payment</FormLabel>
                           <Select value={field.value} onValueChange={field.onChange}>
                             <FormControl>
-                              <SelectTrigger><SelectValue placeholder="Select payment policy" /></SelectTrigger>
+                              <SelectTrigger aria-label="Customer payment policy"><SelectValue placeholder="Select payment policy" /></SelectTrigger>
                             </FormControl>
                             <SelectContent position="popper">
                               <SelectItem value="PrepayRequired">Online payment required</SelectItem>
@@ -1558,15 +1423,38 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
               </Tabs>
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-              <Button type="submit" disabled={form.formState.isSubmitting}>
-                {form.formState.isSubmitting ? 'Saving restaurant' : editing ? 'Save changes' : 'Create restaurant'}
+              <Button type="button" variant="outline" onClick={() => handleDialogOpenChange(false)}>Cancel</Button>
+              <Button type="submit" disabled={isSubmitting}>
+                {isSubmitting ? 'Saving restaurant' : editing ? 'Save changes' : 'Create restaurant'}
               </Button>
             </DialogFooter>
           </form>
         </Form>
-      </DialogContent>
-    </Dialog>
+        </DialogContent>
+      </Dialog>
+      <AlertDialog open={discardDialogOpen} onOpenChange={setDiscardDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Your restaurant changes have not been saved. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep editing</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                setDiscardDialogOpen(false)
+                setOpen(false)
+              }}
+            >
+              Discard changes
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   )
 }
 
@@ -1578,7 +1466,13 @@ function RestaurantDetailsDialog({ restaurant }: { restaurant: Restaurant }) {
   return (
     <Dialog>
       <DialogTrigger asChild>
-        <Button type="button" variant="ghost" size="icon" title="View restaurant" aria-label="View restaurant">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          title={`View ${restaurant.name}`}
+          aria-label={`View ${restaurant.name}`}
+        >
           <Eye size={16} />
         </Button>
       </DialogTrigger>
@@ -1629,838 +1523,101 @@ function RestaurantDetailsDialog({ restaurant }: { restaurant: Restaurant }) {
   )
 }
 
-type RestaurantOpeningHoursPanelProps = {
-  restaurants: Restaurant[]
-  restaurantsLoading: boolean
-  canSelectRestaurant: boolean
-  onSaved: () => Promise<void> | void
-  onRestaurantUpdated: (restaurant: Restaurant) => void
-}
-
-function RestaurantOpeningHoursPanel({
-  restaurants,
-  restaurantsLoading,
-  canSelectRestaurant,
-  onSaved,
-  onRestaurantUpdated,
-}: RestaurantOpeningHoursPanelProps) {
-  const [restaurantId, setRestaurantId] = useState('')
-  const [draftState, setDraftState] = useState<{
-    restaurantId: string
-    acceptingOrders: boolean
-    openingHours: OpeningHoursDay[]
-  } | null>(null)
-  const [saving, setSaving] = useState(false)
-  const [autoSaveEnabled, setAutoSaveEnabled] = useState(false)
-  const [autoSaveState, setAutoSaveState] = useState<AutosaveState>('idle')
-  const [savedHoursState, setSavedHoursState] = useState<{
-    restaurantId: string
-    sourceAcceptingOrders: boolean
-    sourceOpeningHoursJson: string
-    acceptingOrders: boolean
-    openingHoursJson: string
-  } | null>(null)
-  const selectedRestaurantId = restaurantId && restaurants.some((restaurant) => restaurant.id === restaurantId)
-    ? restaurantId
-    : restaurants[0]?.id || ''
-  const selectedRestaurant = restaurants.find((restaurant) => restaurant.id === selectedRestaurantId)
-  const currentDraftState = draftState?.restaurantId === selectedRestaurant?.id ? draftState : null
-  const draftAcceptingOrders = currentDraftState
-    ? currentDraftState.acceptingOrders
-    : selectedRestaurant?.acceptingOrders ?? true
-  const draftOpeningHours = currentDraftState
-    ? currentDraftState.openingHours
-    : selectedRestaurant
-      ? parseOpeningHoursJson(selectedRestaurant.openingHoursJson)
-      : createDefaultOpeningHours()
-  const selectedOpeningHoursJson = selectedRestaurant
-    ? serializeOpeningHours(parseOpeningHoursJson(selectedRestaurant.openingHoursJson))
-    : serializeOpeningHours(createDefaultOpeningHours())
-  const committedHoursState = savedHoursState &&
-    selectedRestaurant &&
-    savedHoursState.restaurantId === selectedRestaurant.id &&
-    savedHoursState.sourceAcceptingOrders === selectedRestaurant.acceptingOrders &&
-    savedHoursState.sourceOpeningHoursJson === selectedRestaurant.openingHoursJson
-    ? savedHoursState
-    : null
-  const committedAcceptingOrders = committedHoursState?.acceptingOrders ?? selectedRestaurant?.acceptingOrders ?? true
-  const committedOpeningHoursJson = committedHoursState?.openingHoursJson ?? selectedOpeningHoursJson
-  const draftOpeningHoursJson = serializeOpeningHours(draftOpeningHours)
-  const latestHoursDraftRef = useRef({
-    acceptingOrders: draftAcceptingOrders,
-    openingHoursJson: draftOpeningHoursJson,
-  })
-  const hasChanges = Boolean(selectedRestaurant) &&
-    (draftAcceptingOrders !== committedAcceptingOrders || draftOpeningHoursJson !== committedOpeningHoursJson)
-  const openingHoursValidation = z.array(openingHoursDaySchema).length(7).safeParse(draftOpeningHours)
-  const effectiveAutoSaveState = hasChanges && !openingHoursValidation.success ? 'error' : autoSaveState
-  const autoSaveLabel = saving
-    ? 'Saving...'
-    : effectiveAutoSaveState === 'error'
-      ? 'Check time ranges'
-    : !autoSaveEnabled && hasChanges
-      ? 'Save needed'
-      : effectiveAutoSaveState === 'pending'
-      ? 'Auto-saving...'
-      : hasChanges
-          ? 'Unsaved changes'
-          : 'Saved'
-
-  useEffect(() => {
-    latestHoursDraftRef.current = {
-      acceptingOrders: draftAcceptingOrders,
-      openingHoursJson: draftOpeningHoursJson,
-    }
-  }, [draftAcceptingOrders, draftOpeningHoursJson])
-
-  const updateDraft = (patch: Partial<Omit<NonNullable<typeof draftState>, 'restaurantId'>>) => {
-    if (!selectedRestaurant) {
-      return
-    }
-
-    setDraftState({
-      restaurantId: selectedRestaurant.id,
-      acceptingOrders: patch.acceptingOrders ?? draftAcceptingOrders,
-      openingHours: patch.openingHours ?? draftOpeningHours,
-    })
-    setAutoSaveState(autoSaveEnabled ? 'pending' : 'idle')
-  }
-
-  const resetDraft = () => {
-    if (!selectedRestaurant) {
-      return
-    }
-
-    setDraftState({
-      restaurantId: selectedRestaurant.id,
-      acceptingOrders: selectedRestaurant.acceptingOrders,
-      openingHours: parseOpeningHoursJson(selectedRestaurant.openingHoursJson),
-    })
-    setAutoSaveState('idle')
-  }
-
-  const handleAutoSaveEnabledChange = (enabled: boolean) => {
-    setAutoSaveEnabled(enabled)
-    setAutoSaveState(enabled && hasChanges ? 'pending' : 'idle')
-  }
-
-  const saveOpeningHours = useCallback(async ({ showToast = false }: { showToast?: boolean } = {}) => {
-    if (!selectedRestaurant || saving) {
-      return
-    }
-
-    const openingHoursResult = z.array(openingHoursDaySchema).length(7).safeParse(draftOpeningHours)
-    if (!openingHoursResult.success) {
-      setAutoSaveState('error')
-      if (showToast) {
-        toast.error('Could not save opening hours', {
-          description: openingHoursResult.error.issues[0]?.message ?? 'Please check each day has valid times.',
-        })
-      }
-      return
-    }
-
-    setSaving(true)
-    setAutoSaveState('saving')
-    const nextOpeningHoursJson = serializeOpeningHours(openingHoursResult.data)
-    const submittedAcceptingOrders = draftAcceptingOrders
-
-    try {
-      const response = await updateRestaurant(selectedRestaurant.id, {
-        name: selectedRestaurant.name,
-        address: selectedRestaurant.address,
-        phone: selectedRestaurant.phone,
-        imageUrl: selectedRestaurant.imageUrl,
-        countryCode: selectedRestaurant.countryCode,
-        timezone: selectedRestaurant.timezone,
-        currency: selectedRestaurant.currency,
-        paymentPolicy: selectedRestaurant.paymentPolicy,
-        isActive: selectedRestaurant.isActive,
-        acceptingOrders: submittedAcceptingOrders,
-        openingHoursJson: nextOpeningHoursJson,
-        specialOpeningDaysJson: selectedRestaurant.specialOpeningDaysJson,
-      })
-
-      const latestDraft = latestHoursDraftRef.current
-      const responseOpeningHoursJson = serializeOpeningHours(parseOpeningHoursJson(response.restaurant.openingHoursJson))
-
-      if (
-        latestDraft.acceptingOrders === submittedAcceptingOrders &&
-        latestDraft.openingHoursJson === nextOpeningHoursJson
-      ) {
-        setDraftState({
-          restaurantId: response.restaurant.id,
-          acceptingOrders: response.restaurant.acceptingOrders,
-          openingHours: parseOpeningHoursJson(response.restaurant.openingHoursJson),
-        })
-        setAutoSaveState('saved')
-      } else {
-        setAutoSaveState('pending')
-      }
-
-      setSavedHoursState({
-        restaurantId: response.restaurant.id,
-        sourceAcceptingOrders: selectedRestaurant.acceptingOrders,
-        sourceOpeningHoursJson: selectedRestaurant.openingHoursJson,
-        acceptingOrders: response.restaurant.acceptingOrders,
-        openingHoursJson: responseOpeningHoursJson,
-      })
-      onRestaurantUpdated(response.restaurant)
-      if (showToast) {
-        toast.success('Opening hours updated', { description: response.message })
-      }
-    } catch (error) {
-      setAutoSaveState('error')
-      toast.error('Could not update opening hours', {
-        description: error instanceof Error ? error.message : 'The request failed.',
-      })
-    } finally {
-      setSaving(false)
-    }
-  }, [draftAcceptingOrders, draftOpeningHours, onRestaurantUpdated, saving, selectedRestaurant])
-
-  useEffect(() => {
-    if (!autoSaveEnabled || !selectedRestaurant || !hasChanges || saving) {
-      return
-    }
-
-    if (!openingHoursValidation.success) {
-      return
-    }
-
-    const timer = window.setTimeout(() => {
-      void saveOpeningHours()
-    }, 900)
-
-    return () => window.clearTimeout(timer)
-  }, [autoSaveEnabled, draftOpeningHoursJson, hasChanges, openingHoursValidation.success, saveOpeningHours, saving, selectedRestaurant])
-
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    void saveOpeningHours({ showToast: true })
-  }
+function RestaurantDeleteAction({
+  restaurant,
+  onDelete,
+}: {
+  restaurant: Restaurant
+  onDelete: (restaurant: Restaurant) => Promise<void>
+}) {
+  const [confirmation, setConfirmation] = useState('')
+  const [deleting, setDeleting] = useState(false)
+  const matchesRestaurantName = confirmation.trim() === restaurant.name
 
   return (
-    <Card id="restaurant-opening-hours">
-      <CardHeader className="section-header">
-        <div className="admin-page-title">
-          <CalendarClock size={22} />
-          <div>
-            <CardTitle>Opening Hours</CardTitle>
-            <CardDescription>Set weekly service windows and quickly pause incoming orders.</CardDescription>
-          </div>
+    <AlertDialog onOpenChange={(nextOpen) => { if (!nextOpen) setConfirmation('') }}>
+      <AlertDialogTrigger asChild>
+        <Button
+          type="button"
+          variant="destructive"
+          size="icon"
+          title={`Delete ${restaurant.name}`}
+          aria-label={`Delete ${restaurant.name}`}
+        >
+          <Trash2 size={16} />
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete {restaurant.name}?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This permanently removes the restaurant and may fail while related records still depend on it.
+            Consider making the restaurant inactive instead if its history must remain available.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="restaurant-delete-confirmation">
+          <label htmlFor={`delete-restaurant-${restaurant.id}`}>
+            Type <strong>{restaurant.name}</strong> to confirm
+          </label>
+          <Input
+            id={`delete-restaurant-${restaurant.id}`}
+            value={confirmation}
+            autoComplete="off"
+            onChange={(event) => setConfirmation(event.target.value)}
+          />
         </div>
-        <div className="section-actions">
-          <div className="restaurant-autosave-toggle">
-            <span>Auto save</span>
-            <Switch
-              checked={autoSaveEnabled}
-              onCheckedChange={handleAutoSaveEnabledChange}
-              aria-label="Auto save opening hours"
-            />
-          </div>
-          <Button type="button" variant="secondary" onClick={() => void onSaved()} disabled={restaurantsLoading}>
-            <RefreshCw size={18} />
-            Refresh
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="restaurant-hours-content">
-        <div className="restaurant-table-tools restaurant-table-filter-tools restaurant-hours-tools">
-          {canSelectRestaurant && (
-            <div className="restaurant-table-selector-row">
-              <Select
-                value={selectedRestaurantId}
-                onValueChange={(value) => {
-                  setRestaurantId(value)
-                  setDraftState(null)
-                }}
-                disabled={restaurantsLoading || restaurants.length === 0}
-              >
-                <SelectTrigger><SelectValue placeholder="Select restaurant" /></SelectTrigger>
-                <SelectContent position="popper">
-                  {restaurants.map((restaurant) => (
-                    <SelectItem key={restaurant.id} value={restaurant.id}>{restaurant.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          {selectedRestaurant ? (
-            <div className="restaurant-hours-context">
-              <div>
-                <span>Restaurant</span>
-                <strong>{selectedRestaurant.name}</strong>
-                <small>{selectedRestaurant.timezone}</small>
-              </div>
-              <Badge variant={selectedRestaurant.isActive ? 'secondary' : 'destructive'}>
-                {selectedRestaurant.isActive ? 'Active' : 'Inactive'}
-              </Badge>
-              <Badge variant={draftAcceptingOrders ? 'outline' : 'destructive'}>
-                {draftAcceptingOrders ? 'Accepting orders' : 'Paused'}
-              </Badge>
-            </div>
-          ) : null}
-        </div>
-
-        {!selectedRestaurant && !restaurantsLoading ? (
-          <div className="restaurant-mobile-empty">No restaurant is available for this account.</div>
-        ) : null}
-
-        {selectedRestaurant ? (
-          <form className="restaurant-hours-form" onSubmit={handleSubmit}>
-            <div className="restaurant-status-field restaurant-hours-status-field">
-              <div>
-                <span className="restaurant-hours-field-label">Accepting orders</span>
-                <p>Turn this off when the kitchen is overloaded. Opening hours still apply automatically.</p>
-              </div>
-              <Switch
-                checked={draftAcceptingOrders}
-                onCheckedChange={(checked) => updateDraft({ acceptingOrders: checked })}
-                aria-label="Accepting orders"
-              />
-            </div>
-
-            <div className="restaurant-hours-schedule">
-              <div className="restaurant-hours-schedule-header">
-                <div>
-                  <h3>Weekly schedule</h3>
-                  <p>Times use the selected restaurant timezone.</p>
-                </div>
-                <Badge variant="outline">{selectedRestaurant.timezone}</Badge>
-              </div>
-              <OpeningHoursEditor
-                value={draftOpeningHours}
-                onChange={(openingHours) => updateDraft({ openingHours })}
-              />
-            </div>
-
-            <div className="restaurant-hours-actions">
-              <span className="restaurant-autosave-status" data-state={effectiveAutoSaveState} aria-live="polite">
-                {autoSaveLabel}
-              </span>
-              <Button type="button" variant="outline" onClick={resetDraft} disabled={!hasChanges || saving}>
-                Reset
-              </Button>
-              <Button type="submit" disabled={!hasChanges || saving}>
-                {saving ? 'Saving hours' : 'Save now'}
-              </Button>
-            </div>
-          </form>
-        ) : null}
-      </CardContent>
-    </Card>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            variant="destructive"
+            disabled={!matchesRestaurantName || deleting}
+            onClick={(event) => {
+              event.preventDefault()
+              setDeleting(true)
+              void onDelete(restaurant).finally(() => setDeleting(false))
+            }}
+          >
+            {deleting ? 'Deleting restaurant' : 'Delete permanently'}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   )
 }
 
-type RestaurantSpecialCalendarPanelProps = {
-  restaurants: Restaurant[]
-  restaurantsLoading: boolean
-  canSelectRestaurant: boolean
-  onSaved: () => Promise<void> | void
-  onRestaurantUpdated: (restaurant: Restaurant) => void
-}
 
-function RestaurantSpecialCalendarPanel({
-  restaurants,
-  restaurantsLoading,
-  canSelectRestaurant,
-  onSaved,
-  onRestaurantUpdated,
-}: RestaurantSpecialCalendarPanelProps) {
-  const todayKey = toDateKey(new Date())
-  const [restaurantId, setRestaurantId] = useState('')
-  const [monthDate, setMonthDate] = useState(() => {
-    const today = new Date()
-    return new Date(today.getFullYear(), today.getMonth(), 1)
-  })
-  const [selectedDateKey, setSelectedDateKey] = useState(todayKey)
-  const [draftState, setDraftState] = useState<{
-    restaurantId: string
-    specialOpeningDays: SpecialOpeningDay[]
-  } | null>(null)
-  const [saving, setSaving] = useState(false)
-  const [autoSaveEnabled, setAutoSaveEnabled] = useState(false)
-  const [autoSaveState, setAutoSaveState] = useState<AutosaveState>('idle')
-  const [savedCalendarState, setSavedCalendarState] = useState<{
-    restaurantId: string
-    sourceSpecialOpeningDaysJson: string
-    specialOpeningDaysJson: string
-  } | null>(null)
-  const selectedRestaurantId = restaurantId && restaurants.some((restaurant) => restaurant.id === restaurantId)
-    ? restaurantId
-    : restaurants[0]?.id || ''
-  const selectedRestaurant = restaurants.find((restaurant) => restaurant.id === selectedRestaurantId)
-  const selectedRestaurantRef = useRef<Restaurant | undefined>(selectedRestaurant)
-  const savingRef = useRef(saving)
-  const currentDraftState = draftState?.restaurantId === selectedRestaurant?.id ? draftState : null
-  const openingHours = selectedRestaurant ? parseOpeningHoursJson(selectedRestaurant.openingHoursJson) : createDefaultOpeningHours()
-  const specialOpeningDays = currentDraftState
-    ? currentDraftState.specialOpeningDays
-    : selectedRestaurant
-      ? parseSpecialOpeningDaysJson(selectedRestaurant.specialOpeningDaysJson)
-      : []
-  const selectedStatus = resolveCalendarDateStatus(selectedDateKey, openingHours, specialOpeningDays)
-  const selectedSpecialDay = getSpecialOpeningDay(selectedDateKey, specialOpeningDays)
-  const selectedRegularDay = getRegularOpeningDayForDate(selectedDateKey, openingHours)
-  const calendarDates = getMonthCalendarDates(monthDate)
-  const monthLabel = new Intl.DateTimeFormat('en-AU', {
-    month: 'long',
-    year: 'numeric',
-  }).format(monthDate)
-  const selectedJson = selectedRestaurant
-    ? serializeSpecialOpeningDays(parseSpecialOpeningDaysJson(selectedRestaurant.specialOpeningDaysJson))
-    : '[]'
-  const committedCalendarState = savedCalendarState &&
-    selectedRestaurant &&
-    savedCalendarState.restaurantId === selectedRestaurant.id &&
-    savedCalendarState.sourceSpecialOpeningDaysJson === selectedRestaurant.specialOpeningDaysJson
-    ? savedCalendarState
-    : null
-  const committedSpecialOpeningDaysJson = committedCalendarState?.specialOpeningDaysJson ?? selectedJson
-  const draftJson = serializeSpecialOpeningDays(specialOpeningDays)
-  const latestCalendarDraftRef = useRef(draftJson)
-  const hasChanges = Boolean(selectedRestaurant) && committedSpecialOpeningDaysJson !== draftJson
-  const specialCalendarValidation = z.array(specialOpeningDaySchema).safeParse(specialOpeningDays)
-  const effectiveAutoSaveState = hasChanges && !specialCalendarValidation.success ? 'error' : autoSaveState
-  const autoSaveLabel = saving
-    ? 'Saving...'
-    : effectiveAutoSaveState === 'error'
-      ? 'Check special hours'
-    : !autoSaveEnabled && hasChanges
-      ? 'Save needed'
-      : effectiveAutoSaveState === 'pending'
-      ? 'Auto-saving...'
-      : hasChanges
-          ? 'Unsaved changes'
-          : 'Saved'
-
-  useEffect(() => {
-    latestCalendarDraftRef.current = draftJson
-  }, [draftJson])
-
-  useEffect(() => {
-    selectedRestaurantRef.current = selectedRestaurant
-  }, [selectedRestaurant])
-
-  useEffect(() => {
-    savingRef.current = saving
-  }, [saving])
-
-  const setDraftSpecialOpeningDays = (nextSpecialOpeningDays: SpecialOpeningDay[]) => {
-    if (!selectedRestaurant) {
-      return
-    }
-
-    setDraftState({
-      restaurantId: selectedRestaurant.id,
-      specialOpeningDays: normalizeSpecialOpeningDaysForDraft(nextSpecialOpeningDays),
-    })
-    setAutoSaveState(autoSaveEnabled ? 'pending' : 'idle')
-  }
-
-  const upsertSpecialDay = (nextDay: SpecialOpeningDay) => {
-    const others = specialOpeningDays.filter((day) => day.date !== nextDay.date)
-    setDraftSpecialOpeningDays([...others, nextDay])
-  }
-
-  const updateSelectedSpecialDay = (patch: Partial<SpecialOpeningDay>) => {
-    const baseDay = selectedSpecialDay ?? createClosedSpecialDay(selectedDateKey)
-    upsertSpecialDay({
-      ...baseDay,
-      ...patch,
-      date: selectedDateKey,
-    })
-  }
-
-  const removeSelectedOverride = () => {
-    setDraftSpecialOpeningDays(specialOpeningDays.filter((day) => day.date !== selectedDateKey))
-  }
-
-  const markSelectedClosed = () => {
-    upsertSpecialDay(createClosedSpecialDay(selectedDateKey))
-  }
-
-  const setSelectedSpecialHours = () => {
-    upsertSpecialDay(createOpenSpecialDay(selectedDateKey, getSpecialOpeningSeedWindows(selectedRegularDay)))
-  }
-
-  const setSelectedOverrideOpen = () => {
-    updateSelectedSpecialDay({
-      isClosed: false,
-      windows: getSpecialOpeningSeedWindows(selectedRegularDay, selectedSpecialDay?.windows ?? []),
-    })
-  }
-
-  const setSelectedOverrideClosed = () => {
-    updateSelectedSpecialDay({
-      isClosed: true,
-      windows: [],
-    })
-  }
-
-  const moveMonth = (offset: number) => {
-    setMonthDate((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1))
-  }
-
-  const resetDraft = () => {
-    if (!selectedRestaurant) {
-      return
-    }
-
-    setDraftState({
-      restaurantId: selectedRestaurant.id,
-      specialOpeningDays: parseSpecialOpeningDaysJson(selectedRestaurant.specialOpeningDaysJson),
-    })
-    setAutoSaveState('idle')
-  }
-
-  const handleAutoSaveEnabledChange = (enabled: boolean) => {
-    setAutoSaveEnabled(enabled)
-    setAutoSaveState(enabled && hasChanges ? 'pending' : 'idle')
-  }
-
-  const saveSpecialCalendar = useCallback(async (
-    nextSpecialOpeningDays: SpecialOpeningDay[],
-    { showToast = false }: { showToast?: boolean } = {},
-  ) => {
-    const restaurant = selectedRestaurantRef.current
-
-    if (!restaurant || savingRef.current) {
-      return
-    }
-
-    const normalizedSpecialOpeningDays = normalizeSpecialOpeningDaysForDraft(nextSpecialOpeningDays)
-    const validation = z.array(specialOpeningDaySchema).safeParse(normalizedSpecialOpeningDays)
-    if (!validation.success) {
-      setAutoSaveState('error')
-      if (showToast) {
-        toast.error('Could not save special calendar', {
-          description: validation.error.issues[0]?.message ?? 'Please check the selected date override.',
-        })
-      }
-      return
-    }
-
-    savingRef.current = true
-    setSaving(true)
-    setAutoSaveState('saving')
-    const nextSpecialOpeningDaysJson = serializeSpecialOpeningDays(validation.data)
-
-    try {
-      const response = await updateRestaurant(restaurant.id, {
-        name: restaurant.name,
-        address: restaurant.address,
-        phone: restaurant.phone,
-        imageUrl: restaurant.imageUrl,
-        countryCode: restaurant.countryCode,
-        timezone: restaurant.timezone,
-        currency: restaurant.currency,
-        paymentPolicy: restaurant.paymentPolicy,
-        isActive: restaurant.isActive,
-        acceptingOrders: restaurant.acceptingOrders,
-        openingHoursJson: restaurant.openingHoursJson,
-        specialOpeningDaysJson: nextSpecialOpeningDaysJson,
-      })
-
-      const responseSpecialOpeningDays = parseSpecialOpeningDaysJson(response.restaurant.specialOpeningDaysJson)
-      const responseSpecialOpeningDaysJson = serializeSpecialOpeningDays(responseSpecialOpeningDays)
-
-      if (latestCalendarDraftRef.current === nextSpecialOpeningDaysJson) {
-        setDraftState({
-          restaurantId: response.restaurant.id,
-          specialOpeningDays: responseSpecialOpeningDays,
-        })
-        setAutoSaveState('saved')
-      } else {
-        setAutoSaveState('pending')
-      }
-
-      setSavedCalendarState({
-        restaurantId: response.restaurant.id,
-        sourceSpecialOpeningDaysJson: restaurant.specialOpeningDaysJson,
-        specialOpeningDaysJson: responseSpecialOpeningDaysJson,
-      })
-      onRestaurantUpdated(response.restaurant)
-      if (showToast) {
-        toast.success('Special calendar updated', { description: response.message })
-      }
-    } catch (error) {
-      setAutoSaveState('error')
-      toast.error('Could not update special calendar', {
-        description: error instanceof Error ? error.message : 'The request failed.',
-      })
-    } finally {
-      savingRef.current = false
-      setSaving(false)
-    }
-  }, [onRestaurantUpdated])
-
-  useEffect(() => {
-    if (!autoSaveEnabled || !selectedRestaurant || !hasChanges || saving) {
-      return
-    }
-
-    let draftSpecialOpeningDays: unknown
-    try {
-      draftSpecialOpeningDays = JSON.parse(draftJson)
-    } catch {
-      return
-    }
-
-    const validation = z.array(specialOpeningDaySchema).safeParse(draftSpecialOpeningDays)
-    if (!validation.success) {
-      return
-    }
-
-    const timer = window.setTimeout(() => {
-      void saveSpecialCalendar(validation.data)
-    }, 900)
-
-    return () => window.clearTimeout(timer)
-  }, [autoSaveEnabled, draftJson, hasChanges, saveSpecialCalendar, saving, selectedRestaurant])
-
-  const handleSave = () => {
-    void saveSpecialCalendar(specialOpeningDays, { showToast: true })
-  }
-
-  return (
-    <Card id="restaurant-special-calendar">
-      <CardHeader className="section-header">
-        <div className="admin-page-title">
-          <CalendarDays size={22} />
-          <div>
-            <CardTitle>Special Calendar</CardTitle>
-            <CardDescription>Close holidays or open one-off service windows for specific dates.</CardDescription>
-          </div>
-        </div>
-        <div className="section-actions">
-          <div className="restaurant-autosave-toggle">
-            <span>Auto save</span>
-            <Switch
-              checked={autoSaveEnabled}
-              onCheckedChange={handleAutoSaveEnabledChange}
-              aria-label="Auto save special calendar"
-            />
-          </div>
-          <Button type="button" variant="secondary" onClick={() => void onSaved()} disabled={restaurantsLoading}>
-            <RefreshCw size={18} />
-            Refresh
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="restaurant-calendar-content">
-        <div className="restaurant-table-tools restaurant-table-filter-tools restaurant-hours-tools">
-          {canSelectRestaurant && (
-            <div className="restaurant-table-selector-row">
-              <Select
-                value={selectedRestaurantId}
-                onValueChange={(value) => {
-                  setRestaurantId(value)
-                  setDraftState(null)
-                }}
-                disabled={restaurantsLoading || restaurants.length === 0}
-              >
-                <SelectTrigger><SelectValue placeholder="Select restaurant" /></SelectTrigger>
-                <SelectContent position="popper">
-                  {restaurants.map((restaurant) => (
-                    <SelectItem key={restaurant.id} value={restaurant.id}>{restaurant.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          {selectedRestaurant ? (
-            <div className="restaurant-hours-context">
-              <div>
-                <span>Restaurant</span>
-                <strong>{selectedRestaurant.name}</strong>
-                <small>{selectedRestaurant.timezone}</small>
-              </div>
-              <Badge variant="outline">{specialOpeningDays.length} override{specialOpeningDays.length === 1 ? '' : 's'}</Badge>
-              <Badge variant={effectiveAutoSaveState === 'error' ? 'destructive' : hasChanges || saving ? 'secondary' : 'outline'}>
-                {autoSaveLabel}
-              </Badge>
-            </div>
-          ) : null}
-        </div>
-
-        {!selectedRestaurant && !restaurantsLoading ? (
-          <div className="restaurant-mobile-empty">No restaurant is available for this account.</div>
-        ) : null}
-
-        {selectedRestaurant ? (
-          <div className="restaurant-calendar-layout">
-            <section className="restaurant-calendar-panel" aria-label="Special day calendar">
-              <div className="restaurant-calendar-toolbar">
-                <Button type="button" variant="outline" size="icon" aria-label="Previous month" onClick={() => moveMonth(-1)}>
-                  <ChevronLeft size={16} />
-                </Button>
-                <strong>{monthLabel}</strong>
-                <Button type="button" variant="outline" size="icon" aria-label="Next month" onClick={() => moveMonth(1)}>
-                  <ChevronRight size={16} />
-                </Button>
-              </div>
-              <div className="restaurant-calendar-weekdays" aria-hidden="true">
-                {dayLabels.map((label) => <span key={label}>{label}</span>)}
-              </div>
-              <div className="restaurant-calendar-grid">
-                {calendarDates.map((date) => {
-                  const dateKey = toDateKey(date)
-                  const status = resolveCalendarDateStatus(dateKey, openingHours, specialOpeningDays)
-                  const outsideMonth = date.getMonth() !== monthDate.getMonth()
-                  const selected = dateKey === selectedDateKey
-                  const today = dateKey === todayKey
-
-                  return (
-                    <button
-                      key={dateKey}
-                      type="button"
-                      className={[
-                        'restaurant-calendar-day',
-                        outsideMonth ? 'is-outside-month' : '',
-                        selected ? 'is-selected' : '',
-                        today ? 'is-today' : '',
-                        status.isOpen ? 'is-open' : 'is-closed',
-                        status.isOverride ? 'has-override' : '',
-                      ].filter(Boolean).join(' ')}
-                      onClick={() => setSelectedDateKey(dateKey)}
-                    >
-                      <span className="restaurant-calendar-day-number">{date.getDate()}</span>
-                      <span className="restaurant-calendar-day-status">{status.label}</span>
-                    </button>
-                  )
-                })}
-              </div>
-            </section>
-
-            <aside className="restaurant-calendar-detail">
-              <div className="restaurant-calendar-detail-header">
-                <div>
-                  <span>{formatCalendarDate(selectedDateKey)}</span>
-                  <h3>
-                    {selectedSpecialDay
-                      ? selectedSpecialDay.isClosed
-                        ? 'Special closure'
-                        : 'Special opening'
-                      : 'Weekly schedule'}
-                  </h3>
-                </div>
-                <Badge variant={selectedStatus.isOpen ? 'secondary' : 'destructive'}>
-                  {selectedStatus.isOverride && selectedStatus.isOpen ? 'Special open' : selectedStatus.isOpen ? 'Open' : 'Closed'}
-                </Badge>
-              </div>
-
-              <div className="restaurant-calendar-summary">
-                <div>
-                  <span>Weekly baseline</span>
-                  <strong>{selectedRegularDay.isOpen ? formatOpeningWindows(selectedRegularDay.windows) : 'Closed'}</strong>
-                </div>
-                <div>
-                  <span>Selected day</span>
-                  <strong>{formatOpeningWindows(selectedStatus.windows)}</strong>
-                </div>
-              </div>
-
-              {selectedSpecialDay ? (
-                <div className="restaurant-calendar-override-form">
-                  <div className="restaurant-calendar-mode-picker" role="group" aria-label="Special day mode">
-                    {selectedSpecialDay.isClosed ? (
-                      <Button type="button" onClick={setSelectedOverrideOpen}>
-                        <Plus size={15} />
-                        Open specially
-                      </Button>
-                    ) : (
-                      <Button type="button" variant="destructive" onClick={setSelectedOverrideClosed}>
-                        <X size={15} />
-                        Close all day
-                      </Button>
-                    )}
-                  </div>
-                  <p className="restaurant-calendar-mode-help">
-                    Special dates override the weekly schedule for this day.
-                  </p>
-                  {!selectedSpecialDay.isClosed ? (
-                    <OpeningWindowsEditor
-                      windows={selectedSpecialDay.windows}
-                      onChange={(windows) => updateSelectedSpecialDay({ windows })}
-                    />
-                  ) : null}
-                  <div className="restaurant-calendar-note-field">
-                    <label htmlFor="special-day-note">Note</label>
-                    <Textarea
-                      id="special-day-note"
-                      rows={2}
-                      value={selectedSpecialDay.note ?? ''}
-                      placeholder="Public holiday, private event, staff training..."
-                      onChange={(event) => updateSelectedSpecialDay({ note: event.target.value })}
-                    />
-                  </div>
-                  <Button type="button" variant="ghost" className="restaurant-calendar-remove-override" onClick={removeSelectedOverride}>
-                    <Trash2 size={15} />
-                    Remove override
-                  </Button>
-                </div>
-              ) : (
-                <div className="restaurant-calendar-empty-override">
-                  <p>This date is using the weekly schedule.</p>
-                  <div>
-                    {selectedStatus.isOpen ? (
-                      <>
-                        <Button type="button" variant="outline" onClick={setSelectedSpecialHours}>
-                          <Pencil size={15} />
-                          Adjust hours
-                        </Button>
-                        <Button type="button" variant="destructive" onClick={markSelectedClosed}>
-                          <X size={15} />
-                          Close all day
-                        </Button>
-                      </>
-                    ) : (
-                      <Button type="button" onClick={setSelectedSpecialHours}>
-                        <Plus size={15} />
-                        Open specially
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              <div className="restaurant-hours-actions">
-                <span className="restaurant-autosave-status" data-state={effectiveAutoSaveState} aria-live="polite">
-                  {autoSaveLabel}
-                </span>
-                <Button type="button" variant="outline" onClick={resetDraft} disabled={!hasChanges || saving}>
-                  Reset
-                </Button>
-                <Button type="button" onClick={() => void handleSave()} disabled={!hasChanges || saving}>
-                  {saving ? 'Saving calendar' : 'Save now'}
-                </Button>
-              </div>
-            </aside>
-          </div>
-        ) : null}
-      </CardContent>
-    </Card>
-  )
-}
 
 export function AdminRestaurantsPage() {
   const { user } = useAuth()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [restaurants, setRestaurants] = useState<Restaurant[]>([])
   const [allRestaurants, setAllRestaurants] = useState<Restaurant[]>([])
   const [loading, setLoading] = useState(true)
+  const [optionsLoading, setOptionsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
-  const [currencyFilter, setCurrencyFilter] = useState('all')
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  const [optionsError, setOptionsError] = useState<string | null>(null)
+  const [hoursDirty, setHoursDirty] = useState(false)
+  const [calendarDirty, setCalendarDirty] = useState(false)
+  const [pendingRestaurantSection, setPendingRestaurantSection] = useState<RestaurantAdminTab | null>(null)
+  const searchQuery = searchParams.get('q') ?? ''
+  const [searchDraft, setSearchDraft] = useState({ value: searchQuery, sourceQuery: searchQuery })
+  const search = searchDraft.sourceQuery === searchQuery ? searchDraft.value : searchQuery
+  const setSearch = (value: string) => setSearchDraft({ value, sourceQuery: searchQuery })
   const [totalItems, setTotalItems] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
-  const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({ key: 'name', direction: 'asc' })
-  const [activeRestaurantTab, setActiveRestaurantTab] = useState<RestaurantAdminTab | null>(null)
+  const requestIdRef = useRef(0)
+  const paymentReturnHandledRef = useRef('')
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
+  const rawStatusFilter = searchParams.get('status')
+  const statusFilter: StatusFilter = rawStatusFilter === 'active' || rawStatusFilter === 'inactive' ? rawStatusFilter : 'all'
+  const currencyFilter = searchParams.get('currency') || 'all'
+  const pageSizeParam = getPositiveInteger(searchParams.get('pageSize'), 10)
+  const pageSize = restaurantPageSizes.includes(pageSizeParam) ? pageSizeParam : 10
+  const page = getPositiveInteger(searchParams.get('page'), 1)
+  const rawSortKey = searchParams.get('sort')
+  const sortKey: SortKey = restaurantSortKeys.includes(rawSortKey as SortKey) ? rawSortKey as SortKey : 'name'
+  const sortDirection: SortDirection = searchParams.get('direction') === 'desc' ? 'desc' : 'asc'
+  const sort = useMemo(() => ({ key: sortKey, direction: sortDirection }), [sortDirection, sortKey])
   const restaurantTabOrder = useMemo(
     () => isPlatformOwner
       ? [
@@ -2477,9 +1634,46 @@ export function AdminRestaurantsPage() {
         ],
     [isPlatformOwner],
   )
-  const activeRestaurantTabValue = activeRestaurantTab ?? (isPlatformOwner ? 'restaurants' : 'tables')
+  const defaultRestaurantTab: RestaurantAdminTab = isPlatformOwner ? 'restaurants' : 'tables'
+  const sectionParam = searchParams.get('section')
+  const activeRestaurantTabValue: RestaurantAdminTab = restaurantAdminTabs.includes(sectionParam as RestaurantAdminTab)
+    ? sectionParam as RestaurantAdminTab
+    : defaultRestaurantTab
+  const selectedRestaurantId = searchParams.get('restaurant') ?? ''
+  const selectedCalendarDate = searchParams.get('date') ?? ''
+  const selectedCalendarMonth = searchParams.get('month') ?? ''
+
+  const updateUrlState = useCallback((
+    updates: Record<string, string | number | null | undefined>,
+    replace = true,
+  ) => {
+    setSearchParams((currentParams) => {
+      const nextParams = new URLSearchParams(currentParams)
+      Object.entries(updates).forEach(([key, value]) => {
+        if (value === null || value === undefined || value === '') {
+          nextParams.delete(key)
+        } else {
+          nextParams.set(key, String(value))
+        }
+      })
+      return nextParams
+    }, { replace })
+  }, [setSearchParams])
+
+  useEffect(() => {
+    if (search === searchQuery) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      updateUrlState({ q: search.trim() || null, page: null })
+    }, 320)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [search, searchQuery, updateUrlState])
 
   const loadRestaurants = useCallback(async (showToast = false) => {
+    const requestId = ++requestIdRef.current
     setLoading(true)
     setError(null)
 
@@ -2487,32 +1681,50 @@ export function AdminRestaurantsPage() {
       const response = await getRestaurantPage({
         page,
         pageSize,
-        search: search.trim() || undefined,
+        search: searchQuery.trim() || undefined,
         sortBy: sort.key === 'created' ? 'createdAt' : sort.key,
         sortDirection: sort.direction,
         isActive: statusFilter === 'all' ? undefined : statusFilter === 'active',
         currency: currencyFilter === 'all' ? undefined : currencyFilter,
       })
+      if (requestId !== requestIdRef.current) {
+        return
+      }
+
       setRestaurants(response.items)
       setTotalItems(response.totalItems)
       setTotalPages(response.totalPages)
 
       if (response.totalPages > 0 && page > response.totalPages) {
-        setPage(response.totalPages)
+        updateUrlState({ page: response.totalPages === 1 ? null : response.totalPages })
       }
 
       if (showToast) toast.success('Restaurant directory refreshed')
     } catch (loadError) {
       const message = loadError instanceof Error ? loadError.message : 'Failed to load restaurants.'
-      setError(message)
-      toast.error('Could not load restaurants', { description: message })
+      if (requestId === requestIdRef.current) {
+        setError(message)
+        toast.error('Could not load restaurants', { description: message })
+      }
     } finally {
-      setLoading(false)
+      if (requestId === requestIdRef.current) {
+        setLoading(false)
+      }
     }
-  }, [currencyFilter, page, pageSize, search, sort, statusFilter])
+  }, [currencyFilter, page, pageSize, searchQuery, sort, statusFilter, updateUrlState])
 
   const loadRestaurantOptions = useCallback(async () => {
-    setAllRestaurants(await getRestaurants())
+    setOptionsLoading(true)
+    setOptionsError(null)
+    try {
+      setAllRestaurants(await getRestaurants())
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : 'Failed to load restaurant options.'
+      setOptionsError(message)
+      toast.error('Could not load restaurant options', { description: message })
+    } finally {
+      setOptionsLoading(false)
+    }
   }, [])
 
   useEffect(() => {
@@ -2534,25 +1746,85 @@ export function AdminRestaurantsPage() {
   const activeRestaurantDropdownFilterCount = [statusFilter !== 'all', currencyFilter !== 'all'].filter(Boolean).length
   const selectedStatusFilterLabel = statusFilter === 'active' ? 'Active' : statusFilter === 'inactive' ? 'Inactive' : ''
   const SortIcon = sort.direction === 'asc' ? ArrowDownAZ : ArrowUpAZ
+  const getAriaSort = (key: SortKey): 'ascending' | 'descending' | 'none' => (
+    sort.key === key ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'
+  )
 
   const updateSort = (key: SortKey) => {
-    setPage(1)
-    setSort((current) => ({
-      key,
-      direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
-    }))
+    const nextDirection = sort.key === key && sort.direction === 'asc' ? 'desc' : 'asc'
+    updateUrlState({
+      page: null,
+      sort: key === 'name' ? null : key,
+      direction: nextDirection === 'asc' ? null : nextDirection,
+    })
+  }
+
+  const commitRestaurantSection = (nextSection: RestaurantAdminTab) => {
+    updateUrlState({
+      section: nextSection === defaultRestaurantTab ? null : nextSection,
+    }, false)
+  }
+
+  const changeRestaurantSection = (nextSection: RestaurantAdminTab) => {
+    const leavingUnsavedHours = activeRestaurantTabValue === 'hours' && hoursDirty
+    const leavingUnsavedCalendar = activeRestaurantTabValue === 'calendar' && calendarDirty
+
+    if (leavingUnsavedHours || leavingUnsavedCalendar) {
+      setPendingRestaurantSection(nextSection)
+      return
+    }
+
+    commitRestaurantSection(nextSection)
   }
 
   const resetFilters = () => {
-    setPage(1)
     setSearch('')
-    setStatusFilter('all')
-    setCurrencyFilter('all')
+    updateUrlState({ q: null, status: null, currency: null, page: null })
   }
 
-  const refreshRestaurantData = async () => {
+  const refreshRestaurantData = useCallback(async () => {
     await Promise.all([loadRestaurants(), loadRestaurantOptions()])
-  }
+  }, [loadRestaurantOptions, loadRestaurants])
+
+  useEffect(() => {
+    const stripeConnectResult = searchParams.get('stripeConnect')
+    const platformFeeResult = searchParams.get('platformFee')
+    const restaurantId = searchParams.get('restaurantId')
+    const returnKey = [stripeConnectResult, platformFeeResult, restaurantId].join(':')
+
+    if ((!stripeConnectResult && !platformFeeResult) ||
+        paymentReturnHandledRef.current === returnKey) {
+      return
+    }
+
+    paymentReturnHandledRef.current = returnKey
+    void (async () => {
+      if (stripeConnectResult === 'return' && restaurantId) {
+        try {
+          await refreshRestaurantStripeStatus(restaurantId)
+          await refreshRestaurantData()
+          toast.success('Stripe account status updated')
+        } catch (returnError) {
+          toast.error('Stripe setup returned, but status refresh failed', {
+            description: returnError instanceof Error ? returnError.message : 'Open Payments and refresh again.',
+          })
+        }
+      } else if (stripeConnectResult === 'refresh') {
+        toast.info('The Stripe setup link expired. Open Payments and continue setup with a new link.')
+      } else if (platformFeeResult === 'success') {
+        toast.success('Platform fee payment submitted. Stripe confirmation may take a moment.')
+        await refreshRestaurantData()
+      } else if (platformFeeResult === 'cancelled') {
+        toast.info('Platform fee checkout was cancelled. No charge was made.')
+      }
+
+      updateUrlState({
+        stripeConnect: null,
+        platformFee: null,
+        restaurantId: null,
+      })
+    })()
+  }, [refreshRestaurantData, searchParams, updateUrlState])
 
   const updateRestaurantInState = (updatedRestaurant: Restaurant) => {
     setRestaurants((currentRestaurants) => currentRestaurants.map((restaurant) => (
@@ -2578,32 +1850,22 @@ export function AdminRestaurantsPage() {
     <div className="row-actions">
       <RestaurantDetailsDialog restaurant={restaurant} />
       <RestaurantPublicAccessDialog restaurant={restaurant} />
+      <RestaurantPaymentsDialog
+        restaurant={restaurant}
+        isPlatformOwner={isPlatformOwner}
+        onUpdated={() => refreshRestaurantData()}
+      />
       <RestaurantFormDialog restaurant={restaurant} onSaved={() => refreshRestaurantData()} />
-      {isPlatformOwner && (
-        <AlertDialog>
-          <AlertDialogTrigger asChild>
-            <Button type="button" variant="destructive" size="icon" title="Delete restaurant" aria-label="Delete restaurant"><Trash2 size={16} /></Button>
-          </AlertDialogTrigger>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Delete {restaurant.name}?</AlertDialogTitle>
-              <AlertDialogDescription>This permanently removes the restaurant. The request will fail if related records still depend on it.</AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction variant="destructive" onClick={() => void handleDelete(restaurant)}>Delete restaurant</AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      )}
+      {isPlatformOwner && <RestaurantDeleteAction restaurant={restaurant} onDelete={handleDelete} />}
     </div>
   )
 
   return (
     <main className="content-grid">
+      <h1 className="sr-only">Restaurant administration</h1>
       <Tabs
         value={activeRestaurantTabValue}
-        onValueChange={(value) => setActiveRestaurantTab(value as RestaurantAdminTab)}
+        onValueChange={(value) => changeRestaurantSection(value as RestaurantAdminTab)}
         orientation="horizontal"
         className="admin-tabs restaurant-admin-tabs"
       >
@@ -2615,6 +1877,14 @@ export function AdminRestaurantsPage() {
             </TabsTrigger>
           ))}
         </TabsList>
+        {optionsError && activeRestaurantTabValue !== 'restaurants' ? (
+          <div className="restaurant-options-error" role="alert">
+            <span>{optionsError}</span>
+            <Button type="button" variant="outline" size="sm" onClick={() => void loadRestaurantOptions()}>
+              Try again
+            </Button>
+          </div>
+        ) : null}
 
         <TabsContent value="restaurants">
           <Card id="restaurant-directory">
@@ -2638,20 +1908,33 @@ export function AdminRestaurantsPage() {
         </CardHeader>
         <CardContent>
           {error && <p className="form-error">{error}</p>}
-          {loading ? (
+          {loading && restaurants.length === 0 ? (
             <div className="restaurant-loading" aria-live="polite">
               <motion.span animate={{ rotate: 360 }} transition={{ duration: 0.9, ease: 'linear', repeat: Infinity }}>
                 <RefreshCw size={18} />
               </motion.span>
               Loading restaurants...
             </div>
-          ) : (
-            <div className="directory-stack">
+          ) : null}
+            <div className="directory-stack" aria-busy={loading}>
+              {loading && restaurants.length > 0 ? (
+                <div className="restaurant-directory-refreshing" role="status">
+                  <motion.span animate={{ rotate: 360 }} transition={{ duration: 0.9, ease: 'linear', repeat: Infinity }}>
+                    <RefreshCw size={14} />
+                  </motion.span>
+                  Updating results...
+                </div>
+              ) : null}
               <div className="restaurant-directory-tools restaurant-filter-tools">
                 <div className="restaurant-filter-search-row">
                   <div className="directory-search">
                     <Search size={16} />
-                    <Input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1) }} placeholder="Filter by name, address, phone, country, timezone, or currency" />
+                    <Input
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      aria-label="Search restaurants"
+                      placeholder="Filter by name, address, phone, country, timezone, or currency"
+                    />
                   </div>
                   <Popover>
                     <PopoverTrigger asChild>
@@ -2668,7 +1951,7 @@ export function AdminRestaurantsPage() {
                         )}
                       </Button>
                     </PopoverTrigger>
-                    <PopoverContent className="restaurant-filter-popover" align="end">
+                    <PopoverContent className="restaurant-filter-popover" align="end" aria-label="Restaurant filters">
                       <div className="restaurant-filter-popover-header">
                         <strong>Filters</strong>
                         <Button type="button" variant="ghost" size="xs" onClick={resetFilters} disabled={!hasActiveFilters}>
@@ -2679,8 +1962,8 @@ export function AdminRestaurantsPage() {
                       <div className="restaurant-filter-fields">
                         <div className="restaurant-filter-field">
                           <span>Status</span>
-                          <Select value={statusFilter} onValueChange={(value) => { setStatusFilter(value as StatusFilter); setPage(1) }}>
-                            <SelectTrigger className="filter-select"><SelectValue placeholder="Status" /></SelectTrigger>
+                          <Select value={statusFilter} onValueChange={(value) => updateUrlState({ status: value === 'all' ? null : value, page: null })}>
+                            <SelectTrigger className="filter-select" aria-label="Filter restaurants by status"><SelectValue placeholder="Status" /></SelectTrigger>
                             <SelectContent position="popper">
                               <SelectItem value="all">All statuses</SelectItem>
                               <SelectItem value="active">Active</SelectItem>
@@ -2690,8 +1973,8 @@ export function AdminRestaurantsPage() {
                         </div>
                         <div className="restaurant-filter-field">
                           <span>Currency</span>
-                          <Select value={currencyFilter} onValueChange={(value) => { setCurrencyFilter(value); setPage(1) }}>
-                            <SelectTrigger className="filter-select"><SelectValue placeholder="Currency" /></SelectTrigger>
+                          <Select value={currencyFilter} onValueChange={(value) => updateUrlState({ currency: value === 'all' ? null : value, page: null })}>
+                            <SelectTrigger className="filter-select" aria-label="Filter restaurants by currency"><SelectValue placeholder="Currency" /></SelectTrigger>
                             <SelectContent position="popper">
                               <SelectItem value="all">All currencies</SelectItem>
                               {currencyOptionsInUse.map((currency) => <SelectItem key={currency} value={currency}>{currency}</SelectItem>)}
@@ -2704,16 +1987,16 @@ export function AdminRestaurantsPage() {
                 </div>
 
                 <div className="restaurant-inline-filters">
-                  <Select value={statusFilter} onValueChange={(value) => { setStatusFilter(value as StatusFilter); setPage(1) }}>
-                    <SelectTrigger className="filter-select"><SelectValue placeholder="Status" /></SelectTrigger>
+                  <Select value={statusFilter} onValueChange={(value) => updateUrlState({ status: value === 'all' ? null : value, page: null })}>
+                    <SelectTrigger className="filter-select" aria-label="Filter restaurants by status"><SelectValue placeholder="Status" /></SelectTrigger>
                     <SelectContent position="popper">
                       <SelectItem value="all">All statuses</SelectItem>
                       <SelectItem value="active">Active</SelectItem>
                       <SelectItem value="inactive">Inactive</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Select value={currencyFilter} onValueChange={(value) => { setCurrencyFilter(value); setPage(1) }}>
-                    <SelectTrigger className="filter-select"><SelectValue placeholder="Currency" /></SelectTrigger>
+                  <Select value={currencyFilter} onValueChange={(value) => updateUrlState({ currency: value === 'all' ? null : value, page: null })}>
+                    <SelectTrigger className="filter-select" aria-label="Filter restaurants by currency"><SelectValue placeholder="Currency" /></SelectTrigger>
                     <SelectContent position="popper">
                       <SelectItem value="all">All currencies</SelectItem>
                       {currencyOptionsInUse.map((currency) => <SelectItem key={currency} value={currency}>{currency}</SelectItem>)}
@@ -2727,19 +2010,19 @@ export function AdminRestaurantsPage() {
                 {hasActiveFilters && (
                   <div className="restaurant-filter-chips" aria-label="Active restaurant filters">
                     {search.trim() && (
-                      <button type="button" className="restaurant-filter-chip" onClick={() => { setSearch(''); setPage(1) }} title={`Search: ${search.trim()}`}>
+                      <button type="button" className="restaurant-filter-chip" onClick={() => { setSearch(''); updateUrlState({ q: null, page: null }) }} title={`Search: ${search.trim()}`}>
                         <span>Search: {search.trim()}</span>
                         <X size={13} />
                       </button>
                     )}
                     {statusFilter !== 'all' && (
-                      <button type="button" className="restaurant-filter-chip" onClick={() => { setStatusFilter('all'); setPage(1) }} title={`Status: ${selectedStatusFilterLabel}`}>
+                      <button type="button" className="restaurant-filter-chip" onClick={() => updateUrlState({ status: null, page: null })} title={`Status: ${selectedStatusFilterLabel}`}>
                         <span>Status: {selectedStatusFilterLabel}</span>
                         <X size={13} />
                       </button>
                     )}
                     {currencyFilter !== 'all' && (
-                      <button type="button" className="restaurant-filter-chip" onClick={() => { setCurrencyFilter('all'); setPage(1) }} title={`Currency: ${currencyFilter}`}>
+                      <button type="button" className="restaurant-filter-chip" onClick={() => updateUrlState({ currency: null, page: null })} title={`Currency: ${currencyFilter}`}>
                         <span>Currency: {currencyFilter}</span>
                         <X size={13} />
                       </button>
@@ -2754,13 +2037,14 @@ export function AdminRestaurantsPage() {
 
               <div className="table-wrap restaurant-directory-table-wrap">
                 <table className="data-table restaurant-table">
+                  <caption className="sr-only">Restaurants matching the current filters</caption>
                   <thead>
                     <tr>
-                      <th><button type="button" className="sort-button" onClick={() => updateSort('name')}>Restaurant {sort.key === 'name' && <SortIcon size={15} />}</button></th>
+                      <th aria-sort={getAriaSort('name')}><button type="button" className="sort-button" onClick={() => updateSort('name')}>Restaurant {sort.key === 'name' && <SortIcon size={15} />}</button></th>
                       <th>Contact</th>
-                      <th><button type="button" className="sort-button" onClick={() => updateSort('currency')}>Locale {sort.key === 'currency' && <SortIcon size={15} />}</button></th>
-                      <th><button type="button" className="sort-button" onClick={() => updateSort('status')}>Status {sort.key === 'status' && <SortIcon size={15} />}</button></th>
-                      <th><button type="button" className="sort-button" onClick={() => updateSort('created')}>Created {sort.key === 'created' && <SortIcon size={15} />}</button></th>
+                      <th aria-sort={getAriaSort('currency')}><button type="button" className="sort-button" onClick={() => updateSort('currency')}>Locale {sort.key === 'currency' && <SortIcon size={15} />}</button></th>
+                      <th aria-sort={getAriaSort('status')}><button type="button" className="sort-button" onClick={() => updateSort('status')}>Status {sort.key === 'status' && <SortIcon size={15} />}</button></th>
+                      <th aria-sort={getAriaSort('created')}><button type="button" className="sort-button" onClick={() => updateSort('created')}>Created {sort.key === 'created' && <SortIcon size={15} />}</button></th>
                       <th>Actions</th>
                     </tr>
                   </thead>
@@ -2781,14 +2065,22 @@ export function AdminRestaurantsPage() {
                             </div>
                           </div>
                         </td>
-                        <td><Badge variant={restaurant.isActive ? 'secondary' : 'destructive'}>{restaurant.isActive ? 'Active' : 'Inactive'}</Badge></td>
+                        <td>
+                          <div className="restaurant-status-badges">
+                            <Badge variant={restaurant.isActive ? 'secondary' : 'destructive'}>{restaurant.isActive ? 'Active' : 'Inactive'}</Badge>
+                            {restaurant.isActive ? (() => {
+                              const operationalStatus = getRestaurantOperationalStatus(restaurant)
+                              return <Badge variant={operationalStatus.variant}>{operationalStatus.label}</Badge>
+                            })() : null}
+                          </div>
+                        </td>
                         <td>{formatDate(restaurant.createdAt)}</td>
                         <td>
                           {renderRestaurantActions(restaurant)}
                         </td>
                       </tr>
                     ))}
-                    {restaurants.length === 0 && (
+                    {restaurants.length === 0 && !loading && (
                       <tr><td colSpan={6} className="empty-cell">{hasActiveFilters ? 'No restaurants match the current filters.' : 'No restaurants are available for your account.'}</td></tr>
                     )}
                   </tbody>
@@ -2806,7 +2098,13 @@ export function AdminRestaurantsPage() {
                         <strong title={restaurant.name}>{restaurant.name}</strong>
                         <span title={restaurant.address}>{restaurant.address}</span>
                       </div>
-                      <Badge variant={restaurant.isActive ? 'secondary' : 'destructive'}>{restaurant.isActive ? 'Active' : 'Inactive'}</Badge>
+                      <div className="restaurant-status-badges">
+                        <Badge variant={restaurant.isActive ? 'secondary' : 'destructive'}>{restaurant.isActive ? 'Active' : 'Inactive'}</Badge>
+                        {restaurant.isActive ? (() => {
+                          const operationalStatus = getRestaurantOperationalStatus(restaurant)
+                          return <Badge variant={operationalStatus.variant}>{operationalStatus.label}</Badge>
+                        })() : null}
+                      </div>
                     </header>
                     <div className="restaurant-mobile-meta-grid">
                       <div className="restaurant-mobile-meta">
@@ -2840,7 +2138,7 @@ export function AdminRestaurantsPage() {
                     </div>
                   </article>
                 ))}
-                {restaurants.length === 0 && (
+                {restaurants.length === 0 && !loading && (
                   <div className="restaurant-mobile-empty">
                     {hasActiveFilters ? 'No restaurants match the current filters.' : 'No restaurants are available for your account.'}
                   </div>
@@ -2853,8 +2151,8 @@ export function AdminRestaurantsPage() {
                   <span className="pagination-compact">{pageStart}-{pageEnd} / {totalItems}</span>
                 </span>
                 <div className="pagination-actions">
-                  <Select value={String(pageSize)} onValueChange={(value) => { setPageSize(Number(value)); setPage(1) }}>
-                    <SelectTrigger className="page-size-select"><SelectValue /></SelectTrigger>
+                  <Select value={String(pageSize)} onValueChange={(value) => updateUrlState({ pageSize: value === '10' ? null : value, page: null })}>
+                    <SelectTrigger className="page-size-select" aria-label="Restaurants per page"><SelectValue /></SelectTrigger>
                     <SelectContent position="popper">
                       <SelectItem value="10">10 / page</SelectItem>
                       <SelectItem value="20">20 / page</SelectItem>
@@ -2865,12 +2163,11 @@ export function AdminRestaurantsPage() {
                     <span className="pagination-full">Page {currentPage} of {totalPages}</span>
                     <span className="pagination-compact">{currentPage} / {totalPages}</span>
                   </span>
-                  <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={loading || currentPage <= 1} aria-label="Previous page"><ChevronLeft size={16} /></Button>
-                  <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={loading || currentPage >= totalPages} aria-label="Next page"><ChevronRight size={16} /></Button>
+                  <Button type="button" variant="outline" size="icon" onClick={() => updateUrlState({ page: Math.max(1, page - 1) === 1 ? null : Math.max(1, page - 1) }, false)} disabled={loading || currentPage <= 1} aria-label="Previous page"><ChevronLeft size={16} /></Button>
+                  <Button type="button" variant="outline" size="icon" onClick={() => updateUrlState({ page: Math.min(totalPages, page + 1) }, false)} disabled={loading || currentPage >= totalPages} aria-label="Next page"><ChevronRight size={16} /></Button>
                 </div>
               </div>
             </div>
-          )}
         </CardContent>
           </Card>
         </TabsContent>
@@ -2878,31 +2175,77 @@ export function AdminRestaurantsPage() {
         <TabsContent value="tables">
           <RestaurantTablesPanel
             restaurants={allRestaurants}
-            restaurantsLoading={loading}
+            restaurantsLoading={optionsLoading}
             canSelectRestaurant={isPlatformOwner}
+            selectedRestaurantId={selectedRestaurantId}
+            onSelectedRestaurantIdChange={(restaurantId) => updateUrlState({ restaurant: restaurantId }, false)}
           />
         </TabsContent>
 
         <TabsContent value="hours">
           <RestaurantOpeningHoursPanel
             restaurants={allRestaurants}
-            restaurantsLoading={loading}
+            restaurantsLoading={optionsLoading}
             canSelectRestaurant={isPlatformOwner}
             onSaved={refreshRestaurantData}
             onRestaurantUpdated={updateRestaurantInState}
+            selectedRestaurantId={selectedRestaurantId}
+            onSelectedRestaurantIdChange={(restaurantId) => updateUrlState({ restaurant: restaurantId }, false)}
+            onDirtyChange={setHoursDirty}
           />
         </TabsContent>
 
         <TabsContent value="calendar">
           <RestaurantSpecialCalendarPanel
             restaurants={allRestaurants}
-            restaurantsLoading={loading}
+            restaurantsLoading={optionsLoading}
             canSelectRestaurant={isPlatformOwner}
             onSaved={refreshRestaurantData}
             onRestaurantUpdated={updateRestaurantInState}
+            selectedRestaurantId={selectedRestaurantId}
+            onSelectedRestaurantIdChange={(restaurantId) => updateUrlState({ restaurant: restaurantId }, false)}
+            selectedDateKey={selectedCalendarDate}
+            onSelectedDateKeyChange={(date) => updateUrlState({ date }, false)}
+            monthKey={selectedCalendarMonth}
+            onMonthKeyChange={(month) => updateUrlState({ month }, false)}
+            onDirtyChange={setCalendarDirty}
           />
         </TabsContent>
       </Tabs>
+      <AlertDialog
+        open={pendingRestaurantSection !== null}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            setPendingRestaurantSection(null)
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Unsaved schedule changes</AlertDialogTitle>
+            <AlertDialogDescription>
+              You have unsaved changes in this restaurant schedule. Keep editing to save them, or discard them and continue to the selected section.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep editing</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                const nextSection = pendingRestaurantSection
+                setPendingRestaurantSection(null)
+                setHoursDirty(false)
+                setCalendarDirty(false)
+                if (nextSection) {
+                  commitRestaurantSection(nextSection)
+                }
+              }}
+            >
+              Discard and continue
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   )
 }

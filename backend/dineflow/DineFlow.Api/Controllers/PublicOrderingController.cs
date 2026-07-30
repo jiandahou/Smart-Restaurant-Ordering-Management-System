@@ -92,7 +92,9 @@ public class PublicOrderingController(
             Timezone = restaurant.Timezone,
             Currency = restaurant.Currency,
             PaymentPolicy = restaurant.PaymentPolicy.ToString(),
-            AcceptingOrders = restaurant.AcceptingOrders,
+            OnlinePaymentsEnabled = !string.IsNullOrWhiteSpace(restaurant.StripeAccountId) &&
+                restaurant.StripeChargesEnabled,
+            AcceptingOrders = availability.AcceptingOrders,
             OpeningHoursJson = restaurant.OpeningHoursJson,
             SpecialOpeningDaysJson = restaurant.SpecialOpeningDaysJson,
             IsWithinOpeningHours = availability.IsWithinOpeningHours,

@@ -245,11 +245,18 @@ public class AdminMenuItemsController : ControllerBase
                 ImageUrl = item.ImageUrl,
                 IsAvailable = item.IsAvailable,
                 IsSoldOut = item.IsSoldOut,
+                IsWatched = item.IsWatched,
+                StockQuantity = item.StockQuantity,
                 IsVegetarian = item.IsVegetarian,
                 IsVegan = item.IsVegan,
                 IsGlutenFree = item.IsGlutenFree,
                 IsHalal = item.IsHalal,
                 Allergens = item.Allergens,
+                SpiceLevel = item.SpiceLevel,
+                ServingSize = item.ServingSize,
+                Calories = item.Calories,
+                IsPopular = item.IsPopular,
+                IsRecommended = item.IsRecommended,
                 DisplayOrder = item.DisplayOrder,
                 CreatedAt = item.CreatedAt,
                 UpdatedAt = item.UpdatedAt,
@@ -330,7 +337,11 @@ public class AdminMenuItemsController : ControllerBase
             request.Description,
             request.Price,
             request.ImageUrl,
-            request.DisplayOrder);
+            request.DisplayOrder,
+            request.Allergens,
+            request.SpiceLevel,
+            request.ServingSize,
+            request.Calories);
 
         if (validationError is not null)
         {
@@ -364,6 +375,16 @@ public class AdminMenuItemsController : ControllerBase
             ImageUrl = NormalizeOptionalValue(request.ImageUrl),
             IsAvailable = request.IsAvailable,
             IsSoldOut = request.IsSoldOut,
+            IsVegetarian = request.IsVegetarian,
+            IsVegan = request.IsVegan,
+            IsGlutenFree = request.IsGlutenFree,
+            IsHalal = request.IsHalal,
+            Allergens = NormalizeOptionalValue(request.Allergens),
+            SpiceLevel = request.SpiceLevel,
+            ServingSize = NormalizeOptionalValue(request.ServingSize),
+            Calories = request.Calories,
+            IsPopular = request.IsPopular,
+            IsRecommended = request.IsRecommended,
             DisplayOrder = request.DisplayOrder,
             CreatedAt = DateTime.UtcNow
         };
@@ -414,7 +435,11 @@ public class AdminMenuItemsController : ControllerBase
             request.Description,
             request.Price,
             request.ImageUrl,
-            request.DisplayOrder);
+            request.DisplayOrder,
+            request.Allergens,
+            request.SpiceLevel,
+            request.ServingSize,
+            request.Calories);
 
         if (validationError is not null)
         {
@@ -447,6 +472,16 @@ public class AdminMenuItemsController : ControllerBase
         item.ImageUrl = NormalizeOptionalValue(request.ImageUrl);
         item.IsAvailable = request.IsAvailable;
         item.IsSoldOut = request.IsSoldOut;
+        item.IsVegetarian = request.IsVegetarian;
+        item.IsVegan = request.IsVegan;
+        item.IsGlutenFree = request.IsGlutenFree;
+        item.IsHalal = request.IsHalal;
+        item.Allergens = NormalizeOptionalValue(request.Allergens);
+        item.SpiceLevel = request.SpiceLevel;
+        item.ServingSize = NormalizeOptionalValue(request.ServingSize);
+        item.Calories = request.Calories;
+        item.IsPopular = request.IsPopular;
+        item.IsRecommended = request.IsRecommended;
         item.DisplayOrder = request.DisplayOrder;
         item.UpdatedAt = DateTime.UtcNow;
 
@@ -549,6 +584,210 @@ public class AdminMenuItemsController : ControllerBase
             message = request.IsSoldOut ? "Menu item marked as sold out." : "Menu item marked as in stock.",
             itemId = item.Id,
             item.IsSoldOut
+        });
+    }
+
+    /// <summary>
+    /// The watch list powering the dashboard widget: the handful of items staff want to flip on and
+    /// off without opening the full menu.
+    /// </summary>
+    [HttpGet("watched")]
+    public async Task<ActionResult<IReadOnlyList<WatchedMenuItemResponse>>> GetWatchedItems(
+        [FromQuery] Guid? restaurantId,
+        CancellationToken cancellationToken)
+    {
+        var scopedRestaurantId = restaurantId ?? await GetCurrentRestaurantIdAsync();
+
+        if (scopedRestaurantId is null)
+        {
+            return BadRequest(new { message = "restaurantId is required for this account." });
+        }
+
+        if (!await CanAccessRestaurantAsync(scopedRestaurantId.Value))
+        {
+            return Forbid();
+        }
+
+        var items = await _dbContext.MenuItems
+            .AsNoTracking()
+            .Include(item => item.Category)
+            .Where(item => item.RestaurantId == scopedRestaurantId.Value && item.IsWatched)
+            .OrderBy(item => item.DisplayOrder)
+            .ThenBy(item => item.Name)
+            .Select(item => new WatchedMenuItemResponse
+            {
+                Id = item.Id,
+                RestaurantId = item.RestaurantId,
+                Name = item.Name,
+                CategoryName = item.Category == null ? string.Empty : item.Category.Name,
+                Price = item.Price,
+                IsAvailable = item.IsAvailable,
+                IsSoldOut = item.IsSoldOut,
+                StockQuantity = item.StockQuantity
+            })
+            .ToListAsync(cancellationToken);
+
+        return Ok(items);
+    }
+
+    [HttpPatch("{id:guid}/watch")]
+    public async Task<IActionResult> UpdateWatch(
+        Guid id,
+        [FromBody] UpdateMenuItemWatchRequest request,
+        CancellationToken cancellationToken)
+    {
+        var item = await _dbContext.MenuItems
+            .FirstOrDefaultAsync(menuItem => menuItem.Id == id, cancellationToken);
+
+        if (item is null)
+        {
+            return NotFound(new { message = "Menu item not found." });
+        }
+
+        if (!await CanAccessRestaurantAsync(item.RestaurantId))
+        {
+            return Forbid();
+        }
+
+        var beforeWatch = new { item.Id, item.Name, item.IsWatched };
+        item.IsWatched = request.IsWatched;
+        item.UpdatedAt = DateTime.UtcNow;
+        _reportLogWriter.AddAudit(
+            "MenuItem.WatchChanged",
+            "MenuItem",
+            item.Id.ToString(),
+            item.RestaurantId,
+            request.IsWatched ? $"{item.Name} added to the watch list." : $"{item.Name} removed from the watch list.",
+            beforeWatch,
+            new { item.Id, item.Name, item.IsWatched });
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(new
+        {
+            message = request.IsWatched ? "Menu item is now watched." : "Menu item is no longer watched.",
+            itemId = item.Id,
+            item.IsWatched
+        });
+    }
+
+    /// <summary>
+    /// Sets remaining stock. Null clears tracking, making the item unlimited again — which is how
+    /// most items are configured. Stock and the sold-out flag are kept consistent here so staff
+    /// never have to set both.
+    /// </summary>
+    [HttpPatch("{id:guid}/stock")]
+    public async Task<IActionResult> UpdateStock(
+        Guid id,
+        [FromBody] UpdateMenuItemStockRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.StockQuantity is < 0)
+        {
+            return BadRequest(new { message = "stockQuantity cannot be negative." });
+        }
+
+        var item = await _dbContext.MenuItems
+            .FirstOrDefaultAsync(menuItem => menuItem.Id == id, cancellationToken);
+
+        if (item is null)
+        {
+            return NotFound(new { message = "Menu item not found." });
+        }
+
+        if (!await CanAccessRestaurantAsync(item.RestaurantId))
+        {
+            return Forbid();
+        }
+
+        var beforeStock = new { item.Id, item.Name, item.StockQuantity, item.IsSoldOut };
+        item.StockQuantity = request.StockQuantity;
+
+        if (request.StockQuantity is { } quantity)
+        {
+            item.IsSoldOut = quantity == 0;
+        }
+
+        item.UpdatedAt = DateTime.UtcNow;
+        _reportLogWriter.AddAudit(
+            "MenuItem.StockChanged",
+            "MenuItem",
+            item.Id.ToString(),
+            item.RestaurantId,
+            request.StockQuantity is null
+                ? $"{item.Name} stock tracking turned off."
+                : $"{item.Name} stock set to {request.StockQuantity}.",
+            beforeStock,
+            new { item.Id, item.Name, item.StockQuantity, item.IsSoldOut });
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(new
+        {
+            message = request.StockQuantity is null
+                ? "Menu item is no longer stock tracked."
+                : $"Menu item stock set to {request.StockQuantity}.",
+            itemId = item.Id,
+            item.StockQuantity,
+            item.IsSoldOut
+        });
+    }
+
+    [HttpPatch("bulk-state")]
+    public async Task<IActionResult> UpdateItemsState(
+        [FromBody] UpdateMenuItemsStateRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.RestaurantId == Guid.Empty)
+        {
+            return BadRequest(new { message = "Restaurant is required." });
+        }
+
+        if (request.ItemIds.Count == 0 || request.ItemIds.Distinct().Count() != request.ItemIds.Count)
+        {
+            return BadRequest(new { message = "Select one or more unique menu items." });
+        }
+
+        if (!await CanAccessRestaurantAsync(request.RestaurantId))
+        {
+            return Forbid();
+        }
+
+        var items = await _dbContext.MenuItems
+            .Where(item => request.ItemIds.Contains(item.Id) && item.RestaurantId == request.RestaurantId)
+            .ToListAsync(cancellationToken);
+
+        if (items.Count != request.ItemIds.Count)
+        {
+            return BadRequest(new { message = "One or more selected menu items do not belong to this restaurant." });
+        }
+
+        var before = items
+            .Select(item => new { item.Id, item.Name, item.IsAvailable, item.IsSoldOut })
+            .ToList();
+        var updatedAt = DateTime.UtcNow;
+
+        foreach (var item in items)
+        {
+            item.IsAvailable = request.IsAvailable;
+            item.IsSoldOut = request.IsSoldOut;
+            item.UpdatedAt = updatedAt;
+        }
+
+        _reportLogWriter.AddAudit(
+            "MenuItem.BulkStateUpdated",
+            "Restaurant",
+            request.RestaurantId.ToString(),
+            request.RestaurantId,
+            $"Updated operational state for {items.Count} menu items.",
+            before,
+            items.Select(item => new { item.Id, item.Name, item.IsAvailable, item.IsSoldOut }).ToList());
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(new
+        {
+            message = $"Updated {items.Count} menu item{(items.Count == 1 ? string.Empty : "s")}.",
+            itemIds = items.Select(item => item.Id).ToList(),
+            request.IsAvailable,
+            request.IsSoldOut
         });
     }
 
@@ -702,11 +941,18 @@ public class AdminMenuItemsController : ControllerBase
                 ImageUrl = item.ImageUrl,
                 IsAvailable = item.IsAvailable,
                 IsSoldOut = item.IsSoldOut,
+                IsWatched = item.IsWatched,
+                StockQuantity = item.StockQuantity,
                 IsVegetarian = item.IsVegetarian,
                 IsVegan = item.IsVegan,
                 IsGlutenFree = item.IsGlutenFree,
                 IsHalal = item.IsHalal,
                 Allergens = item.Allergens,
+                SpiceLevel = item.SpiceLevel,
+                ServingSize = item.ServingSize,
+                Calories = item.Calories,
+                IsPopular = item.IsPopular,
+                IsRecommended = item.IsRecommended,
                 DisplayOrder = item.DisplayOrder,
                 CreatedAt = item.CreatedAt,
                 UpdatedAt = item.UpdatedAt,
@@ -790,7 +1036,11 @@ public class AdminMenuItemsController : ControllerBase
         string? description,
         decimal price,
         string? imageUrl,
-        int displayOrder)
+        int displayOrder,
+        string? allergens,
+        int spiceLevel,
+        string? servingSize,
+        int? calories)
     {
         if (categoryId == Guid.Empty)
         {
@@ -825,6 +1075,26 @@ public class AdminMenuItemsController : ControllerBase
         if (displayOrder < 0 || displayOrder > MaximumDisplayOrder)
         {
             return $"Display order must be between 0 and {MaximumDisplayOrder}.";
+        }
+
+        if (allergens?.Trim().Length > 500)
+        {
+            return "Allergens must not exceed 500 characters.";
+        }
+
+        if (spiceLevel is < 0 or > 3)
+        {
+            return "Spice level must be between 0 and 3.";
+        }
+
+        if (servingSize?.Trim().Length > 80)
+        {
+            return "Serving size must not exceed 80 characters.";
+        }
+
+        if (calories is < 0 or > 10000)
+        {
+            return "Calories must be between 0 and 10000.";
         }
 
         return null;
@@ -932,11 +1202,18 @@ public class AdminMenuItemsController : ControllerBase
             ImageUrl = item.ImageUrl,
             IsAvailable = item.IsAvailable,
             IsSoldOut = item.IsSoldOut,
+            IsWatched = item.IsWatched,
+            StockQuantity = item.StockQuantity,
             IsVegetarian = item.IsVegetarian,
             IsVegan = item.IsVegan,
             IsGlutenFree = item.IsGlutenFree,
             IsHalal = item.IsHalal,
             Allergens = item.Allergens,
+            SpiceLevel = item.SpiceLevel,
+            ServingSize = item.ServingSize,
+            Calories = item.Calories,
+            IsPopular = item.IsPopular,
+            IsRecommended = item.IsRecommended,
             DisplayOrder = item.DisplayOrder,
             CreatedAt = item.CreatedAt,
             UpdatedAt = item.UpdatedAt,
@@ -991,6 +1268,11 @@ public class AdminMenuItemsController : ControllerBase
         item.IsGlutenFree,
         item.IsHalal,
         item.Allergens,
+        item.SpiceLevel,
+        item.ServingSize,
+        item.Calories,
+        item.IsPopular,
+        item.IsRecommended,
         item.DisplayOrder
     };
 }

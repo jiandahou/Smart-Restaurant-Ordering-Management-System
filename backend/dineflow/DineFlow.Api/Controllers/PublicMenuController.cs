@@ -99,6 +99,16 @@ public class PublicMenuController(AppDbContext dbContext) : ControllerBase
                         ImageUrl = item.ImageUrl,
                         IsAvailable = item.IsAvailable,
                         IsSoldOut = item.IsSoldOut,
+                        IsVegetarian = item.IsVegetarian,
+                        IsVegan = item.IsVegan,
+                        IsGlutenFree = item.IsGlutenFree,
+                        IsHalal = item.IsHalal,
+                        Allergens = item.Allergens,
+                        SpiceLevel = item.SpiceLevel,
+                        ServingSize = item.ServingSize,
+                        Calories = item.Calories,
+                        IsPopular = item.IsPopular,
+                        IsRecommended = item.IsRecommended,
                         DisplayOrder = item.DisplayOrder,
                         OptionGroups = item.OptionGroups
                             .Where(group => group.IsActive)

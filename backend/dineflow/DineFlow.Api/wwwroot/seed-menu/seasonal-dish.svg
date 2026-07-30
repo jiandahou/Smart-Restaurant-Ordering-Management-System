@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Seasonal dish">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff8ed"/>
+      <stop offset="1" stop-color="#e7f7ef"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="480" rx="32" fill="url(#background)"/>
+  <circle cx="320" cy="250" r="168" fill="#f8faf7" stroke="#d4ded7" stroke-width="12"/>
+  <ellipse cx="320" cy="270" rx="125" ry="78" fill="#d9823d"/>
+  <path d="M224 253c38-62 160-76 207-7-25 38-61 64-111 77-48-8-79-29-96-70z" fill="#efb45a"/>
+  <path d="M270 220c16-48 54-67 85-57-2 36-23 67-68 85" fill="#31936b"/>
+  <path d="M356 222c28-37 63-43 87-24-13 34-43 55-85 56" fill="#6eb34e"/>
+  <circle cx="279" cy="267" r="13" fill="#b94a3b"/>
+  <circle cx="355" cy="285" r="15" fill="#fff2c5"/>
+  <circle cx="395" cy="250" r="11" fill="#b94a3b"/>
+  <text x="320" y="438" text-anchor="middle" font-family="Arial, sans-serif" font-size="30" font-weight="700" fill="#264d3d">Fresh from the kitchen</text>
+</svg>

@@ -43,7 +43,9 @@ public sealed class OrderRefundProcessor
         string? requestedByUserId,
         string? reason,
         string source,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? idempotencyKeySeed = null,
+        long? requestedAmountCents = null)
     {
         if (string.IsNullOrWhiteSpace(_stripeOptions.SecretKey))
         {
@@ -119,6 +121,15 @@ public sealed class OrderRefundProcessor
                 "This payment has already been fully refunded.");
         }
 
+        var refundAmountCents = requestedAmountCents ?? refundableAmountCents;
+        if (refundAmountCents <= 0 || refundAmountCents > refundableAmountCents)
+        {
+            return OrderRefundProcessResult.Failure(
+                StatusCodes.Status409Conflict,
+                "The requested refund amount is no longer available.",
+                $"Requested {refundAmountCents} cents; refundable balance is {refundableAmountCents} cents.");
+        }
+
         var now = DateTime.UtcNow;
         var refund = new PaymentRefund
         {
@@ -128,7 +139,7 @@ public sealed class OrderRefundProcessor
             OrderId = order.Id,
             Provider = PaymentProviders.Stripe,
             ProviderPaymentIntentId = payment.ProviderPaymentIntentId,
-            AmountCents = refundableAmountCents,
+            AmountCents = refundAmountCents,
             Currency = payment.Currency,
             Status = PaymentRefundStatus.Pending,
             Reason = reason,
@@ -148,7 +159,7 @@ public sealed class OrderRefundProcessor
                 order.OrderNumber,
                 paymentId = payment.Id,
                 refundId = refund.Id,
-                amountCents = refundableAmountCents,
+                amountCents = refundAmountCents,
                 payment.Currency,
                 reason,
                 source
@@ -161,7 +172,7 @@ public sealed class OrderRefundProcessor
             {
                 paymentId = payment.Id,
                 refundId = refund.Id,
-                amountCents = refundableAmountCents,
+                amountCents = refundAmountCents,
                 payment.Currency,
                 reason,
                 source
@@ -176,7 +187,7 @@ public sealed class OrderRefundProcessor
             $"Refund requested for payment {payment.Id}.",
             new
             {
-                amountCents = refundableAmountCents,
+                amountCents = refundAmountCents,
                 payment.Currency,
                 reason,
                 source
@@ -188,12 +199,14 @@ public sealed class OrderRefundProcessor
             var refundOptions = new RefundCreateOptions
             {
                 PaymentIntent = payment.ProviderPaymentIntentId,
-                Amount = refundableAmountCents,
+                Amount = refundAmountCents,
+                RefundApplicationFee = payment.PlatformFeeAmountCents > 0,
                 Metadata = BuildRefundMetadata(order, payment, refund, reason)
             };
             var requestOptions = new RequestOptions
             {
-                IdempotencyKey = $"order-refund-{refund.Id:N}"
+                IdempotencyKey = idempotencyKeySeed ?? $"order-refund-{refund.Id:N}",
+                StripeAccount = payment.StripeAccountId
             };
             var refundService = new RefundService(_stripeClient);
             var stripeRefund = await refundService.CreateAsync(
@@ -209,7 +222,7 @@ public sealed class OrderRefundProcessor
             if (refund.Status == PaymentRefundStatus.Succeeded)
             {
                 refund.RefundedAt = completedAt;
-                var totalRefundedAfter = refundedAmountCents + refundableAmountCents;
+                var totalRefundedAfter = refundedAmountCents + refundAmountCents;
                 payment.Status = totalRefundedAfter >= payment.AmountCents
                     ? PaymentStatus.Refunded
                     : PaymentStatus.PartiallyRefunded;

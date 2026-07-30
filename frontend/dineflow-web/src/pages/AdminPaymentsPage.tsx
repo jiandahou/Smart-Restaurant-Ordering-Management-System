@@ -10,6 +10,8 @@ import {
   ChevronLeft,
   ChevronRight,
   CreditCard,
+  Copy,
+  Download,
   ExternalLink,
   ReceiptText,
   RefreshCw,
@@ -20,30 +22,38 @@ import {
   X,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { useSearchParams } from 'react-router-dom'
 import {
   createOrderCheckoutSession,
   approveAdminRefundRequest,
+  getAdminOrderSummary,
   getAdminRefunds,
   getAdminRefundRequests,
   getAdminRefundSummary,
   getAdminOrders,
+  getPaymentEnvironment,
+  getRestaurants,
   rejectAdminRefundRequest,
   refundAdminOrder,
   type AdminOrder,
+  type AdminOrderSummary,
   type AdminRefund,
   type AdminRefundRequest,
   type AdminRefundRequestStatus,
   type AdminRefundSummary,
+  type PaymentEnvironment,
+  type Restaurant,
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
+import { ApproveRefundRequestDialog } from '../components/orders/ApproveRefundRequestDialog'
 import { OrderRefundDialog } from '../components/orders/OrderRefundDialog'
 import { OrderStatusBadge, getOrderStatusLabel, orderStatusOptions } from '../components/orders/OrderStatusBadge'
 import { PaymentRefundHistory } from '../components/orders/PaymentRefundHistory'
 import { PaymentStatusBadge, getPaymentStatusLabel, paymentStatusOptions } from '../components/orders/PaymentStatusBadge'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader } from '../components/ui/card'
 import {
   Dialog,
   DialogContent,
@@ -64,7 +74,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Textarea } from '../components/ui/textarea'
 import { HorizontalTableScroll } from '../components/HorizontalTableScroll'
-import { getOrderStats, isOrderPayable } from '../lib/orderStats'
+import { isOrderPayable } from '../lib/orderStats'
 import { canRefundOrder } from '../lib/paymentRefunds'
 
 type SortKey =
@@ -82,20 +92,55 @@ const orderTypeLabels: Record<string, string> = {
 }
 
 const orderTypeOptions = ['DineIn', 'Takeaway', 'Scheduled']
+
+/**
+ * Payment statuses the "Payable only" preset keeps. Must mirror AdminOrdersController's PayableOnly
+ * clause — combining that preset with any status outside this list yields a query that can never
+ * match, which silently emptied the list.
+ */
+const payablePaymentStatuses: readonly string[] = ['Pending', 'Unpaid', 'Failed', 'Cancelled', 'Expired']
 const refundStatusOptions = ['Pending', 'Succeeded', 'Failed'] as const
-const refundRequestStatusOptions = ['Pending', 'Approved', 'Rejected', 'Cancelled'] as const
+const refundRequestStatusOptions = ['Pending', 'Processing', 'Approved', 'Rejected', 'Cancelled'] as const
 const refundStatusClasses: Partial<Record<typeof refundStatusOptions[number], string>> = {
   Succeeded: 'border-emerald-300 bg-emerald-100 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200',
 }
 const refundRequestStatusClasses: Partial<Record<AdminRefundRequestStatus, string>> = {
+  Processing: 'border-amber-300 bg-amber-100 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200',
   Approved: 'border-emerald-300 bg-emerald-100 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200',
   Rejected: 'border-red-300 bg-red-100 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200',
 }
 
 type PaymentTab = 'orders' | 'requests' | 'history'
 
+function readAllowedParam<T extends string>(
+  params: URLSearchParams,
+  key: string,
+  allowed: readonly T[],
+  fallback: T,
+) {
+  const value = params.get(key)
+  return value && allowed.includes(value as T) ? value as T : fallback
+}
+
+function readPositiveInteger(params: URLSearchParams, key: string, fallback: number) {
+  const value = Number(params.get(key))
+  return Number.isInteger(value) && value > 0 ? value : fallback
+}
+
+function dateBoundaryToUtc(value: string, endExclusive = false) {
+  if (!value) {
+    return undefined
+  }
+
+  const date = new Date(`${value}T00:00:00`)
+  if (endExclusive) {
+    date.setDate(date.getDate() + 1)
+  }
+  return date.toISOString()
+}
+
 function formatMoney(amount: number, currencyCode?: string | null) {
-  return new Intl.NumberFormat(undefined, {
+  return new Intl.NumberFormat('en-AU', {
     style: 'currency',
     currency: (currencyCode || 'AUD').toUpperCase(),
   }).format(amount)
@@ -106,10 +151,14 @@ function formatDate(value: string | null) {
     return 'Not yet'
   }
 
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat('en-AU', {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(new Date(value))
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError'
 }
 
 function getOrderTypeLabel(orderType: string) {
@@ -129,6 +178,67 @@ function formatCurrencyBreakdown(
   return visibleAmounts
     .map((item) => formatMoney(item[key] / 100, item.currency))
     .join(' · ')
+}
+
+function CompactIdentifier({
+  value,
+  fallback,
+  label,
+}: {
+  value?: string | null
+  fallback: string
+  label: string
+}) {
+  if (!value) {
+    return <span className="table-subtext">{fallback}</span>
+  }
+
+  const compact = value.length > 22 ? `${value.slice(0, 10)}…${value.slice(-7)}` : value
+  return (
+    <span className="payment-identifier">
+      <code title={value}>{compact}</code>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        aria-label={`Copy ${label}`}
+        onClick={(event) => {
+          event.stopPropagation()
+          void navigator.clipboard.writeText(value)
+            .then(() => toast.success(`${label} copied`))
+            .catch(() => toast.error(`Could not copy ${label}`))
+        }}
+      >
+        <Copy size={13} />
+      </Button>
+    </span>
+  )
+}
+
+async function fetchExportRows<T>(
+  load: (page: number) => Promise<{ items: T[]; totalPages: number }>,
+) {
+  const first = await load(1)
+  const rows = [...first.items]
+  const pageLimit = Math.min(first.totalPages, 50)
+  for (let page = 2; page <= pageLimit; page += 1) {
+    rows.push(...(await load(page)).items)
+  }
+  return rows
+}
+
+function downloadCsv(filename: string, headers: string[], rows: Array<Array<string | number | null | undefined>>) {
+  const escapeCell = (value: string | number | null | undefined) => {
+    const text = value == null ? '' : String(value)
+    return `"${text.replaceAll('"', '""')}"`
+  }
+  const csv = [headers, ...rows].map((row) => row.map(escapeCell).join(',')).join('\r\n')
+  const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' }))
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
 }
 
 function SortHeader({
@@ -152,7 +262,44 @@ function SortHeader({
 
 export function AdminPaymentsPage() {
   const { user } = useAuth()
+  const [urlSearchParams, setUrlSearchParams] = useSearchParams()
+  const initialUrlState = {
+    activeTab: readAllowedParam(urlSearchParams, 'view', ['orders', 'requests', 'history'] as const, 'orders'),
+    search: urlSearchParams.get('q') ?? '',
+    dateFrom: urlSearchParams.get('from') ?? '',
+    dateTo: urlSearchParams.get('to') ?? '',
+    paymentFilter: readAllowedParam(urlSearchParams, 'payment', ['all', ...paymentStatusOptions], 'all'),
+    orderStatusFilter: readAllowedParam(urlSearchParams, 'orderStatus', ['all', ...orderStatusOptions], 'all'),
+    orderTypeFilter: readAllowedParam(urlSearchParams, 'orderType', ['all', ...orderTypeOptions], 'all'),
+    restaurantFilter: urlSearchParams.get('restaurant') || 'all',
+    payableOnly: readAllowedParam(urlSearchParams, 'payable', ['yes', 'no'] as const, 'no'),
+    refundStatusFilter: readAllowedParam(urlSearchParams, 'refundStatus', ['all', ...refundStatusOptions], 'all'),
+    refundRequestStatusFilter: readAllowedParam(
+      urlSearchParams,
+      'requestStatus',
+      ['all', ...refundRequestStatusOptions] as const,
+      'Pending',
+    ),
+    page: readPositiveInteger(urlSearchParams, 'page', 1),
+    pageSize: readAllowedParam(urlSearchParams, 'pageSize', ['10', '20', '50', '100'] as const, '20'),
+    sortKey: readAllowedParam(
+      urlSearchParams,
+      'sortBy',
+      ['createdAt', 'orderNumber', 'restaurantName', 'paymentStatus', 'status', 'totalAmount'] as const,
+      'createdAt',
+    ),
+    sortDirection: readAllowedParam(urlSearchParams, 'direction', ['asc', 'desc'] as const, 'desc'),
+  }
   const [orders, setOrders] = useState<AdminOrder[]>([])
+  const [orderSummary, setOrderSummary] = useState<AdminOrderSummary>({
+    total: 0,
+    activeKitchen: 0,
+    paid: 0,
+    pendingPayment: 0,
+    failedPayment: 0,
+    payable: 0,
+    revenue: 0,
+  })
   const [refundSummary, setRefundSummary] = useState<AdminRefundSummary>({
     total: 0,
     pending: 0,
@@ -162,68 +309,80 @@ export function AdminPaymentsPage() {
   })
   const [refunds, setRefunds] = useState<AdminRefund[]>([])
   const [refundRequests, setRefundRequests] = useState<AdminRefundRequest[]>([])
+  const [paymentEnvironment, setPaymentEnvironment] = useState<PaymentEnvironment | null>(null)
+  const [restaurantDirectory, setRestaurantDirectory] = useState<Restaurant[]>([])
   const [loading, setLoading] = useState(true)
   const [refundSummaryLoading, setRefundSummaryLoading] = useState(true)
   const [refundsLoading, setRefundsLoading] = useState(true)
   const [refundRequestsLoading, setRefundRequestsLoading] = useState(true)
+  const [exporting, setExporting] = useState(false)
   const [submittingOrderId, setSubmittingOrderId] = useState<string | null>(null)
   const [refundingOrderId, setRefundingOrderId] = useState<string | null>(null)
   const [reviewingRefundRequestId, setReviewingRefundRequestId] = useState<string | null>(null)
   const [pendingRefundOrder, setPendingRefundOrder] = useState<AdminOrder | null>(null)
+  const [approvingRefundRequest, setApprovingRefundRequest] = useState<AdminRefundRequest | null>(null)
   const [rejectingRefundRequest, setRejectingRefundRequest] = useState<AdminRefundRequest | null>(null)
   const [refundReason, setRefundReason] = useState('')
+  const [refundApprovalNote, setRefundApprovalNote] = useState('')
+  const [refundApprovalConfirmation, setRefundApprovalConfirmation] = useState('')
   const [refundRequestRejectNote, setRefundRequestRejectNote] = useState('')
-  const [search, setSearch] = useState('')
-  const [paymentFilter, setPaymentFilter] = useState('all')
-  const [orderStatusFilter, setOrderStatusFilter] = useState('all')
-  const [orderTypeFilter, setOrderTypeFilter] = useState('all')
-  const [restaurantFilter, setRestaurantFilter] = useState('all')
-  const [payableOnly, setPayableOnly] = useState('yes')
-  const [refundStatusFilter, setRefundStatusFilter] = useState<'all' | typeof refundStatusOptions[number]>('all')
-  const [refundRequestStatusFilter, setRefundRequestStatusFilter] = useState<'all' | AdminRefundRequestStatus>('Pending')
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(20)
+  const [search, setSearch] = useState(initialUrlState.search)
+  const [debouncedSearch, setDebouncedSearch] = useState(initialUrlState.search)
+  const [dateFrom, setDateFrom] = useState(initialUrlState.dateFrom)
+  const [dateTo, setDateTo] = useState(initialUrlState.dateTo)
+  const [ordersError, setOrdersError] = useState<string | null>(null)
+  const [refundsError, setRefundsError] = useState<string | null>(null)
+  const [refundRequestsError, setRefundRequestsError] = useState<string | null>(null)
+  const [restaurantDirectoryError, setRestaurantDirectoryError] = useState<string | null>(null)
+  // A hand-edited or bookmarked URL can carry ?payable=yes&payment=Paid, which no order can
+  // satisfy. Drop the status rather than render an inexplicably empty list.
+  const [paymentFilter, setPaymentFilter] = useState(
+    initialUrlState.payableOnly === 'yes' &&
+      initialUrlState.paymentFilter !== 'all' &&
+      !payablePaymentStatuses.includes(initialUrlState.paymentFilter)
+      ? 'all' as typeof initialUrlState.paymentFilter
+      : initialUrlState.paymentFilter,
+  )
+  const [orderStatusFilter, setOrderStatusFilter] = useState(initialUrlState.orderStatusFilter)
+  const [orderTypeFilter, setOrderTypeFilter] = useState(initialUrlState.orderTypeFilter)
+  const [restaurantFilter, setRestaurantFilter] = useState(initialUrlState.restaurantFilter)
+  const [payableOnly, setPayableOnly] = useState(initialUrlState.payableOnly)
+  const [refundStatusFilter, setRefundStatusFilter] = useState<'all' | typeof refundStatusOptions[number]>(initialUrlState.refundStatusFilter)
+  const [refundRequestStatusFilter, setRefundRequestStatusFilter] = useState<'all' | AdminRefundRequestStatus>(initialUrlState.refundRequestStatusFilter)
+  const [page, setPage] = useState(initialUrlState.page)
+  const [pageSize, setPageSize] = useState(Number(initialUrlState.pageSize))
   const [totalItems, setTotalItems] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
-  const [refundPage, setRefundPage] = useState(1)
-  const [refundPageSize, setRefundPageSize] = useState(10)
+  const [refundPage, setRefundPage] = useState(initialUrlState.page)
+  const [refundPageSize, setRefundPageSize] = useState(Number(initialUrlState.pageSize))
   const [refundTotalItems, setRefundTotalItems] = useState(0)
   const [refundTotalPages, setRefundTotalPages] = useState(0)
-  const [refundRequestPage, setRefundRequestPage] = useState(1)
-  const [refundRequestPageSize, setRefundRequestPageSize] = useState(10)
+  const [refundRequestPage, setRefundRequestPage] = useState(initialUrlState.page)
+  const [refundRequestPageSize, setRefundRequestPageSize] = useState(Number(initialUrlState.pageSize))
   const [refundRequestTotalItems, setRefundRequestTotalItems] = useState(0)
   const [refundRequestTotalPages, setRefundRequestTotalPages] = useState(0)
-  const [activeTab, setActiveTab] = useState<PaymentTab>('orders')
+  const [activeTab, setActiveTab] = useState<PaymentTab>(initialUrlState.activeTab)
   const [paymentSummaryExpanded, setPaymentSummaryExpanded] = useState(false)
   const [refundSummaryExpanded, setRefundSummaryExpanded] = useState(false)
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null)
   const tableWrapRef = useRef<HTMLDivElement | null>(null)
+  const ordersAbortRef = useRef<AbortController | null>(null)
+  const refundsAbortRef = useRef<AbortController | null>(null)
+  const refundRequestsAbortRef = useRef<AbortController | null>(null)
   const [tableViewportWidth, setTableViewportWidth] = useState<number | null>(null)
   const [sort, setSort] = useState<{ key: SortKey; direction: 'asc' | 'desc' }>({
-    key: 'createdAt',
-    direction: 'desc',
+    key: initialUrlState.sortKey,
+    direction: initialUrlState.sortDirection,
   })
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
 
   const restaurantOptions = useMemo(() => {
-    return Array.from(
-      new Map(
-        orders.map((order) => [
-          order.restaurantId || order.restaurantName || 'unknown',
-          {
-            value: order.restaurantId || order.restaurantName || 'unknown',
-            label: order.restaurantName || 'Unknown restaurant',
-          },
-        ]),
-      ).values(),
-    ).sort((first, second) => first.label.localeCompare(second.label))
-  }, [orders])
+    return restaurantDirectory
+      .map((restaurant) => ({ value: restaurant.id, label: restaurant.name }))
+      .sort((first, second) => first.label.localeCompare(second.label))
+  }, [restaurantDirectory])
 
   const filteredOrders = orders
-
-  const totals = useMemo(() => {
-    return getOrderStats(filteredOrders)
-  }, [filteredOrders])
   const pageStart = totalItems === 0 ? 0 : (page - 1) * pageSize + 1
   const pageEnd = Math.min(page * pageSize, totalItems)
   const refundPageStart = refundTotalItems === 0 ? 0 : (refundPage - 1) * refundPageSize + 1
@@ -238,35 +397,66 @@ export function AdminPaymentsPage() {
   const selectedOrderStatusFilterLabel = orderStatusFilter === 'all' ? '' : getOrderStatusLabel(orderStatusFilter)
   const selectedOrderTypeFilterLabel = orderTypeFilter === 'all' ? '' : getOrderTypeLabel(orderTypeFilter)
   const selectedPayableFilterLabel = payableOnly === 'yes' ? 'Payable only' : 'All orders'
-  const activeDropdownFilterCount = activeTab === 'orders'
+
+  /**
+   * "Payable only" restricts payment status to the unpaid states, so pairing it with Paid (or
+   * Refunded, etc.) produces a query that can never match — the page looked empty as if the orders
+   * had vanished. Rather than silently correcting it afterwards, the incompatible statuses are not
+   * offered while the preset is on.
+   */
+  const selectablePaymentStatuses = payableOnly === 'yes'
+    ? paymentStatusOptions.filter((status) => payablePaymentStatuses.includes(status))
+    : paymentStatusOptions
+
+  const selectPaymentFilter = (value: typeof paymentFilter) => {
+    setPaymentFilter(value)
+  }
+
+  const selectPayableOnly = (value: typeof payableOnly) => {
+    setPayableOnly(value)
+
+    // Turning the preset on can strand an already-selected status that it excludes — and a
+    // hand-edited URL can arrive in that state too.
+    if (value === 'yes' && paymentFilter !== 'all' && !payablePaymentStatuses.includes(paymentFilter)) {
+      setPaymentFilter('all')
+    }
+  }
+  const tabSpecificFilterCount = activeTab === 'orders'
     ? [
         paymentFilter !== 'all',
         orderStatusFilter !== 'all',
         orderTypeFilter !== 'all',
-        payableOnly !== 'yes',
+        payableOnly !== 'no',
       ].filter(Boolean).length
     : activeTab === 'requests'
       ? (refundRequestStatusFilter !== 'Pending' ? 1 : 0)
       : (refundStatusFilter !== 'all' ? 1 : 0)
+  const activeDropdownFilterCount = tabSpecificFilterCount + (dateFrom ? 1 : 0) + (dateTo ? 1 : 0)
 
   const hasActiveFilters =
     search.trim() !== ''
+    || dateFrom !== ''
+    || dateTo !== ''
     || paymentFilter !== 'all'
     || orderStatusFilter !== 'all'
     || orderTypeFilter !== 'all'
     || (isPlatformOwner && restaurantFilter !== 'all')
-    || payableOnly !== 'yes'
+    || payableOnly !== 'no'
     || refundStatusFilter !== 'all'
     || refundRequestStatusFilter !== 'Pending'
 
   const loadOrders = useCallback(async (showToast = false) => {
+    ordersAbortRef.current?.abort()
+    const controller = new AbortController()
+    ordersAbortRef.current = controller
     setLoading(true)
+    setOrdersError(null)
 
     try {
-      const response = await getAdminOrders({
+      const params = {
         page,
         pageSize,
-        search: search.trim() || undefined,
+        search: debouncedSearch.trim() || undefined,
         sortBy: sort.key,
         sortDirection: sort.direction,
         status: orderStatusFilter === 'all' ? undefined : orderStatusFilter,
@@ -274,8 +464,15 @@ export function AdminPaymentsPage() {
         orderType: orderTypeFilter === 'all' ? undefined : orderTypeFilter,
         restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
         payableOnly: payableOnly === 'yes' ? true : undefined,
-      })
+        createdFromUtc: dateBoundaryToUtc(dateFrom),
+        createdToUtc: dateBoundaryToUtc(dateTo, true),
+      }
+      const [response, summary] = await Promise.all([
+        getAdminOrders(params, { signal: controller.signal }),
+        getAdminOrderSummary(params, { signal: controller.signal }),
+      ])
       setOrders(response.items)
+      setOrderSummary(summary)
       setTotalItems(response.totalItems)
       setTotalPages(response.totalPages)
 
@@ -283,78 +480,91 @@ export function AdminPaymentsPage() {
         toast.success('Payments refreshed')
       }
     } catch (error) {
-      toast.error('Could not load payment records', {
-        description: error instanceof Error ? error.message : 'Order loading failed',
-      })
-    } finally {
-      setLoading(false)
-    }
-  }, [isPlatformOwner, orderStatusFilter, orderTypeFilter, page, pageSize, payableOnly, paymentFilter, restaurantFilter, search, sort])
-
-  const loadRefundSummary = useCallback(async (showToast = false) => {
-    setRefundSummaryLoading(true)
-
-    try {
-      const summary = await getAdminRefundSummary({
-        restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
-        search: search.trim() || undefined,
-      })
-      setRefundSummary(summary)
-
-      if (showToast) {
-        toast.success('Refund summary refreshed')
+      if (isAbortError(error)) {
+        return
       }
-    } catch (error) {
-      toast.error('Could not load refund summary', {
-        description: error instanceof Error ? error.message : 'Refund summary loading failed',
+      const message = error instanceof Error ? error.message : 'Order loading failed'
+      setOrdersError(message)
+      toast.error('Could not load payment records', {
+        description: message,
       })
     } finally {
-      setRefundSummaryLoading(false)
+      if (ordersAbortRef.current === controller) {
+        setLoading(false)
+      }
     }
-  }, [isPlatformOwner, restaurantFilter, search])
+  }, [dateFrom, dateTo, debouncedSearch, isPlatformOwner, orderStatusFilter, orderTypeFilter, page, pageSize, payableOnly, paymentFilter, restaurantFilter, sort])
 
-  const loadRefunds = useCallback(async (showToast = false) => {
+  const loadRefundHistory = useCallback(async (showToast = false) => {
+    refundsAbortRef.current?.abort()
+    const controller = new AbortController()
+    refundsAbortRef.current = controller
+    setRefundSummaryLoading(true)
     setRefundsLoading(true)
+    setRefundsError(null)
 
     try {
-      const response = await getAdminRefunds({
-        page: refundPage,
-        pageSize: refundPageSize,
-        search: search.trim() || undefined,
+      const commonParams = {
         restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
+        search: debouncedSearch.trim() || undefined,
         status: refundStatusFilter === 'all' ? undefined : refundStatusFilter,
-        sortBy: 'createdAt',
-        sortDirection: 'desc',
-      })
+        createdFromUtc: dateBoundaryToUtc(dateFrom),
+        createdToUtc: dateBoundaryToUtc(dateTo, true),
+      }
+      const [summary, response] = await Promise.all([
+        getAdminRefundSummary(commonParams, { signal: controller.signal }),
+        getAdminRefunds({
+          ...commonParams,
+          page: refundPage,
+          pageSize: refundPageSize,
+          sortBy: 'createdAt',
+          sortDirection: 'desc',
+        }, { signal: controller.signal }),
+      ])
+      setRefundSummary(summary)
       setRefunds(response.items)
       setRefundTotalItems(response.totalItems)
       setRefundTotalPages(response.totalPages)
 
       if (showToast) {
-        toast.success('Refund records refreshed')
+        toast.success('Refund history refreshed')
       }
     } catch (error) {
+      if (isAbortError(error)) {
+        return
+      }
+      const message = error instanceof Error ? error.message : 'Refund history loading failed'
+      setRefundsError(message)
       toast.error('Could not load refund records', {
-        description: error instanceof Error ? error.message : 'Refund records loading failed',
+        description: message,
       })
     } finally {
-      setRefundsLoading(false)
+      if (refundsAbortRef.current === controller) {
+        setRefundSummaryLoading(false)
+        setRefundsLoading(false)
+      }
     }
-  }, [isPlatformOwner, refundPage, refundPageSize, refundStatusFilter, restaurantFilter, search])
+  }, [dateFrom, dateTo, debouncedSearch, isPlatformOwner, refundPage, refundPageSize, refundStatusFilter, restaurantFilter])
 
   const loadRefundRequests = useCallback(async (showToast = false) => {
+    refundRequestsAbortRef.current?.abort()
+    const controller = new AbortController()
+    refundRequestsAbortRef.current = controller
     setRefundRequestsLoading(true)
+    setRefundRequestsError(null)
 
     try {
       const response = await getAdminRefundRequests({
         page: refundRequestPage,
         pageSize: refundRequestPageSize,
-        search: search.trim() || undefined,
+        search: debouncedSearch.trim() || undefined,
         restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
         status: refundRequestStatusFilter === 'all' ? undefined : refundRequestStatusFilter,
+        createdFromUtc: dateBoundaryToUtc(dateFrom),
+        createdToUtc: dateBoundaryToUtc(dateTo, true),
         sortBy: 'createdAt',
         sortDirection: 'desc',
-      })
+      }, { signal: controller.signal })
       setRefundRequests(response.items)
       setRefundRequestTotalItems(response.totalItems)
       setRefundRequestTotalPages(response.totalPages)
@@ -363,29 +573,110 @@ export function AdminPaymentsPage() {
         toast.success('Refund requests refreshed')
       }
     } catch (error) {
+      if (isAbortError(error)) {
+        return
+      }
+      const message = error instanceof Error ? error.message : 'Refund request loading failed'
+      setRefundRequestsError(message)
       toast.error('Could not load refund requests', {
-        description: error instanceof Error ? error.message : 'Refund request loading failed',
+        description: message,
       })
     } finally {
-      setRefundRequestsLoading(false)
+      if (refundRequestsAbortRef.current === controller) {
+        setRefundRequestsLoading(false)
+      }
     }
-  }, [isPlatformOwner, refundRequestPage, refundRequestPageSize, refundRequestStatusFilter, restaurantFilter, search])
+  }, [dateFrom, dateTo, debouncedSearch, isPlatformOwner, refundRequestPage, refundRequestPageSize, refundRequestStatusFilter, restaurantFilter])
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadOrders())
-  }, [loadOrders])
+    const timeout = window.setTimeout(() => setDebouncedSearch(search), 300)
+    return () => window.clearTimeout(timeout)
+  }, [search])
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadRefundSummary())
-  }, [loadRefundSummary])
+    const next = new URLSearchParams()
+    const activePage = activeTab === 'orders' ? page : activeTab === 'requests' ? refundRequestPage : refundPage
+    const activePageSize = activeTab === 'orders' ? pageSize : activeTab === 'requests' ? refundRequestPageSize : refundPageSize
+
+    if (activeTab !== 'orders') next.set('view', activeTab)
+    if (search.trim()) next.set('q', search.trim())
+    if (dateFrom) next.set('from', dateFrom)
+    if (dateTo) next.set('to', dateTo)
+    if (restaurantFilter !== 'all') next.set('restaurant', restaurantFilter)
+    if (paymentFilter !== 'all') next.set('payment', paymentFilter)
+    if (orderStatusFilter !== 'all') next.set('orderStatus', orderStatusFilter)
+    if (orderTypeFilter !== 'all') next.set('orderType', orderTypeFilter)
+    if (payableOnly !== 'no') next.set('payable', payableOnly)
+    if (refundStatusFilter !== 'all') next.set('refundStatus', refundStatusFilter)
+    if (refundRequestStatusFilter !== 'Pending') next.set('requestStatus', refundRequestStatusFilter)
+    if (activePage > 1) next.set('page', String(activePage))
+    if (activePageSize !== 20) next.set('pageSize', String(activePageSize))
+    if (sort.key !== 'createdAt') next.set('sortBy', sort.key)
+    if (sort.direction !== 'desc') next.set('direction', sort.direction)
+
+    setUrlSearchParams(next, { replace: true })
+  }, [
+    activeTab,
+    dateFrom,
+    dateTo,
+    orderStatusFilter,
+    orderTypeFilter,
+    page,
+    pageSize,
+    payableOnly,
+    paymentFilter,
+    refundPage,
+    refundPageSize,
+    refundRequestPage,
+    refundRequestPageSize,
+    refundRequestStatusFilter,
+    refundStatusFilter,
+    restaurantFilter,
+    search,
+    setUrlSearchParams,
+    sort,
+  ])
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadRefunds())
-  }, [loadRefunds])
+    void getPaymentEnvironment()
+      .then(setPaymentEnvironment)
+      .catch(() => setPaymentEnvironment({
+        provider: 'Stripe',
+        mode: 'Unconfigured',
+        destructiveActionsRequireConfirmation: true,
+      }))
+  }, [])
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadRefundRequests())
-  }, [loadRefundRequests])
+    if (!isPlatformOwner) {
+      return
+    }
+
+    void getRestaurants()
+      .then((restaurants) => {
+        setRestaurantDirectoryError(null)
+        setRestaurantDirectory(restaurants)
+      })
+      .catch((error) => setRestaurantDirectoryError(
+        error instanceof Error ? error.message : 'Restaurant directory loading failed',
+      ))
+  }, [isPlatformOwner])
+
+  useEffect(() => {
+    if (activeTab === 'orders') {
+      void Promise.resolve().then(() => loadOrders())
+    } else if (activeTab === 'requests') {
+      void Promise.resolve().then(() => loadRefundRequests())
+    } else {
+      void Promise.resolve().then(() => loadRefundHistory())
+    }
+
+    return () => {
+      ordersAbortRef.current?.abort()
+      refundsAbortRef.current?.abort()
+      refundRequestsAbortRef.current?.abort()
+    }
+  }, [activeTab, loadOrders, loadRefundHistory, loadRefundRequests])
 
   useEffect(() => {
     const element = tableWrapRef.current
@@ -421,11 +712,13 @@ export function AdminPaymentsPage() {
   const resetFilters = () => {
     setPage(1)
     setSearch('')
+    setDateFrom('')
+    setDateTo('')
     setPaymentFilter('all')
     setOrderStatusFilter('all')
     setOrderTypeFilter('all')
     setRestaurantFilter('all')
-    setPayableOnly('yes')
+    setPayableOnly('no')
     setRefundStatusFilter('all')
     setRefundRequestStatusFilter('Pending')
     setRefundPage(1)
@@ -435,6 +728,121 @@ export function AdminPaymentsPage() {
       direction: 'desc',
     })
     setExpandedOrderId(null)
+  }
+
+  const exportCurrentView = async () => {
+    setExporting(true)
+    const createdFromUtc = dateBoundaryToUtc(dateFrom)
+    const createdToUtc = dateBoundaryToUtc(dateTo, true)
+    const restaurantId = isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined
+    const exportDate = new Date().toISOString().slice(0, 10)
+
+    try {
+      if (activeTab === 'orders') {
+        const rows = await fetchExportRows((exportPage) => getAdminOrders({
+          page: exportPage,
+          pageSize: 100,
+          search: debouncedSearch.trim() || undefined,
+          sortBy: sort.key,
+          sortDirection: sort.direction,
+          status: orderStatusFilter === 'all' ? undefined : orderStatusFilter,
+          paymentStatus: paymentFilter === 'all' ? undefined : paymentFilter,
+          orderType: orderTypeFilter === 'all' ? undefined : orderTypeFilter,
+          restaurantId,
+          payableOnly: payableOnly === 'yes' ? true : undefined,
+          createdFromUtc,
+          createdToUtc,
+        }))
+        downloadCsv(
+          `dineflow-payment-orders-${exportDate}.csv`,
+          ['Order', 'Restaurant', 'Customer', 'Order status', 'Payment status', 'Method', 'Amount', 'Currency', 'Created', 'Payment intent', 'Checkout session'],
+          rows.map((order) => [
+            order.orderNumber,
+            order.restaurantName,
+            order.customerName || order.customerEmail,
+            order.status,
+            order.paymentStatus,
+            order.paymentMethod,
+            order.totalAmount,
+            order.currency,
+            order.createdAt,
+            order.latestPayment?.providerPaymentIntentId,
+            order.latestPayment?.providerCheckoutSessionId,
+          ]),
+        )
+      } else if (activeTab === 'requests') {
+        const rows = await fetchExportRows((exportPage) => getAdminRefundRequests({
+          page: exportPage,
+          pageSize: 100,
+          search: debouncedSearch.trim() || undefined,
+          restaurantId,
+          status: refundRequestStatusFilter === 'all' ? undefined : refundRequestStatusFilter,
+          sortBy: 'createdAt',
+          sortDirection: 'desc',
+          createdFromUtc,
+          createdToUtc,
+        }))
+        downloadCsv(
+          `dineflow-refund-requests-${exportDate}.csv`,
+          ['Request', 'Order', 'Restaurant', 'Customer', 'Status', 'Requested amount', 'Original payment', 'Already refunded', 'Refundable balance', 'Currency', 'Reason', 'Admin note', 'Created', 'Reviewed', 'Payment intent'],
+          rows.map((request) => [
+            request.id,
+            request.orderNumber,
+            request.restaurantName,
+            request.customerName || request.customerEmail,
+            request.status,
+            request.requestedAmountCents / 100,
+            request.originalPaymentAmountCents / 100,
+            request.alreadyRefundedAmountCents / 100,
+            request.refundableAmountCents / 100,
+            request.currency,
+            request.reason,
+            request.adminNote,
+            request.createdAt,
+            request.reviewedAt,
+            request.providerPaymentIntentId,
+          ]),
+        )
+      } else {
+        const rows = await fetchExportRows((exportPage) => getAdminRefunds({
+          page: exportPage,
+          pageSize: 100,
+          search: debouncedSearch.trim() || undefined,
+          restaurantId,
+          status: refundStatusFilter === 'all' ? undefined : refundStatusFilter,
+          sortBy: 'createdAt',
+          sortDirection: 'desc',
+          createdFromUtc,
+          createdToUtc,
+        }))
+        downloadCsv(
+          `dineflow-refund-history-${exportDate}.csv`,
+          ['Refund', 'Payment intent', 'Order', 'Restaurant', 'Customer', 'Status', 'Amount', 'Currency', 'Reason', 'Failure reason', 'Created', 'Updated'],
+          rows.map((refund) => [
+            refund.providerRefundId || refund.id,
+            refund.providerPaymentIntentId,
+            refund.orderNumber,
+            refund.restaurantName,
+            refund.customerName || refund.customerEmail,
+            refund.status,
+            refund.amountCents / 100,
+            refund.currency,
+            refund.reason,
+            refund.failureReason,
+            refund.createdAt,
+            refund.refundedAt || refund.failedAt || refund.updatedAt,
+          ]),
+        )
+      }
+
+      toast.success('CSV export created')
+    } catch (error) {
+      toast.error('Could not export payment data', {
+        description: error instanceof Error ? error.message : 'CSV export failed',
+      })
+    } finally {
+      setExporting(false)
+    }
   }
 
   const handleCheckout = async (order: AdminOrder) => {
@@ -471,8 +879,7 @@ export function AdminPaymentsPage() {
         reason: refundReason.trim() || undefined,
       })
       setOrders((current) => current.map((item) => item.id === updatedOrder.id ? updatedOrder : item))
-      await loadRefundSummary()
-      await loadRefunds()
+      await loadOrders()
       toast.success('Refund created', {
         description: `${pendingRefundOrder.orderNumber} is now ${updatedOrder.paymentStatus}.`,
       })
@@ -491,14 +898,16 @@ export function AdminPaymentsPage() {
     setReviewingRefundRequestId(refundRequest.id)
 
     try {
-      await approveAdminRefundRequest(refundRequest.id)
-      await loadRefundRequests()
-      await loadRefundSummary()
-      await loadRefunds()
-      await loadOrders()
+      await approveAdminRefundRequest(refundRequest.id, {
+        note: refundApprovalNote.trim() || undefined,
+      })
+      await Promise.all([loadRefundRequests(), loadOrders()])
       toast.success('Refund request approved', {
         description: `${refundRequest.orderNumber} has been sent to Stripe for refund.`,
       })
+      setApprovingRefundRequest(null)
+      setRefundApprovalNote('')
+      setRefundApprovalConfirmation('')
     } catch (error) {
       toast.error('Could not approve refund request', {
         description: error instanceof Error ? error.message : 'Refund approval failed.',
@@ -675,7 +1084,11 @@ export function AdminPaymentsPage() {
         <Button
           type="button"
           size="sm"
-          onClick={() => void approveRefundRequest(refundRequest)}
+          onClick={() => {
+            setRefundApprovalNote('')
+            setRefundApprovalConfirmation('')
+            setApprovingRefundRequest(refundRequest)
+          }}
           disabled={reviewingRefundRequestId !== null}
         >
           {isReviewing ? <RefreshCw className="animate-spin" /> : <CheckCircle2 />}
@@ -706,26 +1119,55 @@ export function AdminPaymentsPage() {
             <div className="admin-page-title">
               <CreditCard size={22} />
               <div>
-                <CardTitle>Payments</CardTitle>
+                <div className="payment-title-line">
+                  <h1 className="admin-payment-page-heading">Payments</h1>
+                  <Badge
+                    variant={paymentEnvironment?.mode === 'Live' ? 'destructive' : 'outline'}
+                    className={paymentEnvironment?.mode === 'Test' ? 'payment-environment-test' : undefined}
+                  >
+                    Stripe {paymentEnvironment?.mode ?? 'Checking'}
+                  </Badge>
+                </div>
                 <CardDescription>
                   Review real order payment state and open Stripe Checkout only for eligible orders.
                 </CardDescription>
               </div>
             </div>
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => {
-                void loadOrders(true)
-                void loadRefundSummary(true)
-                void loadRefunds(true)
-                void loadRefundRequests(true)
-              }}
-              disabled={loading || refundRequestsLoading || submittingOrderId !== null || refundingOrderId !== null || reviewingRefundRequestId !== null}
-            >
-              <RefreshCw size={18} />
-              {loading ? 'Refreshing' : 'Refresh'}
-            </Button>
+            <div className="payment-header-actions">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void exportCurrentView()}
+                disabled={exporting || (activeTab === 'orders' ? loading : activeTab === 'requests' ? refundRequestsLoading : refundsLoading)}
+              >
+                <Download size={17} />
+                {exporting ? 'Exporting' : 'Export CSV'}
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => {
+                  if (activeTab === 'orders') {
+                    void loadOrders(true)
+                  } else if (activeTab === 'requests') {
+                    void loadRefundRequests(true)
+                  } else {
+                    void loadRefundHistory(true)
+                  }
+                }}
+                disabled={
+                  (activeTab === 'orders' ? loading : activeTab === 'requests' ? refundRequestsLoading : refundsLoading)
+                  || submittingOrderId !== null
+                  || refundingOrderId !== null
+                  || reviewingRefundRequestId !== null
+                }
+              >
+                <RefreshCw size={18} />
+                {(activeTab === 'orders' ? loading : activeTab === 'requests' ? refundRequestsLoading : refundsLoading)
+                  ? 'Refreshing'
+                  : 'Refresh'}
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="directory-stack">
@@ -753,7 +1195,7 @@ export function AdminPaymentsPage() {
                     Payment summary
                   </span>
                   <span className="admin-payments-summary-meta">
-                    {totalItems} visible / {totals.payable} ready
+                    {orderSummary.total} visible / {orderSummary.payable} ready
                   </span>
                   {paymentSummaryExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                 </button>
@@ -762,19 +1204,19 @@ export function AdminPaymentsPage() {
                   <div className="placeholder-grid order-summary-grid admin-payments-summary-grid">
                     <div className="placeholder-item">
                       <strong>Visible orders</strong>
-                      <span>{totalItems}</span>
+                      <span>{orderSummary.total}</span>
                     </div>
                     <div className="placeholder-item">
-                      <strong>Ready to pay this page</strong>
-                      <span>{totals.payable}</span>
+                      <strong>Ready to pay</strong>
+                      <span>{orderSummary.payable}</span>
                     </div>
                     <div className="placeholder-item">
-                      <strong>Paid this page</strong>
-                      <span>{totals.paid}</span>
+                      <strong>Paid</strong>
+                      <span>{orderSummary.paid}</span>
                     </div>
                     <div className="placeholder-item">
-                      <strong>Failed this page</strong>
-                      <span>{totals.failedPayment}</span>
+                      <strong>Failed</strong>
+                      <span>{orderSummary.failedPayment}</span>
                     </div>
                   </div>
                 )}
@@ -793,7 +1235,7 @@ export function AdminPaymentsPage() {
                     setRestaurantFilter(value)
                   }}
                 >
-                  <SelectTrigger className="filter-select">
+                  <SelectTrigger className="filter-select" aria-label="Filter by restaurant">
                     <SelectValue placeholder="All restaurants" />
                   </SelectTrigger>
                   <SelectContent position="popper">
@@ -805,6 +1247,9 @@ export function AdminPaymentsPage() {
                     ))}
                   </SelectContent>
                 </Select>
+                {restaurantDirectoryError && (
+                  <p className="payment-filter-error" role="alert">{restaurantDirectoryError}</p>
+                )}
               </div>
             )}
 
@@ -846,11 +1291,13 @@ export function AdminPaymentsPage() {
                         <>
                           <div className="restaurant-filter-field">
                             <span>Payment</span>
-                            <Select value={paymentFilter} onValueChange={(value) => { setPage(1); setPaymentFilter(value) }}>
+                            <Select value={paymentFilter} onValueChange={(value) => { setPage(1); selectPaymentFilter(value as typeof paymentFilter) }}>
                               <SelectTrigger className="filter-select"><SelectValue placeholder="All payment status" /></SelectTrigger>
                               <SelectContent position="popper">
                                 <SelectItem value="all">All payment status</SelectItem>
-                                {paymentStatusOptions.map((status) => (
+                                {/* Offering Paid here while "Payable only" is on would build a
+                                    contradictory query that can never match. */}
+                                {selectablePaymentStatuses.map((status) => (
                                   <SelectItem key={status} value={status}>{getPaymentStatusLabel(status)}</SelectItem>
                                 ))}
                               </SelectContent>
@@ -858,7 +1305,7 @@ export function AdminPaymentsPage() {
                           </div>
                           <div className="restaurant-filter-field">
                             <span>Order status</span>
-                            <Select value={orderStatusFilter} onValueChange={(value) => { setPage(1); setOrderStatusFilter(value) }}>
+                            <Select value={orderStatusFilter} onValueChange={(value) => { setPage(1); setOrderStatusFilter(value as typeof orderStatusFilter) }}>
                               <SelectTrigger className="filter-select"><SelectValue placeholder="All order status" /></SelectTrigger>
                               <SelectContent position="popper">
                                 <SelectItem value="all">All order status</SelectItem>
@@ -882,7 +1329,7 @@ export function AdminPaymentsPage() {
                           </div>
                           <div className="restaurant-filter-field">
                             <span>Payable</span>
-                            <Select value={payableOnly} onValueChange={(value) => { setPage(1); setPayableOnly(value) }}>
+                            <Select value={payableOnly} onValueChange={(value) => { setPage(1); selectPayableOnly(value as typeof payableOnly) }}>
                               <SelectTrigger className="filter-select"><SelectValue placeholder="Payable only" /></SelectTrigger>
                               <SelectContent position="popper">
                                 <SelectItem value="yes">Payable only</SelectItem>
@@ -920,6 +1367,34 @@ export function AdminPaymentsPage() {
                           </Select>
                         </div>
                       )}
+                      <label className="restaurant-filter-field">
+                        <span>Created from</span>
+                        <Input
+                          type="date"
+                          value={dateFrom}
+                          max={dateTo || undefined}
+                          onChange={(event) => {
+                            setPage(1)
+                            setRefundPage(1)
+                            setRefundRequestPage(1)
+                            setDateFrom(event.target.value)
+                          }}
+                        />
+                      </label>
+                      <label className="restaurant-filter-field">
+                        <span>Created through</span>
+                        <Input
+                          type="date"
+                          value={dateTo}
+                          min={dateFrom || undefined}
+                          onChange={(event) => {
+                            setPage(1)
+                            setRefundPage(1)
+                            setRefundRequestPage(1)
+                            setDateTo(event.target.value)
+                          }}
+                        />
+                      </label>
                     </div>
                   </PopoverContent>
                 </Popover>
@@ -931,6 +1406,18 @@ export function AdminPaymentsPage() {
                 {search.trim() && (
                   <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setRefundPage(1); setRefundRequestPage(1); setSearch('') }} title={`Search: ${search.trim()}`}>
                     <span>Search: {search.trim()}</span>
+                    <X size={13} />
+                  </button>
+                )}
+                {dateFrom && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => setDateFrom('')} title={`Created from: ${dateFrom}`}>
+                    <span>From: {dateFrom}</span>
+                    <X size={13} />
+                  </button>
+                )}
+                {dateTo && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => setDateTo('')} title={`Created through: ${dateTo}`}>
+                    <span>Through: {dateTo}</span>
                     <X size={13} />
                   </button>
                 )}
@@ -959,7 +1446,7 @@ export function AdminPaymentsPage() {
                   </button>
                 )}
                 {payableOnly !== 'yes' && (
-                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setPayableOnly('yes') }} title={`Payable: ${selectedPayableFilterLabel}`}>
+                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); selectPayableOnly('no') }} title={`Payable: ${selectedPayableFilterLabel}`}>
                     <span>Payable: {selectedPayableFilterLabel}</span>
                     <X size={13} />
                   </button>
@@ -985,9 +1472,18 @@ export function AdminPaymentsPage() {
           </div>
 
             <TabsContent value="orders" className="payment-tab-content admin-payment-orders-tab">
+              {ordersError && (
+                <div className="payment-load-error" role="alert">
+                  <span>Payment orders could not be loaded: {ordersError}</span>
+                  <Button type="button" variant="outline" size="sm" onClick={() => void loadOrders()}>
+                    Retry
+                  </Button>
+                </div>
+              )}
               <div className="admin-payments-table-wrap">
                 <HorizontalTableScroll ref={tableWrapRef} topScrollLabel="Scroll payment orders table horizontally">
                   <table className="data-table payment-orders-table admin-payments-table">
+              <caption className="sr-only">Filtered payment orders and available payment actions</caption>
               <colgroup>
                 <col className="payment-col-order" />
                 <col className="payment-col-restaurant" />
@@ -1292,9 +1788,19 @@ export function AdminPaymentsPage() {
                   </div>
                 </div>
 
+                {refundRequestsError && (
+                  <div className="payment-load-error" role="alert">
+                    <span>Refund requests could not be loaded: {refundRequestsError}</span>
+                    <Button type="button" variant="outline" size="sm" onClick={() => void loadRefundRequests()}>
+                      Retry
+                    </Button>
+                  </div>
+                )}
+
                 <div className="refund-requests-table-wrap">
                   <HorizontalTableScroll topScrollLabel="Scroll refund requests table horizontally">
                     <table className="data-table payment-orders-table refund-records-table refund-requests-table">
+                <caption className="sr-only">Customer refund requests awaiting or showing an admin review decision</caption>
                 <thead>
                   <tr>
                     <th>Request</th>
@@ -1314,11 +1820,9 @@ export function AdminPaymentsPage() {
                         <td>
                           <span className="table-name">
                             <Undo2 size={16} />
-                            {refundRequest.id}
+                            <CompactIdentifier value={refundRequest.id} fallback="No request id" label="refund request id" />
                           </span>
-                          <span className="table-subtext">
-                            {refundRequest.paymentRefundId ? `Refund ${refundRequest.paymentRefundId}` : 'No refund transaction yet'}
-                          </span>
+                          <CompactIdentifier value={refundRequest.paymentRefundId} fallback="No refund transaction yet" label="refund id" />
                         </td>
                         <td>
                           <strong>{refundRequest.orderNumber || 'Unknown order'}</strong>
@@ -1342,7 +1846,9 @@ export function AdminPaymentsPage() {
                           <strong>{formatMoney(refundRequest.requestedAmountCents / 100, refundRequest.currency)}</strong>
                         </td>
                         <td>
-                          <strong>{refundRequest.reason || 'No customer reason'}</strong>
+                          <strong className="payment-untrusted-text" title={refundRequest.reason || undefined}>
+                            {refundRequest.reason || 'No customer reason'}
+                          </strong>
                           {refundRequest.adminNote && <span className="table-subtext">{refundRequest.adminNote}</span>}
                         </td>
                         <td>
@@ -1415,7 +1921,7 @@ export function AdminPaymentsPage() {
                             <ReceiptText size={15} />
                             <div>
                               <span>Reason</span>
-                              <strong title={refundRequest.reason || undefined}>{refundRequest.reason || 'No customer reason'}</strong>
+                              <strong className="payment-untrusted-text" title={refundRequest.reason || undefined}>{refundRequest.reason || 'No customer reason'}</strong>
                               {refundRequest.adminNote && <small title={refundRequest.adminNote}>{refundRequest.adminNote}</small>}
                             </div>
                           </div>
@@ -1520,9 +2026,19 @@ export function AdminPaymentsPage() {
                   )}
                 </section>
 
+                {refundsError && (
+                  <div className="payment-load-error" role="alert">
+                    <span>Refund history could not be loaded: {refundsError}</span>
+                    <Button type="button" variant="outline" size="sm" onClick={() => void loadRefundHistory()}>
+                      Retry
+                    </Button>
+                  </div>
+                )}
+
                 <div className="refund-records-table-wrap">
                   <HorizontalTableScroll topScrollLabel="Scroll refund records table horizontally">
                     <table className="data-table payment-orders-table refund-records-table">
+                <caption className="sr-only">Stripe refund transaction history</caption>
                 <thead>
                   <tr>
                     <th>Refund</th>
@@ -1540,9 +2056,9 @@ export function AdminPaymentsPage() {
                       <td>
                         <span className="table-name">
                           <Undo2 size={16} />
-                          {refund.providerRefundId || refund.id}
+                          <CompactIdentifier value={refund.providerRefundId || refund.id} fallback="No refund id" label="refund id" />
                         </span>
-                        <span className="table-subtext">{refund.providerPaymentIntentId || 'No payment intent'}</span>
+                        <CompactIdentifier value={refund.providerPaymentIntentId} fallback="No payment intent" label="payment intent id" />
                       </td>
                       <td>
                         <strong>{refund.orderNumber || 'Unknown order'}</strong>
@@ -1550,7 +2066,7 @@ export function AdminPaymentsPage() {
                       </td>
                       <td>
                         <strong>{refund.restaurantName || 'Unknown restaurant'}</strong>
-                        <span className="table-subtext">{refund.restaurantId || 'No restaurant id'}</span>
+                        <span className="table-subtext">{refund.customerEmail || 'No customer email'}</span>
                       </td>
                       <td>
                         <Badge
@@ -1564,7 +2080,7 @@ export function AdminPaymentsPage() {
                         <strong>{formatMoney(refund.amountCents / 100, refund.currency)}</strong>
                       </td>
                       <td>
-                        <strong>{refund.reason || 'No reason recorded'}</strong>
+                        <strong className="payment-untrusted-text" title={refund.reason || undefined}>{refund.reason || 'No reason recorded'}</strong>
                         {refund.failureReason && <span className="table-subtext text-destructive">{refund.failureReason}</span>}
                       </td>
                       <td>
@@ -1640,7 +2156,7 @@ export function AdminPaymentsPage() {
                             <CreditCard size={15} />
                             <div>
                               <span>Reason</span>
-                              <strong title={refund.reason || undefined}>{refund.reason || 'No reason recorded'}</strong>
+                              <strong className="payment-untrusted-text" title={refund.reason || undefined}>{refund.reason || 'No reason recorded'}</strong>
                               {refund.failureReason && <small className="text-destructive" title={refund.failureReason}>{refund.failureReason}</small>}
                             </div>
                           </div>
@@ -1691,6 +2207,28 @@ export function AdminPaymentsPage() {
           </Tabs>
         </CardContent>
       </Card>
+
+      <ApproveRefundRequestDialog
+        request={approvingRefundRequest}
+        environmentMode={paymentEnvironment?.mode ?? null}
+        note={refundApprovalNote}
+        confirmation={refundApprovalConfirmation}
+        submitting={reviewingRefundRequestId !== null}
+        onNoteChange={setRefundApprovalNote}
+        onConfirmationChange={setRefundApprovalConfirmation}
+        onOpenChange={(open) => {
+          if (!open && reviewingRefundRequestId === null) {
+            setApprovingRefundRequest(null)
+            setRefundApprovalNote('')
+            setRefundApprovalConfirmation('')
+          }
+        }}
+        onConfirm={() => {
+          if (approvingRefundRequest) {
+            void approveRefundRequest(approvingRefundRequest)
+          }
+        }}
+      />
 
       <Dialog
         open={rejectingRefundRequest !== null}

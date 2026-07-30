@@ -42,7 +42,10 @@ export function createOrderRealtimeClient(handlers: OrderRealtimeHandlers): Orde
       accessTokenFactory: () => getStoredToken() ?? '',
     })
     .withAutomaticReconnect([0, 2_000, 5_000, 10_000, 30_000])
-    .configureLogging(import.meta.env.DEV ? LogLevel.Information : LogLevel.Warning)
+    // Information-level SignalR logs include the WebSocket URL. For authenticated
+    // hubs that URL contains the access token, so keep browser logs at Warning in
+    // every environment.
+    .configureLogging(LogLevel.Warning)
     .build()
 
   connection.on('OrderCreated', (update: OrderRealtimeUpdate) =>

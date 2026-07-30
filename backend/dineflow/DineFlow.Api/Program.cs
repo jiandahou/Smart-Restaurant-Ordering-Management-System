@@ -71,8 +71,12 @@ builder.Services.AddScoped<CartAccessService>();
 builder.Services.AddScoped<CartRealtimeNotifier>();
 builder.Services.AddScoped<OrderRealtimeNotifier>();
 builder.Services.AddScoped<OrderPickupNumberService>();
+builder.Services.AddScoped<MenuItemStockService>();
+builder.Services.AddScoped<OrderAutoAcceptanceService>();
 builder.Services.AddScoped<OrderRefundProcessor>();
+builder.Services.AddScoped<StripeOrderCheckoutService>();
 builder.Services.AddScoped<ReportLogWriter>();
+builder.Services.AddScoped<AdminActivityReportService>();
 builder.Services.AddScoped<TableSessionService>();
 builder.Services.AddSingleton<RestaurantOperatingHoursService>();
 builder.Services.AddSingleton<IOAuthLoginCodeStore, MemoryOAuthLoginCodeStore>();
@@ -110,6 +114,9 @@ builder.Services.Configure<StripeOptions>(options =>
     options.SecretKey = FirstConfigured(builder.Configuration["STRIPE_SECRET_KEY"], options.SecretKey) ?? string.Empty;
     options.PublishableKey = FirstConfigured(builder.Configuration["STRIPE_PUBLISHABLE_KEY"], options.PublishableKey) ?? string.Empty;
     options.WebhookSecret = FirstConfigured(builder.Configuration["STRIPE_WEBHOOK_SECRET"], options.WebhookSecret) ?? string.Empty;
+    options.ConnectWebhookSecret = FirstConfigured(
+        builder.Configuration["STRIPE_CONNECT_WEBHOOK_SECRET"],
+        options.ConnectWebhookSecret) ?? string.Empty;
     options.Currency = FirstConfigured(builder.Configuration["STRIPE_CURRENCY"], options.Currency, "aud") ?? "aud";
     options.SuccessUrl = FirstConfigured(
         builder.Configuration["STRIPE_SUCCESS_URL"],
@@ -119,6 +126,22 @@ builder.Services.Configure<StripeOptions>(options =>
         builder.Configuration["STRIPE_CANCEL_URL"],
         options.CancelUrl,
         $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/payment/cancelled") ?? string.Empty;
+    options.ConnectReturnUrl = FirstConfigured(
+        builder.Configuration["STRIPE_CONNECT_RETURN_URL"],
+        options.ConnectReturnUrl,
+        $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/admin/restaurants?stripeConnect=return") ?? string.Empty;
+    options.ConnectRefreshUrl = FirstConfigured(
+        builder.Configuration["STRIPE_CONNECT_REFRESH_URL"],
+        options.ConnectRefreshUrl,
+        $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/admin/restaurants?stripeConnect=refresh") ?? string.Empty;
+    options.PlatformFeeSuccessUrl = FirstConfigured(
+        builder.Configuration["STRIPE_PLATFORM_FEE_SUCCESS_URL"],
+        options.PlatformFeeSuccessUrl,
+        $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/admin/restaurants?platformFee=success") ?? string.Empty;
+    options.PlatformFeeCancelUrl = FirstConfigured(
+        builder.Configuration["STRIPE_PLATFORM_FEE_CANCEL_URL"],
+        options.PlatformFeeCancelUrl,
+        $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/admin/restaurants?platformFee=cancelled") ?? string.Empty;
 });
 builder.Services.Configure<AvatarStorageOptions>(
     builder.Configuration.GetSection(AvatarStorageOptions.SectionName));

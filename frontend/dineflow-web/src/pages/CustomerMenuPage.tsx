@@ -9,7 +9,9 @@ import {
   ChevronDown,
   ChevronUp,
   Clock3,
+  Flame,
   LayoutDashboard,
+  Leaf,
   Loader2,
   LogIn,
   LogOut,
@@ -20,7 +22,9 @@ import {
   Plus,
   RefreshCw,
   Search,
+  ShieldAlert,
   ShoppingBag,
+  Sparkles,
   Store,
   Trash2,
   Utensils,
@@ -82,6 +86,7 @@ import {
 } from '@/components/ui/dialog'
 import {
   Drawer,
+  DrawerClose,
   DrawerContent,
   DrawerDescription,
   DrawerHeader,
@@ -151,6 +156,19 @@ const cartActivityBannerLaneCount = 4
 const cartSessionPrefix = 'dineflow.customer-cart'
 const itemNoteMaxLength = 180
 const orderNoteMaxLength = 4_000
+
+type MenuFilter = 'available' | 'popular' | 'recommended' | 'vegetarian' | 'vegan' | 'glutenFree' | 'halal' | 'spicy'
+
+const menuFilters: Array<{ id: MenuFilter; label: string }> = [
+  { id: 'available', label: 'Available now' },
+  { id: 'popular', label: 'Popular' },
+  { id: 'recommended', label: 'Recommended' },
+  { id: 'vegetarian', label: 'Vegetarian' },
+  { id: 'vegan', label: 'Vegan' },
+  { id: 'glutenFree', label: 'Gluten-free' },
+  { id: 'halal', label: 'Halal' },
+  { id: 'spicy', label: 'Spicy' },
+]
 
 type NotePresetGroup = {
   label: string
@@ -399,6 +417,7 @@ export function CustomerMenuPage() {
   const [state, setState] = useState<CustomerMenuState>({ status: 'loading' })
   const [retryKey, setRetryKey] = useState(0)
   const [search, setSearch] = useState('')
+  const [activeFilters, setActiveFilters] = useState<MenuFilter[]>([])
   const [activeCategoryId, setActiveCategoryId] = useState<string | 'all'>('all')
   const [addingItemId, setAddingItemId] = useState<string | null>(null)
   const [cartOpen, setCartOpen] = useState(false)
@@ -407,6 +426,7 @@ export function CustomerMenuPage() {
   const [savingCartNote, setSavingCartNote] = useState(false)
   const [checkingOut, setCheckingOut] = useState(false)
   const [selectingOrderType, setSelectingOrderType] = useState(false)
+  const [pendingOrderType, setPendingOrderType] = useState<'DineIn' | 'Takeaway' | null>(null)
   const [selectedItem, setSelectedItem] = useState<PublicMenuItem | null>(null)
   const [selectedItemQuantity, setSelectedItemQuantity] = useState(1)
   const [selectedItemNote, setSelectedItemNote] = useState('')
@@ -680,21 +700,27 @@ export function CustomerMenuPage() {
       .map((category) => ({
         ...category,
         items: category.items.filter((item) => {
-          if (!normalizedSearch) {
-            return true
+          if (!matchesMenuFilters(item, activeFilters)) {
+            return false
           }
 
           const optionText = getAvailableOptionGroups(item)
             .flatMap((group) => [group.name, ...group.options.map((option) => option.name)])
 
-          return [item.name, item.description ?? '', ...optionText]
+          return !normalizedSearch || [
+            item.name,
+            item.description ?? '',
+            item.allergens ?? '',
+            ...getMenuItemTagLabels(item),
+            ...optionText,
+          ]
             .join(' ')
             .toLowerCase()
             .includes(normalizedSearch)
         }),
       }))
       .filter((category) => category.items.length > 0)
-  }, [search, state])
+  }, [activeFilters, search, state])
 
   useEffect(() => {
     if (state.status !== 'ready' || visibleCategories.length === 0) {
@@ -794,6 +820,19 @@ export function CustomerMenuPage() {
     } finally {
       setSelectingOrderType(false)
     }
+  }
+
+  const requestOrderTypeSwitch = (orderType: 'DineIn' | 'Takeaway') => {
+    if (state.status !== 'ready' || state.cart.orderType === orderType) {
+      return
+    }
+
+    if (state.cart.items.length > 0) {
+      setPendingOrderType(orderType)
+      return
+    }
+
+    void switchOrderType(orderType)
   }
 
   if (state.status === 'loading') {
@@ -1151,6 +1190,7 @@ export function CustomerMenuPage() {
           restaurantName: context.restaurant.name,
           tableNumber: context.table?.tableNumber ?? null,
           paymentPolicy: context.restaurant.paymentPolicy,
+          onlinePaymentsEnabled: context.restaurant.onlinePaymentsEnabled,
           returnPath,
         } satisfies CheckoutNavigationState,
       })
@@ -1161,10 +1201,10 @@ export function CustomerMenuPage() {
   }
 
   return (
-    <main className="min-h-svh bg-background pb-28 text-foreground">
+    <main className={cn('min-h-svh bg-background text-foreground', cart.items.length > 0 ? 'pb-28' : 'pb-8')}>
       <section className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-3 py-4 sm:px-6 lg:px-8">
         <header className="overflow-hidden rounded-[2rem] border bg-card shadow-sm">
-          <div className="relative min-h-[230px] overflow-hidden bg-muted sm:min-h-[280px]">
+          <div className="relative min-h-[190px] overflow-hidden bg-muted sm:min-h-[280px]">
             {restaurantImageUrl ? (
               <img
                 src={restaurantImageUrl}
@@ -1191,7 +1231,7 @@ export function CustomerMenuPage() {
                   disabled={selectingOrderType}
                   onValueChange={(value) => {
                     if (value === 'DineIn' || value === 'Takeaway') {
-                      void switchOrderType(value)
+                      requestOrderTypeSwitch(value)
                     }
                   }}
                 >
@@ -1293,6 +1333,43 @@ export function CustomerMenuPage() {
                   <span>{totalMenuItemCount} total</span>
                 </div>
               </div>
+              <div className="mt-2 flex gap-2 overflow-x-auto pb-0.5" aria-label="Menu filters">
+                {menuFilters.map((filter) => {
+                  const active = activeFilters.includes(filter.id)
+
+                  return (
+                    <Button
+                      key={filter.id}
+                      type="button"
+                      size="sm"
+                      variant={active ? 'default' : 'outline'}
+                      aria-pressed={active}
+                      className="h-8 shrink-0 rounded-full px-3 text-xs"
+                      onClick={() => {
+                        setActiveFilters((current) =>
+                          current.includes(filter.id)
+                            ? current.filter((entry) => entry !== filter.id)
+                            : [...current, filter.id],
+                        )
+                        setActiveCategoryId('all')
+                      }}
+                    >
+                      {filter.label}
+                    </Button>
+                  )
+                })}
+                {activeFilters.length > 0 ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 shrink-0 rounded-full px-3 text-xs"
+                    onClick={() => setActiveFilters([])}
+                  >
+                    Clear
+                  </Button>
+                ) : null}
+              </div>
             </div>
 
             {!hasMenu ? (
@@ -1300,6 +1377,7 @@ export function CustomerMenuPage() {
             ) : visibleCategories.length === 0 ? (
               <NoResultsState onReset={() => {
                 setSearch('')
+                setActiveFilters([])
                 setActiveCategoryId('all')
               }} />
             ) : (
@@ -1352,6 +1430,37 @@ export function CustomerMenuPage() {
         onOptionQuantityChange={changeSelectedOptionQuantity}
         onAddToCart={addSelectedItem}
       />
+
+      <AlertDialog
+        open={pendingOrderType !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingOrderType(null)
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Switch to {pendingOrderType === 'DineIn' ? 'dine in' : 'takeaway'}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Your current {cart.orderType === 'DineIn' ? 'dine-in' : 'takeaway'} cart will be kept
+              separately. Switching opens the other cart and does not move these items.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep current cart</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const nextOrderType = pendingOrderType
+                setPendingOrderType(null)
+                if (nextOrderType) void switchOrderType(nextOrderType)
+              }}
+            >
+              Switch cart
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {cartActivityBanners.some(Boolean) && (
         <div className="cart-activity-banner-lanes" aria-live="polite">
@@ -1949,24 +2058,23 @@ function MenuCategorySection({
           const unavailableLabel = getMenuItemUnavailableLabel(item)
 
           return (
-            <Card
+            <article
               key={item.id}
-              role="button"
-              tabIndex={0}
+              aria-labelledby={`menu-item-${item.id}`}
+            >
+              <Card
               className={cn(
-                'overflow-hidden rounded-2xl py-0 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/25 hover:bg-muted/20 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                'overflow-hidden rounded-2xl border bg-card py-0 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/25 hover:bg-muted/20 hover:shadow-md',
                 disabled && 'bg-muted/35 text-muted-foreground hover:translate-y-0 hover:border-border hover:shadow-sm',
               )}
-              onClick={() => onOpenItem(item)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault()
-                  onOpenItem(item)
-                }
-              }}
             >
               <CardContent className="grid gap-3 p-2.5 sm:p-3 lg:grid-cols-[116px_minmax(0,1fr)]">
-                <div className="relative aspect-[4/3] overflow-hidden rounded-xl border bg-muted lg:aspect-square">
+                <button
+                  type="button"
+                  aria-label={`View details for ${item.name}`}
+                  className="relative aspect-[4/3] overflow-hidden rounded-xl border bg-muted text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:aspect-square"
+                  onClick={() => onOpenItem(item)}
+                >
                   {imageUrl ? (
                     <img
                       src={imageUrl}
@@ -1984,13 +2092,19 @@ function MenuCategorySection({
                   {item.isSoldOut ? (
                     <SoldOutImageBadge compact className="absolute bottom-2 left-2 max-w-[calc(100%-1rem)]" />
                   ) : null}
-                </div>
+                </button>
 
                 <div className="flex min-w-0 flex-col gap-3 lg:min-h-[116px]">
                   <div className="min-w-0 flex-1 space-y-1.5">
                     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
-                      <h3 className="min-w-0 text-base font-semibold leading-snug">
-                        <span className="line-clamp-2 break-words">{item.name}</span>
+                      <h3 id={`menu-item-${item.id}`} className="min-w-0 text-base font-semibold leading-snug">
+                        <button
+                          type="button"
+                          className="line-clamp-2 break-words text-left hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          onClick={() => onOpenItem(item)}
+                        >
+                          {item.name}
+                        </button>
                       </h3>
                       <PriceText
                         value={item.price}
@@ -2004,6 +2118,7 @@ function MenuCategorySection({
                         {item.description}
                       </p>
                     ) : null}
+                    <MenuItemTags item={item} compact />
                   </div>
 
                   <div className="flex justify-end">
@@ -2013,10 +2128,7 @@ function MenuCategorySection({
                       variant={disabled ? 'secondary' : 'default'}
                       disabled={disabled}
                       className="h-9 min-w-20 rounded-full px-3 shadow-sm sm:min-w-24"
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        onOpenItem(item)
-                      }}
+                      onClick={() => onOpenItem(item)}
                     >
                       {disabled ? (
                         <MinusCircle className="size-4" />
@@ -2028,7 +2140,8 @@ function MenuCategorySection({
                   </div>
                 </div>
               </CardContent>
-            </Card>
+              </Card>
+            </article>
           )
         })}
       </div>
@@ -2089,9 +2202,20 @@ function ItemDetailOverlay({
     return (
       <Drawer open onOpenChange={handleOpenChange}>
         <DrawerContent className="max-h-[88svh] overflow-hidden">
-          <DrawerHeader className="shrink-0 border-b bg-muted/20 text-left">
+          <DrawerHeader className="relative shrink-0 border-b bg-muted/20 pr-14 text-left">
             <DrawerTitle className="font-heading text-2xl leading-tight tracking-tight">{item.name}</DrawerTitle>
             <DrawerDescription>{description}</DrawerDescription>
+            <DrawerClose asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Close item details"
+                className="absolute right-3 top-3 size-9 rounded-full"
+              >
+                <X className="size-4" />
+              </Button>
+            </DrawerClose>
           </DrawerHeader>
           <ItemDetailContent
             item={item}
@@ -2186,7 +2310,7 @@ function ItemDetailContent({
     <div className={cn('flex min-h-0 flex-1 flex-col', className)}>
       <div className={cn('min-h-0 flex-1 overflow-y-auto', bodyClassName)}>
         <div className="grid gap-5 sm:grid-cols-[240px_minmax(0,1fr)]">
-          <div className="relative aspect-[4/3] overflow-hidden rounded-2xl border bg-gradient-to-br from-muted to-background shadow-sm sm:aspect-square">
+          <div className="relative h-40 overflow-hidden rounded-2xl border bg-gradient-to-br from-muted to-background shadow-sm sm:h-auto sm:aspect-square">
           {imageUrl ? (
             <img
               src={imageUrl}
@@ -2219,6 +2343,23 @@ function ItemDetailContent({
             ) : (
               <p className="text-sm text-muted-foreground">No description provided.</p>
             )}
+            <MenuItemTags item={item} />
+            {(item.servingSize || item.calories != null) ? (
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                {item.servingSize ? <span>Serving: {item.servingSize}</span> : null}
+                {item.calories != null ? <span>{item.calories} kcal</span> : null}
+              </div>
+            ) : null}
+            {item.allergens ? (
+              <div className="flex gap-2 rounded-xl border border-amber-300/70 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-100">
+                <ShieldAlert className="mt-0.5 size-4 shrink-0" />
+                <div>
+                  <p className="font-semibold">Contains or may contain</p>
+                  <p>{item.allergens}</p>
+                  <p className="mt-1 text-xs opacity-80">Tell the restaurant about severe allergies before ordering.</p>
+                </div>
+              </div>
+            ) : null}
             {selectedOptions.length > 0 ? (
               <div className="flex flex-wrap gap-1.5">
                 {selectedOptions.map(({ group, option, quantity: optionQuantity }) => (
@@ -2236,6 +2377,7 @@ function ItemDetailContent({
               {optionGroups.map((group) => {
                 const selectedInGroup = getSelectedCountInGroup(selectedOptionIds, group)
                 const maxReached = selectedInGroup >= group.maxSelections
+                const isSingleChoice = group.maxSelections === 1
 
                 return (
                   <div key={group.id} className="overflow-hidden rounded-3xl border bg-card shadow-sm">
@@ -2264,11 +2406,15 @@ function ItemDetailContent({
                       </div>
                     </div>
 
-                    <div className="grid gap-2.5 p-3">
+                    <div
+                      className="grid gap-2.5 p-3"
+                      role={isSingleChoice ? 'radiogroup' : undefined}
+                      aria-label={isSingleChoice ? group.name : undefined}
+                    >
                       {group.options.map((option) => {
                         const selectedQuantity = getOptionQuantity(selectedOptionIds, option.id)
                         const selected = selectedQuantity > 0
-                        const optionDisabled = disabled || isAdding || (!selected && maxReached)
+                        const optionDisabled = disabled || isAdding || (!selected && maxReached && !isSingleChoice)
                         const canDecrease = selected && !disabled && !isAdding
                         const canIncrease = !disabled &&
                           !isAdding &&
@@ -2291,7 +2437,9 @@ function ItemDetailContent({
                               type="button"
                               className="grid min-w-0 grid-cols-[2rem_minmax(0,1fr)] items-center gap-3 text-left"
                               disabled={optionDisabled}
-                              aria-pressed={selected}
+                              role={isSingleChoice ? 'radio' : undefined}
+                              aria-checked={isSingleChoice ? selected : undefined}
+                              aria-pressed={isSingleChoice ? undefined : selected}
                               onClick={() => onToggleOption(group, option)}
                             >
                               <span className={cn(
@@ -2455,6 +2603,95 @@ function ItemDetailContent({
   )
 }
 
+function MenuItemTags({ item, compact = false }: { item: PublicMenuItem; compact?: boolean }) {
+  const tags = getMenuItemTags(item)
+  const visibleTags = compact ? tags.slice(0, 3) : tags
+
+  if (visibleTags.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="flex flex-wrap gap-1.5" aria-label="Dietary and menu tags">
+      {visibleTags.map((tag) => (
+        <Badge
+          key={tag.label}
+          variant="outline"
+          className={cn(
+            'h-auto rounded-full bg-background/80 px-2 py-0.5 text-[11px] font-medium',
+            tag.tone === 'accent' && 'border-primary/25 bg-primary/10 text-primary',
+            tag.tone === 'warning' && 'border-orange-300 bg-orange-50 text-orange-900 dark:border-orange-400/30 dark:bg-orange-400/10 dark:text-orange-100',
+          )}
+        >
+          {tag.icon === 'sparkles' ? <Sparkles className="size-3" /> : null}
+          {tag.icon === 'leaf' ? <Leaf className="size-3" /> : null}
+          {tag.icon === 'flame' ? <Flame className="size-3" /> : null}
+          {tag.label}
+        </Badge>
+      ))}
+      {compact && tags.length > visibleTags.length ? (
+        <Badge variant="outline" className="h-auto rounded-full px-2 py-0.5 text-[11px]">
+          +{tags.length - visibleTags.length}
+        </Badge>
+      ) : null}
+    </div>
+  )
+}
+
+function getMenuItemTags(item: PublicMenuItem) {
+  const tags: Array<{
+    label: string
+    icon?: 'sparkles' | 'leaf' | 'flame'
+    tone?: 'accent' | 'warning'
+  }> = []
+
+  if (item.isRecommended) tags.push({ label: 'Recommended', icon: 'sparkles', tone: 'accent' })
+  if (item.isPopular) tags.push({ label: 'Popular', tone: 'accent' })
+  if (item.isVegan) {
+    tags.push({ label: 'Vegan', icon: 'leaf' })
+  } else if (item.isVegetarian) {
+    tags.push({ label: 'Vegetarian', icon: 'leaf' })
+  }
+  if (item.isGlutenFree) tags.push({ label: 'Gluten-free' })
+  if (item.isHalal) tags.push({ label: 'Halal' })
+  if (item.spiceLevel > 0) {
+    tags.push({
+      label: ['', 'Mild', 'Medium spicy', 'Hot'][item.spiceLevel] ?? 'Spicy',
+      icon: 'flame',
+      tone: 'warning',
+    })
+  }
+
+  return tags
+}
+
+function getMenuItemTagLabels(item: PublicMenuItem) {
+  return getMenuItemTags(item).map((tag) => tag.label)
+}
+
+function matchesMenuFilters(item: PublicMenuItem, filters: MenuFilter[]) {
+  return filters.every((filter) => {
+    switch (filter) {
+      case 'available':
+        return item.isAvailable && !item.isSoldOut
+      case 'popular':
+        return item.isPopular
+      case 'recommended':
+        return item.isRecommended
+      case 'vegetarian':
+        return item.isVegetarian
+      case 'vegan':
+        return item.isVegan
+      case 'glutenFree':
+        return item.isGlutenFree
+      case 'halal':
+        return item.isHalal
+      case 'spicy':
+        return item.spiceLevel > 0
+    }
+  })
+}
+
 function QuickNotePresetGroups({
   groups,
   note,
@@ -2566,8 +2803,13 @@ function CartSummaryBar({
   }
 
   return (
-    <div className="fixed inset-x-0 bottom-0 z-20 border-t bg-background/85 p-3 shadow-[0_-18px_45px_rgba(0,0,0,0.08)] backdrop-blur-xl">
-      <div className="mx-auto flex max-w-6xl flex-col gap-3">
+    <div className={cn(
+      'fixed bottom-0 z-20 p-3',
+      hasItems || open
+        ? 'inset-x-0 border-t bg-background/85 shadow-[0_-18px_45px_rgba(0,0,0,0.08)] backdrop-blur-xl'
+        : 'right-0',
+    )}>
+      <div className={cn('flex flex-col gap-3', hasItems || open ? 'mx-auto max-w-6xl' : 'items-end')}>
         {open ? (
           <Card className="overflow-hidden rounded-3xl border shadow-2xl shadow-black/10">
             <CardContent className="p-0">
@@ -2734,22 +2976,28 @@ function CartSummaryBar({
         <Button
           type="button"
           variant="secondary"
-          className="min-h-14 flex-1 justify-between rounded-2xl border border-border bg-card px-5 py-3 text-base text-foreground shadow-lg shadow-black/10 hover:bg-muted"
+          aria-label={hasItems ? 'Open cart' : 'Open empty cart'}
+          className={cn(
+            'rounded-2xl border border-border bg-card text-foreground shadow-lg shadow-black/10 hover:bg-muted',
+            hasItems || open
+              ? 'min-h-14 flex-1 justify-between px-5 py-3 text-base'
+              : 'size-14 justify-center rounded-full p-0',
+          )}
           onClick={() => onOpenChange(!open)}
         >
-          <span className="flex items-center gap-3">
+          <span className={cn('flex items-center', hasItems || open ? 'gap-3' : '')}>
             <span className="flex size-8 items-center justify-center rounded-md border bg-muted text-foreground">
               <ShoppingBag className="size-5" />
             </span>
-            <span className="font-heading text-lg font-semibold">Cart</span>
-            {open ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />}
+            {hasItems || open ? <span className="font-heading text-lg font-semibold">Cart</span> : null}
+            {hasItems || open ? (open ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />) : null}
           </span>
-          <span className="flex items-center gap-4">
+          {hasItems || open ? <span className="flex items-center gap-4">
             <Badge variant="secondary" className="h-7 min-w-7 justify-center rounded-full border bg-muted px-2 text-foreground">
               {cart.itemCount}
             </Badge>
             <PriceText value={cart.total} currencyFormatter={currencyFormatter} variant="bar" className="text-foreground" />
-          </span>
+          </span> : null}
         </Button>
       </div>
     </div>

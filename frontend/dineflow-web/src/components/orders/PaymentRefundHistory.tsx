@@ -12,7 +12,7 @@ const refundStatusClasses: Partial<Record<AdminPaymentRefundStatus, string>> = {
 }
 
 function formatPaymentAmount(amountCents: number, currencyCode?: string | null) {
-  return new Intl.NumberFormat(undefined, {
+  return new Intl.NumberFormat(document.documentElement.lang || 'en-AU', {
     style: 'currency',
     currency: (currencyCode || 'AUD').toUpperCase(),
   }).format(amountCents / 100)
@@ -23,7 +23,7 @@ function formatDate(value: string | null) {
     return 'Not yet'
   }
 
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(document.documentElement.lang || 'en-AU', {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(new Date(value))
@@ -37,7 +37,7 @@ export function PaymentRefundHistory({
   fallbackCurrency?: string | null
 }) {
   if (!payment) {
-    return <div className="order-refund-empty">No payment attempt yet.</div>
+    return <div className="order-refund-empty">No refunds: this order has no payment attempt.</div>
   }
 
   const refunds = payment.refunds ?? []

@@ -9,6 +9,7 @@ export type PublicOrderingRestaurant = {
   timezone: string
   currency: string
   paymentPolicy: 'PrepayRequired' | 'PayAtCounterAllowed'
+  onlinePaymentsEnabled: boolean
   acceptingOrders: boolean
   openingHoursJson: string
   specialOpeningDaysJson: string
@@ -41,6 +42,16 @@ export type PublicMenuItem = {
   imageUrl: string | null
   isAvailable: boolean
   isSoldOut: boolean
+  isVegetarian: boolean
+  isVegan: boolean
+  isGlutenFree: boolean
+  isHalal: boolean
+  allergens: string | null
+  spiceLevel: number
+  servingSize: string | null
+  calories: number | null
+  isPopular: boolean
+  isRecommended: boolean
   displayOrder: number
   optionGroups: PublicMenuOptionGroup[]
 }

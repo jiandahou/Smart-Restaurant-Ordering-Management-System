@@ -10,9 +10,19 @@ public sealed class StripeOptions
 
     public string WebhookSecret { get; set; } = string.Empty;
 
+    public string ConnectWebhookSecret { get; set; } = string.Empty;
+
     public string Currency { get; set; } = "aud";
 
     public string SuccessUrl { get; set; } = string.Empty;
 
     public string CancelUrl { get; set; } = string.Empty;
+
+    public string ConnectReturnUrl { get; set; } = string.Empty;
+
+    public string ConnectRefreshUrl { get; set; } = string.Empty;
+
+    public string PlatformFeeSuccessUrl { get; set; } = string.Empty;
+
+    public string PlatformFeeCancelUrl { get; set; } = string.Empty;
 }

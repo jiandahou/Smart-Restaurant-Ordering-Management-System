@@ -200,6 +200,9 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<string>("FullName")
                         .HasColumnType("text");
 
+                    b.Property<DateTime?>("LastLoginAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<bool>("LockoutEnabled")
                         .HasColumnType("boolean");
 
@@ -444,6 +447,9 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<string>("Allergens")
                         .HasColumnType("text");
 
+                    b.Property<int?>("Calories")
+                        .HasColumnType("integer");
+
                     b.Property<Guid>("CategoryId")
                         .HasColumnType("uuid");
 
@@ -468,6 +474,12 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<bool>("IsHalal")
                         .HasColumnType("boolean");
 
+                    b.Property<bool>("IsPopular")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsRecommended")
+                        .HasColumnType("boolean");
+
                     b.Property<bool>("IsSoldOut")
                         .HasColumnType("boolean");
 
@@ -475,6 +487,9 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasColumnType("boolean");
 
                     b.Property<bool>("IsVegetarian")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsWatched")
                         .HasColumnType("boolean");
 
                     b.Property<string>("Name")
@@ -487,6 +502,15 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<Guid>("RestaurantId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("ServingSize")
+                        .HasColumnType("text");
+
+                    b.Property<int>("SpiceLevel")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("StockQuantity")
+                        .HasColumnType("integer");
+
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -496,7 +520,14 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.HasIndex("RestaurantId");
 
-                    b.ToTable("MenuItems");
+                    b.HasIndex("RestaurantId", "IsWatched")
+                        .HasDatabaseName("IX_MenuItems_RestaurantId_IsWatched")
+                        .HasFilter("\"IsWatched\"");
+
+                    b.ToTable("MenuItems", t =>
+                        {
+                            t.HasCheckConstraint("CK_MenuItems_StockQuantity", "\"StockQuantity\" IS NULL OR \"StockQuantity\" >= 0");
+                        });
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuItemOption", b =>
@@ -811,6 +842,25 @@ namespace DineFlow.Infrastructure.Migrations
                     b.ToTable("OrderStatusHistories");
                 });
 
+            modelBuilder.Entity("DineFlow.Infrastructure.Orders.RestaurantPickupCounter", b =>
+                {
+                    b.Property<Guid>("RestaurantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateOnly>("PickupDate")
+                        .HasColumnType("date");
+
+                    b.Property<int>("LastNumber")
+                        .HasColumnType("integer");
+
+                    b.HasKey("RestaurantId", "PickupDate");
+
+                    b.ToTable("RestaurantPickupCounters", t =>
+                        {
+                            t.HasCheckConstraint("CK_RestaurantPickupCounters_LastNumber", "\"LastNumber\" > 0");
+                        });
+                });
+
             modelBuilder.Entity("DineFlow.Infrastructure.Payments.Payment", b =>
                 {
                     b.Property<Guid>("Id")
@@ -819,6 +869,10 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.Property<long>("AmountCents")
                         .HasColumnType("bigint");
+
+                    b.Property<string>("CheckoutUrl")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -835,11 +889,21 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
 
+                    b.Property<string>("IdempotencyKey")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("LastProviderEventCreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<Guid>("OrderId")
                         .HasColumnType("uuid");
 
                     b.Property<DateTime?>("PaidAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("PlatformFeeAmountCents")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Provider")
                         .IsRequired()
@@ -861,10 +925,17 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<int>("Status")
                         .HasColumnType("integer");
 
+                    b.Property<string>("StripeAccountId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("IdempotencyKey")
+                        .IsUnique();
 
                     b.HasIndex("OrderId");
 
@@ -1029,6 +1100,42 @@ namespace DineFlow.Infrastructure.Migrations
                         {
                             t.HasCheckConstraint("CK_PaymentRefundRequests_RequestedAmountCents", "\"RequestedAmountCents\" > 0");
                         });
+                });
+
+            modelBuilder.Entity("DineFlow.Infrastructure.Payments.StripeWebhookEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("EventId")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<DateTime>("ProcessedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("ProviderCreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("StripeAccountId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EventId")
+                        .IsUnique();
+
+                    b.HasIndex("StripeAccountId", "ProviderCreatedAt");
+
+                    b.ToTable("StripeWebhookEvents");
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Printing.PrintJob", b =>
@@ -1209,6 +1316,10 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasMaxLength(300)
                         .HasColumnType("character varying(300)");
 
+                    b.Property<string>("ActorType")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<string>("ActorUserId")
                         .HasMaxLength(450)
                         .HasColumnType("character varying(450)");
@@ -1218,6 +1329,10 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.Property<string>("BeforeJson")
                         .HasColumnType("text");
+
+                    b.Property<string>("CorrelationId")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -1238,6 +1353,10 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<Guid?>("RestaurantId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("Source")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<string>("Summary")
                         .HasMaxLength(700)
                         .HasColumnType("character varying(700)");
@@ -1251,6 +1370,8 @@ namespace DineFlow.Infrastructure.Migrations
                     b.HasIndex("Action");
 
                     b.HasIndex("ActorUserId");
+
+                    b.HasIndex("CorrelationId");
 
                     b.HasIndex("EntityType", "EntityId");
 
@@ -1273,9 +1394,17 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasMaxLength(300)
                         .HasColumnType("character varying(300)");
 
+                    b.Property<string>("ActorType")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<string>("ActorUserId")
                         .HasMaxLength(450)
                         .HasColumnType("character varying(450)");
+
+                    b.Property<string>("CorrelationId")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -1304,7 +1433,13 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<Guid?>("RestaurantId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("Source")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.HasKey("Id");
+
+                    b.HasIndex("CorrelationId");
 
                     b.HasIndex("EventType");
 
@@ -1329,9 +1464,17 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasMaxLength(300)
                         .HasColumnType("character varying(300)");
 
+                    b.Property<string>("ActorType")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<string>("ActorUserId")
                         .HasMaxLength(450)
                         .HasColumnType("character varying(450)");
+
+                    b.Property<string>("CorrelationId")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -1374,11 +1517,17 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<Guid?>("RestaurantId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("Source")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<string>("Status")
                         .HasMaxLength(80)
                         .HasColumnType("character varying(80)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("CorrelationId");
 
                     b.HasIndex("EventType");
 
@@ -1406,9 +1555,15 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasColumnType("boolean")
                         .HasDefaultValue(true);
 
+                    b.Property<DateTime?>("AcceptingOrdersPausedUntil")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("Address")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<bool>("AutoAcceptOrders")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("CountryCode")
                         .IsRequired()
@@ -1435,11 +1590,39 @@ namespace DineFlow.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<long>("OneTimePlatformFeeCents")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("OneTimePlatformFeeCheckoutSessionId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("OneTimePlatformFeeCheckoutUrl")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("OneTimePlatformFeeIdempotencyKey")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("OneTimePlatformFeePaidAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("OneTimePlatformFeePaymentIntentId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<int>("OneTimePlatformFeeStatus")
+                        .HasColumnType("integer");
+
                     b.Property<string>("OpeningHoursJson")
                         .IsRequired()
                         .ValueGeneratedOnAdd()
                         .HasColumnType("text")
                         .HasDefaultValue("[{\"dayOfWeek\":0,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":1,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":2,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":3,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":4,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":5,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]},{\"dayOfWeek\":6,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]}]");
+
+                    b.Property<int>("OrderPlatformFeeBps")
+                        .HasColumnType("integer");
 
                     b.Property<int>("PaymentPolicy")
                         .HasColumnType("integer");
@@ -1454,6 +1637,31 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasColumnType("text")
                         .HasDefaultValue("[]");
 
+                    b.Property<string>("StripeAccountId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("StripeAccountUpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("StripeChargesEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("StripeConnectedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("StripeDetailsSubmitted")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("StripePayoutsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("StripeRequirementsDueJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("text")
+                        .HasDefaultValue("[]");
+
                     b.Property<string>("Timezone")
                         .IsRequired()
                         .HasColumnType("text");
@@ -1463,7 +1671,17 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("Restaurants");
+                    b.HasIndex("StripeAccountId")
+                        .IsUnique();
+
+                    b.ToTable("Restaurants", t =>
+                        {
+                            t.HasCheckConstraint("CK_Restaurants_OneTimePlatformFeeCents", "\"OneTimePlatformFeeCents\" >= 0");
+
+                            t.HasCheckConstraint("CK_Restaurants_OneTimePlatformFeeStatus", "\"OneTimePlatformFeeStatus\" IN (0, 1, 2, 3)");
+
+                            t.HasCheckConstraint("CK_Restaurants_OrderPlatformFeeBps", "\"OrderPlatformFeeBps\" >= 0 AND \"OrderPlatformFeeBps\" <= 10000");
+                        });
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Restaurant.RestaurantTable", b =>

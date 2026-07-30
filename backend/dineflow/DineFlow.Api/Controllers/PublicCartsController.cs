@@ -33,9 +33,12 @@ public class PublicCartsController(
     CartRealtimeNotifier cartRealtimeNotifier,
     OrderRealtimeNotifier orderRealtimeNotifier,
     OrderPickupNumberService orderPickupNumberService,
+    MenuItemStockService menuItemStockService,
+    OrderAutoAcceptanceService orderAutoAcceptanceService,
     ReportLogWriter reportLogWriter,
     RestaurantOperatingHoursService restaurantOperatingHoursService,
     TableSessionService tableSessionService,
+    StripeOrderCheckoutService stripeOrderCheckoutService,
     IStripeClient stripeClient,
     IOptions<StripeOptions> stripeOptions,
     ILogger<PublicCartsController> logger) : ControllerBase
@@ -623,6 +626,16 @@ public class PublicCartsController(
             return unavailableResult;
         }
 
+        if (restaurant.PaymentPolicy == RestaurantPaymentPolicy.PrepayRequired &&
+            (string.IsNullOrWhiteSpace(restaurant.StripeAccountId) ||
+             !restaurant.StripeChargesEnabled))
+        {
+            return Conflict(new
+            {
+                message = "This restaurant cannot accept prepaid orders until Stripe setup is complete."
+            });
+        }
+
         TableSession? tableSession = null;
         if (cart.TableId.HasValue)
         {
@@ -747,6 +760,23 @@ public class PublicCartsController(
         }
 
         order.TotalAmount = PricingCalculator.CalculateTotal(order.OrderItems.Select(item => (item.Quantity, item.UnitPrice)));
+
+        // Reserved inside the checkout transaction opened above, so a tracked item can't oversell
+        // to two carts checking out at once.
+        var unavailableItemIds = await menuItemStockService.TryReserveAsync(
+            OrderController.BuildRequestedQuantities(order.OrderItems),
+            cancellationToken);
+
+        if (unavailableItemIds.Count > 0)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Conflict(new
+            {
+                message = "Some items sold out while the cart was being submitted.",
+                items = OrderController.DescribeUnavailableItems(unavailableItemIds, order.OrderItems)
+            });
+        }
+
         await orderPickupNumberService.AssignPickupNumberAsync(order, restaurant, now, cancellationToken);
         cart.Status = CartStatus.Submitted;
         cart.OrderId = order.Id;
@@ -870,9 +900,21 @@ public class PublicCartsController(
             return Conflict(new { message = "This restaurant requires online payment before the order can be processed." });
         }
 
+        if (paymentMethod == PaymentMethod.Online &&
+            (order.Restaurant is null ||
+             string.IsNullOrWhiteSpace(order.Restaurant.StripeAccountId) ||
+             !order.Restaurant.StripeChargesEnabled))
+        {
+            return Conflict(new
+            {
+                message = "Online payment is not available for this restaurant yet. Please choose pay at counter."
+            });
+        }
+
         order.PaymentMethod = paymentMethod;
         order.PaymentStatus = PaymentStatus.Unpaid;
         order.UpdatedAt = DateTime.UtcNow;
+        await orderAutoAcceptanceService.TryAcceptAsync(order, cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         await orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 
@@ -1220,6 +1262,53 @@ public class PublicCartsController(
     }
 
     [HttpPost("{cartId:guid}/payment-session")]
+    public async Task<IActionResult> StartPaymentSession(
+        Guid cartId,
+        [FromHeader(Name = ParticipantTokenHeader)] string? participantToken,
+        CancellationToken cancellationToken)
+    {
+        var access = await AuthorizeCartAsync(cartId, participantToken, cancellationToken);
+
+        if (access.ErrorResult is not null)
+        {
+            return access.ErrorResult;
+        }
+
+        var cart = access.Cart!;
+        if (cart.Status != CartStatus.Submitted || !cart.OrderId.HasValue)
+        {
+            return Conflict(new { message = "Cart must be checked out before payment." });
+        }
+
+        var order = await dbContext.Orders
+            .AsNoTracking()
+            .Include(item => item.Table)
+            .FirstOrDefaultAsync(item => item.Id == cart.OrderId.Value, cancellationToken);
+
+        if (order is null)
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
+        var result = await stripeOrderCheckoutService.StartAsync(
+            order.Id,
+            User.FindFirstValue(ClaimTypes.Email),
+            BuildMenuReturnPath(order),
+            cancellationToken);
+
+        if (!result.IsSuccess)
+        {
+            return StatusCode(result.StatusCode, new
+            {
+                message = result.Message,
+                detail = result.Detail
+            });
+        }
+
+        return Ok(result.Response);
+    }
+
+    [NonAction]
     public async Task<IActionResult> CreatePaymentSession(
         Guid cartId,
         [FromHeader(Name = ParticipantTokenHeader)] string? participantToken,

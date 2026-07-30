@@ -47,7 +47,7 @@ export function createCartRealtimeClient(
   const connection = new HubConnectionBuilder()
     .withUrl(`${realtimeBaseUrl}/api/hubs/carts`)
     .withAutomaticReconnect([0, 2_000, 5_000, 10_000, 30_000])
-    .configureLogging(import.meta.env.DEV ? LogLevel.Information : LogLevel.Warning)
+    .configureLogging(LogLevel.Warning)
     .build()
 
   connection.on('CartUpdated', handlers.onCartUpdated)

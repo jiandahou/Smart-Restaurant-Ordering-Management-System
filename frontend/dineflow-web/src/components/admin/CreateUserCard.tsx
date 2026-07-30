@@ -1,14 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { ShieldPlus } from 'lucide-react'
-import { useForm } from 'react-hook-form'
+import { MailCheck, ShieldPlus } from 'lucide-react'
+import { useForm, useWatch } from 'react-hook-form'
 import { toast } from 'sonner'
 import { z } from 'zod'
 import {
   createRestaurantUser,
-  getRestaurants,
   type CreateRestaurantUserRole,
-  type ManagedUserRole,
   type Restaurant,
 } from '../../api/auth'
 import { RestaurantCombobox } from './RestaurantCombobox'
@@ -25,29 +23,37 @@ import {
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '../ui/form'
 import { Input } from '../ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
+import { Switch } from '../ui/switch'
+import { creatableRoles, roleRank, userRoleLabels } from './userRoles'
 
-export const roleRank: Record<ManagedUserRole | 'PlatformOwner', number> = {
-  PlatformOwner: 4,
-  RestaurantOwner: 3,
-  Admin: 2,
-  Staff: 1,
-  Customer: 0,
-}
-
-export const creatableRoles = ['RestaurantOwner', 'Admin', 'Staff'] as const satisfies readonly CreateRestaurantUserRole[]
+const temporaryPasswordSchema = z
+  .string()
+  .min(6, 'Password must be at least 6 characters.')
+  .regex(/[0-9]/, 'Password must include a number.')
+  .regex(/[a-z]/, 'Password must include a lowercase letter.')
+  .regex(/[A-Z]/, 'Password must include an uppercase letter.')
+  .regex(/[^a-zA-Z0-9]/, 'Password must include a symbol.')
 
 const createUserSchema = z.object({
   fullName: z.string(),
   email: z.email('Enter a valid email address.'),
-  password: z
-    .string()
-    .min(6, 'Password must be at least 6 characters.')
-    .regex(/[0-9]/, 'Password must include a number.')
-    .regex(/[a-z]/, 'Password must include a lowercase letter.')
-    .regex(/[A-Z]/, 'Password must include an uppercase letter.')
-    .regex(/[^a-zA-Z0-9]/, 'Password must include a symbol.'),
+  password: z.string(),
+  sendPasswordSetupEmail: z.boolean(),
   restaurantId: z.string(),
   role: z.enum(creatableRoles),
+}).superRefine((values, context) => {
+  if (values.sendPasswordSetupEmail) {
+    return
+  }
+
+  const passwordResult = temporaryPasswordSchema.safeParse(values.password)
+  if (!passwordResult.success) {
+    context.addIssue({
+      code: 'custom',
+      path: ['password'],
+      message: passwordResult.error.issues[0]?.message ?? 'Enter a valid temporary password.',
+    })
+  }
 })
 
 type CreateUserFormValues = z.infer<typeof createUserSchema>
@@ -57,6 +63,9 @@ type CreateUserCardProps = {
   currentUserRank: number
   needsRestaurantId: boolean
   restaurantId?: string | null
+  restaurants: Restaurant[]
+  restaurantsLoading?: boolean
+  restaurantLoadError?: string | null
   onUserCreated: () => Promise<void> | void
 }
 
@@ -65,20 +74,25 @@ function CreateUserForm({
   currentUserRank,
   needsRestaurantId,
   restaurantId,
+  restaurants,
+  restaurantsLoading = false,
+  restaurantLoadError,
   onUserCreated,
 }: CreateUserCardProps) {
-  const [restaurants, setRestaurants] = useState<Restaurant[]>([])
-  const [restaurantsLoading, setRestaurantsLoading] = useState(false)
-
   const form = useForm<CreateUserFormValues>({
     resolver: zodResolver(createUserSchema),
     defaultValues: {
       fullName: '',
       email: '',
       password: '',
+      sendPasswordSetupEmail: true,
       restaurantId: restaurantId ?? '',
       role: 'Staff',
     },
+  })
+  const sendPasswordSetupEmail = useWatch({
+    control: form.control,
+    name: 'sendPasswordSetupEmail',
   })
 
   useEffect(() => {
@@ -91,36 +105,6 @@ function CreateUserForm({
       })
     }
   }, [availableRoles, form])
-
-  useEffect(() => {
-    if (!needsRestaurantId) {
-      return
-    }
-
-    let active = true
-    setRestaurantsLoading(true)
-
-    getRestaurants()
-      .then((items) => {
-        if (active) {
-          setRestaurants(items)
-        }
-      })
-      .catch((loadError) => {
-        toast.error('Could not load restaurants', {
-          description: loadError instanceof Error ? loadError.message : 'Restaurant list failed to load',
-        })
-      })
-      .finally(() => {
-        if (active) {
-          setRestaurantsLoading(false)
-        }
-      })
-
-    return () => {
-      active = false
-    }
-  }, [needsRestaurantId])
 
   const handleSubmit = async (values: CreateUserFormValues) => {
     if (roleRank[values.role] >= currentUserRank) {
@@ -146,19 +130,21 @@ function CreateUserForm({
     try {
       const response = await createRestaurantUser({
         email: values.email.trim(),
-        password: values.password,
+        password: values.sendPasswordSetupEmail ? '' : values.password,
+        sendPasswordSetupEmail: values.sendPasswordSetupEmail,
         fullName: values.fullName.trim() || undefined,
         restaurantId: needsRestaurantId ? values.restaurantId.trim() : undefined,
         role: values.role,
       })
 
-      toast.success('User created', {
+      toast.success(response.passwordSetupEmailSent ? 'Invitation sent' : 'User created', {
         description: response.message,
       })
       form.reset({
         fullName: '',
         email: '',
         password: '',
+        sendPasswordSetupEmail: true,
         restaurantId: restaurantId ?? values.restaurantId,
         role: form.getValues('role'),
       })
@@ -201,17 +187,45 @@ function CreateUserForm({
         />
         <FormField
           control={form.control}
-          name="password"
+          name="sendPasswordSetupEmail"
           render={({ field }) => (
-            <FormItem>
-              <FormLabel>Temporary password</FormLabel>
+            <FormItem className="create-user-password-delivery">
+              <div>
+                <FormLabel>Send password setup email</FormLabel>
+                <p>The user receives a secure one-hour link and chooses their own password.</p>
+              </div>
               <FormControl>
-                <Input type="password" autoComplete="new-password" placeholder="ChangeMe123!" {...field} />
+                <Switch
+                  checked={field.value}
+                  onCheckedChange={(checked) => {
+                    field.onChange(checked)
+                    if (checked) {
+                      form.clearErrors('password')
+                      form.setValue('password', '', { shouldDirty: true })
+                    }
+                  }}
+                  aria-label="Send password setup email"
+                />
               </FormControl>
-              <FormMessage />
             </FormItem>
           )}
         />
+        {!sendPasswordSetupEmail ? (
+          <FormField
+            control={form.control}
+            name="password"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Temporary password</FormLabel>
+                <FormControl>
+                  <Input type="password" autoComplete="new-password" placeholder="ChangeMe123!" {...field} />
+                </FormControl>
+                <p className="create-user-password-help">Share this password securely and ask the user to change it after signing in.</p>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        ) : null}
         <FormField
           control={form.control}
           name="role"
@@ -227,7 +241,7 @@ function CreateUserForm({
                 <SelectContent position="popper">
                   {availableRoles.map((role) => (
                     <SelectItem key={role} value={role}>
-                      {role}
+                      {userRoleLabels[role]}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -252,14 +266,24 @@ function CreateUserForm({
                   />
                 </FormControl>
                 <FormMessage />
+                {restaurantLoadError && <p className="form-error" role="alert">{restaurantLoadError}</p>}
               </FormItem>
             )}
           />
         )}
 
-        <Button type="submit" disabled={form.formState.isSubmitting || availableRoles.length === 0}>
-          <ShieldPlus size={18} />
-          {form.formState.isSubmitting ? 'Creating user' : 'Create user'}
+        <Button
+          type="submit"
+          disabled={
+            form.formState.isSubmitting ||
+            availableRoles.length === 0 ||
+            (needsRestaurantId && (restaurantsLoading || restaurants.length === 0))
+          }
+        >
+          {sendPasswordSetupEmail ? <MailCheck size={18} /> : <ShieldPlus size={18} />}
+          {form.formState.isSubmitting
+            ? sendPasswordSetupEmail ? 'Sending invitation' : 'Creating user'
+            : sendPasswordSetupEmail ? 'Create and send invitation' : 'Create user'}
         </Button>
       </form>
     </Form>

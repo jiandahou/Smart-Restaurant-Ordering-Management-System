@@ -13,4 +13,8 @@ public sealed class AdminOrderListRequest : PagedRequest
     public Guid? RestaurantId { get; set; }
 
     public bool? PayableOnly { get; set; }
+
+    public DateTime? CreatedFromUtc { get; set; }
+
+    public DateTime? CreatedToUtc { get; set; }
 }

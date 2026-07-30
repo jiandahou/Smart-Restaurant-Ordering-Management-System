@@ -7,4 +7,8 @@ public sealed class AdminRefundSummaryRequest
     public string? Search { get; set; }
 
     public string? Status { get; set; }
+
+    public DateTime? CreatedFromUtc { get; set; }
+
+    public DateTime? CreatedToUtc { get; set; }
 }

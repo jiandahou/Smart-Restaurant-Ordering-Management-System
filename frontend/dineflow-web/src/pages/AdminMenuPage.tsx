@@ -2,10 +2,13 @@ import { useEffect, useMemo, useState } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
 import {
   Archive,
+  AlertCircle,
   ArrowDown,
   ArrowUp,
+  Check,
   ChevronDown,
   CircleDollarSign,
+  Eye,
   GripVertical,
   ImageIcon,
   ImageUp,
@@ -14,6 +17,7 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Star,
   Search,
   SlidersHorizontal,
   Trash2,
@@ -40,12 +44,14 @@ import {
   getRestaurants,
   reorderMenuCategories,
   reorderMenuItems,
+  reorderMenuOptionGroups,
+  reorderMenuOptions,
   updateMenuCategory,
   updateMenuItem,
-  updateMenuItemAvailability,
+  updateMenuItemsState,
   updateMenuOption,
   updateMenuOptionGroup,
-  updateMenuItemSoldOut,
+  updateMenuItemWatch,
   uploadMenuItemImage,
   type MenuCategory,
   type MenuItem,
@@ -54,6 +60,14 @@ import {
   type Restaurant,
 } from '../api/auth'
 import { resolvePublicAssetUrl } from '../api/publicMenu'
+import {
+  getMenuMetrics,
+  menuItemMatchesSearch,
+  menuItemMatchesStatus,
+  menuItemStatusLabel,
+  type MenuItemStatusFilter,
+} from '../lib/adminMenuManagement'
+import { useSearchParams } from 'react-router-dom'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -67,7 +81,7 @@ import {
 } from '../components/ui/alert-dialog'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader } from '../components/ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../components/ui/collapsible'
 import {
   Dialog,
@@ -103,6 +117,16 @@ const itemSchema = z.object({
   displayOrder: z.number().int().min(0).max(10_000),
   isAvailable: z.boolean(),
   isSoldOut: z.boolean(),
+  isVegetarian: z.boolean(),
+  isVegan: z.boolean(),
+  isGlutenFree: z.boolean(),
+  isHalal: z.boolean(),
+  allergens: z.string().trim().max(500).optional(),
+  spiceLevel: z.number().int().min(0).max(3),
+  servingSize: z.string().trim().max(80).optional(),
+  calories: z.number().int().min(0).max(10_000).nullable(),
+  isPopular: z.boolean(),
+  isRecommended: z.boolean(),
 })
 
 const optionGroupSchema = z.object({
@@ -186,6 +210,16 @@ const emptyItem: ItemFormValues = {
   displayOrder: 0,
   isAvailable: true,
   isSoldOut: false,
+  isVegetarian: false,
+  isVegan: false,
+  isGlutenFree: false,
+  isHalal: false,
+  allergens: '',
+  spiceLevel: 0,
+  servingSize: '',
+  calories: null,
+  isPopular: false,
+  isRecommended: false,
 }
 
 const emptyOptionGroup: OptionGroupFormValues = {
@@ -293,13 +327,13 @@ const menuOptionPresets: MenuOptionPreset[] = [
   },
 ]
 
-function sortMenuItems(items: MenuItem[]) {
+function sortMenuItems(items: MenuItem[] = []) {
   return items.toSorted(
     (first, second) => first.displayOrder - second.displayOrder || first.name.localeCompare(second.name),
   )
 }
 
-function sortMenuCategories(categories: MenuCategory[]) {
+function sortMenuCategories(categories: MenuCategory[] = []) {
   return categories.toSorted(
     (first, second) => first.displayOrder - second.displayOrder || first.name.localeCompare(second.name),
   )
@@ -389,18 +423,6 @@ function getAdjustmentLabel(option: MenuOption, money: Intl.NumberFormat) {
   }
 
   return `+${money.format(option.priceAdjustment)}`
-}
-
-function itemMatchesSearch(item: MenuItem, term: string) {
-  if (!term) {
-    return true
-  }
-
-  const optionText = (item.optionGroups ?? [])
-    .flatMap((group) => [group.name, ...group.options.map((option) => option.name)])
-
-  return [item.name, item.description ?? '', ...optionText]
-    .some((value) => value.toLowerCase().includes(term))
 }
 
 function getNextDisplayOrder(items: Array<{ displayOrder: number }>) {
@@ -772,6 +794,7 @@ function MenuItemOptionSummary({
   money: Intl.NumberFormat
   onChanged: () => Promise<void> | void
 }) {
+  const [expanded, setExpanded] = useState(false)
   const [draggedGroupId, setDraggedGroupId] = useState<string | null>(null)
   const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null)
   const [draggedOption, setDraggedOption] = useState<{ groupId: string; optionId: string } | null>(null)
@@ -790,13 +813,13 @@ function MenuItemOptionSummary({
     setDropTargetOptionId(null)
   }
 
-  const reorderGroups = async (targetGroupId: string) => {
-    if (!draggedGroupId || draggedGroupId === targetGroupId || reorderingOptions) {
+  const reorderGroups = async (targetGroupId: string, sourceGroupId = draggedGroupId) => {
+    if (!sourceGroupId || sourceGroupId === targetGroupId || reorderingOptions) {
       resetGroupDragState()
       return
     }
 
-    const reorderedGroups = moveOrderedEntries(groups, draggedGroupId, targetGroupId)
+    const reorderedGroups = moveOrderedEntries(groups, sourceGroupId, targetGroupId)
 
     if (reorderedGroups === groups) {
       resetGroupDragState()
@@ -807,15 +830,8 @@ function MenuItemOptionSummary({
     resetGroupDragState()
 
     try {
-      await Promise.all(reorderedGroups.map((group) => updateMenuOptionGroup(item.id, group.id, {
-        name: group.name,
-        isRequired: group.isRequired,
-        minSelections: group.minSelections,
-        maxSelections: group.maxSelections,
-        displayOrder: group.displayOrder,
-        isActive: group.isActive,
-      })))
-      toast.success('Option group order updated')
+      const response = await reorderMenuOptionGroups(item.id, reorderedGroups.map((group) => group.id))
+      toast.success(response.message)
       await onChanged()
     } catch (error) {
       toast.error('Could not reorder option groups', {
@@ -827,11 +843,15 @@ function MenuItemOptionSummary({
     }
   }
 
-  const reorderOptions = async (group: MenuOptionGroup, targetOptionId: string) => {
+  const reorderOptions = async (
+    group: MenuOptionGroup,
+    targetOptionId: string,
+    sourceOption = draggedOption,
+  ) => {
     if (
-      !draggedOption ||
-      draggedOption.groupId !== group.id ||
-      draggedOption.optionId === targetOptionId ||
+      !sourceOption ||
+      sourceOption.groupId !== group.id ||
+      sourceOption.optionId === targetOptionId ||
       reorderingOptions
     ) {
       resetOptionDragState()
@@ -840,7 +860,7 @@ function MenuItemOptionSummary({
 
     const orderedOptions = [...group.options]
       .sort((first, second) => first.displayOrder - second.displayOrder || first.name.localeCompare(second.name))
-    const reorderedOptions = moveOrderedEntries(orderedOptions, draggedOption.optionId, targetOptionId)
+    const reorderedOptions = moveOrderedEntries(orderedOptions, sourceOption.optionId, targetOptionId)
 
     if (reorderedOptions === orderedOptions) {
       resetOptionDragState()
@@ -851,15 +871,12 @@ function MenuItemOptionSummary({
     resetOptionDragState()
 
     try {
-      await Promise.all(reorderedOptions.map((option) => updateMenuOption(item.id, group.id, option.id, {
-        name: option.name,
-        priceAdjustment: option.priceAdjustment,
-        adjustmentType: option.adjustmentType,
-        maxQuantity: option.maxQuantity,
-        displayOrder: option.displayOrder,
-        isAvailable: option.isAvailable,
-      })))
-      toast.success('Option order updated')
+      const response = await reorderMenuOptions(
+        item.id,
+        group.id,
+        reorderedOptions.map((option) => option.id),
+      )
+      toast.success(response.message)
       await onChanged()
     } catch (error) {
       toast.error('Could not reorder options', {
@@ -869,6 +886,30 @@ function MenuItemOptionSummary({
     } finally {
       setReorderingOptions(false)
     }
+  }
+
+  const moveGroupStep = async (groupId: string, direction: 'up' | 'down') => {
+    if (reorderingOptions) return
+    const currentIndex = groups.findIndex((group) => group.id === groupId)
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= groups.length) return
+
+    await reorderGroups(groups[targetIndex].id, groupId)
+  }
+
+  const moveOptionStep = async (
+    group: MenuOptionGroup,
+    optionId: string,
+    direction: 'up' | 'down',
+  ) => {
+    if (reorderingOptions) return
+    const orderedOptions = [...group.options]
+      .sort((first, second) => first.displayOrder - second.displayOrder || first.name.localeCompare(second.name))
+    const currentIndex = orderedOptions.findIndex((option) => option.id === optionId)
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= orderedOptions.length) return
+
+    await reorderOptions(group, orderedOptions[targetIndex].id, { groupId: group.id, optionId })
   }
 
   const archiveGroup = async (group: MenuOptionGroup) => {
@@ -979,11 +1020,27 @@ function MenuItemOptionSummary({
           <span>{optionCount} options</span>
         </div>
         <div className="menu-option-summary-actions">
-          <MenuOptionPresetPicker item={item} onSaved={onChanged} />
-          <OptionGroupFormDialog item={item} onSaved={onChanged} />
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            <motion.span animate={{ rotate: expanded ? 180 : 0 }} transition={{ duration: 0.16 }}>
+              <ChevronDown size={13} />
+            </motion.span>
+            {expanded ? 'Hide options' : 'Manage options'}
+          </Button>
+          {expanded && (
+            <>
+              <MenuOptionPresetPicker item={item} onSaved={onChanged} />
+              <OptionGroupFormDialog item={item} onSaved={onChanged} />
+            </>
+          )}
         </div>
       </div>
-      <div className="menu-option-group-list">
+      {expanded && <div className="menu-option-group-list">
         {groups.map((group) => (
           <div
             key={group.id}
@@ -1041,6 +1098,30 @@ function MenuItemOptionSummary({
                 {!group.isActive && <Badge variant="destructive">Inactive</Badge>}
               </div>
               <div className="menu-option-actions">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="menu-option-icon-button"
+                  disabled={reorderingOptions || groups[0]?.id === group.id}
+                  onClick={() => void moveGroupStep(group.id, 'up')}
+                  aria-label={`Move ${group.name} up`}
+                  title="Move option group up"
+                >
+                  <ArrowUp size={12} />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="menu-option-icon-button"
+                  disabled={reorderingOptions || groups[groups.length - 1]?.id === group.id}
+                  onClick={() => void moveGroupStep(group.id, 'down')}
+                  aria-label={`Move ${group.name} down`}
+                  title="Move option group down"
+                >
+                  <ArrowDown size={12} />
+                </Button>
                 <MenuOptionFormDialog item={item} group={group} onSaved={onChanged} />
                 <OptionGroupFormDialog item={item} group={group} onSaved={onChanged} />
                 {group.isActive ? (
@@ -1090,7 +1171,7 @@ function MenuItemOptionSummary({
             <div className="menu-option-chip-list">
               {group.options
                 .toSorted((first, second) => first.displayOrder - second.displayOrder || first.name.localeCompare(second.name))
-                .map((option) => (
+                .map((option, optionIndex, orderedOptions) => (
                   <span
                     key={option.id}
                     className={[
@@ -1148,6 +1229,30 @@ function MenuItemOptionSummary({
                       {!option.isAvailable && <small>unavailable</small>}
                     </span>
                     <span className="menu-option-chip-actions">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="menu-option-icon-button"
+                        disabled={reorderingOptions || optionIndex === 0}
+                        onClick={() => void moveOptionStep(group, option.id, 'up')}
+                        aria-label={`Move ${option.name} up`}
+                        title="Move option up"
+                      >
+                        <ArrowUp size={11} />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="menu-option-icon-button"
+                        disabled={reorderingOptions || optionIndex === orderedOptions.length - 1}
+                        onClick={() => void moveOptionStep(group, option.id, 'down')}
+                        aria-label={`Move ${option.name} down`}
+                        title="Move option down"
+                      >
+                        <ArrowDown size={11} />
+                      </Button>
                       <MenuOptionFormDialog item={item} group={group} option={option} onSaved={onChanged} />
                       {option.isAvailable ? (
                         <AlertDialog>
@@ -1198,7 +1303,7 @@ function MenuItemOptionSummary({
             </div>
           </div>
         ))}
-      </div>
+      </div>}
     </div>
   )
 }
@@ -1333,6 +1438,16 @@ function ItemFormDialog({
         displayOrder: item.displayOrder,
         isAvailable: item.isAvailable,
         isSoldOut: item.isSoldOut,
+        isVegetarian: item.isVegetarian,
+        isVegan: item.isVegan,
+        isGlutenFree: item.isGlutenFree,
+        isHalal: item.isHalal,
+        allergens: item.allergens ?? '',
+        spiceLevel: item.spiceLevel,
+        servingSize: item.servingSize ?? '',
+        calories: item.calories,
+        isPopular: item.isPopular,
+        isRecommended: item.isRecommended,
       } : emptyItem)
       setRemoveImage(false)
       setImageInputKey((current) => current + 1)
@@ -1403,6 +1518,16 @@ function ItemFormDialog({
         imageUrl,
         isAvailable: values.isAvailable,
         isSoldOut: values.isSoldOut,
+        isVegetarian: values.isVegetarian,
+        isVegan: values.isVegan,
+        isGlutenFree: values.isGlutenFree,
+        isHalal: values.isHalal,
+        allergens: values.allergens?.trim() || null,
+        spiceLevel: values.spiceLevel,
+        servingSize: values.servingSize?.trim() || null,
+        calories: values.calories,
+        isPopular: values.isPopular,
+        isRecommended: values.isRecommended,
         displayOrder: values.displayOrder,
       }
       const response = item
@@ -1447,6 +1572,69 @@ function ItemFormDialog({
               <FormField control={form.control} name="description" render={({ field }) => (
                 <FormItem className="restaurant-form-wide"><FormLabel>Description</FormLabel><FormControl><Textarea rows={3} placeholder="Ingredients and customer-facing description" {...field} /></FormControl><FormMessage /></FormItem>
               )} />
+              <FormField control={form.control} name="spiceLevel" render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Spice level</FormLabel>
+                  <Select value={String(field.value)} onValueChange={(value) => field.onChange(Number(value))}>
+                    <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                    <SelectContent>
+                      <SelectItem value="0">Not spicy</SelectItem>
+                      <SelectItem value="1">Mild</SelectItem>
+                      <SelectItem value="2">Medium</SelectItem>
+                      <SelectItem value="3">Hot</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={form.control} name="servingSize" render={({ field }) => (
+                <FormItem><FormLabel>Serving size</FormLabel><FormControl><Input placeholder="1 bowl · serves 2" {...field} /></FormControl><FormMessage /></FormItem>
+              )} />
+              <FormField control={form.control} name="calories" render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Calories (kcal)</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={10_000}
+                      value={field.value ?? ''}
+                      placeholder="Optional"
+                      onChange={(event) => field.onChange(event.target.value === '' ? null : event.target.valueAsNumber)}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={form.control} name="allergens" render={({ field }) => (
+                <FormItem className="restaurant-form-wide">
+                  <FormLabel>Allergens</FormLabel>
+                  <FormControl><Input placeholder="Milk, egg, peanuts, sesame" {...field} /></FormControl>
+                  <p className="text-xs text-muted-foreground">Customer-facing warning. Separate entries with commas.</p>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={form.control} name="isVegetarian" render={({ field }) => (
+                <FormItem className="menu-switch-field"><div><FormLabel>Vegetarian</FormLabel><p>Show a vegetarian dietary label.</p></div><FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl></FormItem>
+              )} />
+              <FormField control={form.control} name="isVegan" render={({ field }) => (
+                <FormItem className="menu-switch-field"><div><FormLabel>Vegan</FormLabel><p>Also treated as vegetarian.</p></div><FormControl><Switch checked={field.value} onCheckedChange={(value) => {
+                  field.onChange(value)
+                  if (value) form.setValue('isVegetarian', true)
+                }} /></FormControl></FormItem>
+              )} />
+              <FormField control={form.control} name="isGlutenFree" render={({ field }) => (
+                <FormItem className="menu-switch-field"><div><FormLabel>Gluten-free</FormLabel><p>Show a gluten-free dietary label.</p></div><FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl></FormItem>
+              )} />
+              <FormField control={form.control} name="isHalal" render={({ field }) => (
+                <FormItem className="menu-switch-field"><div><FormLabel>Halal</FormLabel><p>Show a halal dietary label.</p></div><FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl></FormItem>
+              )} />
+              <FormField control={form.control} name="isPopular" render={({ field }) => (
+                <FormItem className="menu-switch-field"><div><FormLabel>Popular</FormLabel><p>Highlight frequently ordered favourites.</p></div><FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl></FormItem>
+              )} />
+              <FormField control={form.control} name="isRecommended" render={({ field }) => (
+                <FormItem className="menu-switch-field"><div><FormLabel>Recommended</FormLabel><p>Mark as a restaurant recommendation.</p></div><FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl></FormItem>
+              )} />
               <div className="restaurant-form-wide menu-image-field">
                 <div className="menu-image-field-header">
                   <div>
@@ -1480,10 +1668,16 @@ function ItemFormDialog({
                 {imageError && <p className="menu-image-error">{imageError}</p>}
               </div>
               <FormField control={form.control} name="isAvailable" render={({ field }) => (
-                <FormItem className="menu-switch-field"><div><FormLabel>Available</FormLabel><p>Controls public menu visibility.</p></div><FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl></FormItem>
+                <FormItem className="menu-switch-field"><div><FormLabel>Available</FormLabel><p>Controls public menu visibility. Hiding an item clears sold-out state.</p></div><FormControl><Switch checked={field.value} onCheckedChange={(value) => {
+                  field.onChange(value)
+                  if (!value) form.setValue('isSoldOut', false)
+                }} /></FormControl></FormItem>
               )} />
               <FormField control={form.control} name="isSoldOut" render={({ field }) => (
-                <FormItem className="menu-switch-field"><div><FormLabel>Sold out</FormLabel><p>Keep visible but prevent ordering.</p></div><FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl></FormItem>
+                <FormItem className="menu-switch-field"><div><FormLabel>Sold out</FormLabel><p>Keep visible but prevent ordering. Marking sold out makes the item available.</p></div><FormControl><Switch checked={field.value} onCheckedChange={(value) => {
+                  field.onChange(value)
+                  if (value) form.setValue('isAvailable', true)
+                }} /></FormControl></FormItem>
               )} />
             </div>
             <DialogFooter>
@@ -1501,53 +1695,64 @@ function CategoryMenuSection({
   restaurantId,
   category,
   currency,
-  onCategoriesChanged,
+  directoryItems,
+  globalSearch,
+  itemStatusFilter,
+  loading,
+  loadError,
+  forceOpen,
+  selectedItemIds,
+  onToggleSelected,
+  onItemPatched,
+  onMenuChanged,
   categoryReorderDisabled,
   categoryDragTitle,
+  categoryIndex,
+  categoryCount,
+  onMoveCategory,
 }: {
   restaurantId: string
   category: MenuCategory
   currency: string
-  onCategoriesChanged: () => Promise<void> | void
+  directoryItems: MenuItem[]
+  globalSearch: string
+  itemStatusFilter: MenuItemStatusFilter
+  loading: boolean
+  loadError: string | null
+  forceOpen: boolean
+  selectedItemIds: Set<string>
+  onToggleSelected: (itemId: string) => void
+  onItemPatched: (itemId: string, patch: Partial<MenuItem>) => void
+  onMenuChanged: (showToast?: boolean) => Promise<void> | void
   categoryReorderDisabled: boolean
   categoryDragTitle: string
+  categoryIndex: number
+  categoryCount: number
+  onMoveCategory: (categoryId: string, direction: 'up' | 'down') => Promise<void> | void
 }) {
   const [open, setOpen] = useState(false)
-  const [items, setItems] = useState<MenuItem[]>([])
-  const [loading, setLoading] = useState(false)
-  const [loaded, setLoaded] = useState(false)
+  const [items, setItems] = useState<MenuItem[]>(directoryItems)
   const [search, setSearch] = useState('')
   const [draggedItemId, setDraggedItemId] = useState<string | null>(null)
   const [dropTargetItemId, setDropTargetItemId] = useState<string | null>(null)
   const [reordering, setReordering] = useState(false)
-
-  const loadItems = async (showToast = false) => {
-    setLoading(true)
-    try {
-      setItems(await getAdminMenuItems(restaurantId, category.id))
-      setLoaded(true)
-      if (showToast) toast.success(`${category.name} refreshed`)
-    } catch (error) {
-      toast.error('Could not load menu items', { description: error instanceof Error ? error.message : 'The request failed.' })
-    } finally {
-      setLoading(false)
-    }
-  }
+  const [pendingItemIds, setPendingItemIds] = useState<Set<string>>(() => new Set())
 
   const handleOpenChange = (nextOpen: boolean) => {
-    setOpen(nextOpen)
-    if (nextOpen && !loaded) void loadItems()
+    if (!forceOpen) setOpen(nextOpen)
   }
 
   const orderedItems = useMemo(() => sortMenuItems(items), [items])
 
   const filteredItems = useMemo(() => {
-    const term = search.trim().toLowerCase()
     return orderedItems
-      .filter((item) => itemMatchesSearch(item, term))
-  }, [orderedItems, search])
+      .filter((item) => menuItemMatchesSearch(item, globalSearch))
+      .filter((item) => menuItemMatchesSearch(item, search))
+      .filter((item) => menuItemMatchesStatus(item, itemStatusFilter))
+  }, [globalSearch, itemStatusFilter, orderedItems, search])
 
-  const isReorderDisabled = loading || reordering || search.trim() !== '' || orderedItems.length < 2
+  const hasItemFilters = globalSearch.trim() !== '' || search.trim() !== '' || itemStatusFilter !== 'all'
+  const isReorderDisabled = loading || reordering || hasItemFilters || orderedItems.length < 2
 
   const resetDragState = () => {
     setDraggedItemId(null)
@@ -1606,22 +1811,71 @@ function CategoryMenuSection({
   }
 
   const toggleAvailability = async (item: MenuItem, isAvailable: boolean) => {
+    if (pendingItemIds.has(item.id)) return
+    setPendingItemIds((current) => new Set(current).add(item.id))
     try {
-      const response = await updateMenuItemAvailability(item.id, isAvailable)
-      setItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, isAvailable } : entry))
+      const nextState = { isAvailable, isSoldOut: false }
+      const response = await updateMenuItemsState({
+        restaurantId,
+        itemIds: [item.id],
+        ...nextState,
+      })
+      setItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, ...nextState } : entry))
+      onItemPatched(item.id, nextState)
       toast.success(response.message)
     } catch (error) {
       toast.error('Could not change availability', { description: error instanceof Error ? error.message : 'The request failed.' })
+    } finally {
+      setPendingItemIds((current) => {
+        const next = new Set(current)
+        next.delete(item.id)
+        return next
+      })
     }
   }
 
   const toggleSoldOut = async (item: MenuItem, isSoldOut: boolean) => {
+    if (pendingItemIds.has(item.id)) return
+    setPendingItemIds((current) => new Set(current).add(item.id))
     try {
-      const response = await updateMenuItemSoldOut(item.id, isSoldOut)
-      setItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, isSoldOut } : entry))
+      const nextState = { isAvailable: true, isSoldOut }
+      const response = await updateMenuItemsState({
+        restaurantId,
+        itemIds: [item.id],
+        ...nextState,
+      })
+      setItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, ...nextState } : entry))
+      onItemPatched(item.id, nextState)
       toast.success(response.message)
     } catch (error) {
       toast.error('Could not change sold-out status', { description: error instanceof Error ? error.message : 'The request failed.' })
+    } finally {
+      setPendingItemIds((current) => {
+        const next = new Set(current)
+        next.delete(item.id)
+        return next
+      })
+    }
+  }
+
+  /** Pins the item to the dashboard watch widget so staff can flip it during service. */
+  const toggleWatch = async (item: MenuItem) => {
+    if (pendingItemIds.has(item.id)) return
+    setPendingItemIds((current) => new Set(current).add(item.id))
+    try {
+      const response = await updateMenuItemWatch(item.id, !item.isWatched)
+      setItems((current) => current.map((entry) =>
+        entry.id === item.id ? { ...entry, isWatched: response.isWatched } : entry))
+      onItemPatched(item.id, { isWatched: response.isWatched })
+      toast.success(response.message)
+    } catch (error) {
+      toast.error('Could not change the watch list', { description: error instanceof Error ? error.message : 'The request failed.' })
+    } finally {
+      setPendingItemIds((current) => {
+        const next = new Set(current)
+        next.delete(item.id)
+        return next
+      })
     }
   }
 
@@ -1630,6 +1884,7 @@ function CategoryMenuSection({
       const response = await deleteMenuItem(item.id)
       setItems((current) => current.filter((entry) => entry.id !== item.id))
       toast.success('Menu item deleted', { description: response.message })
+      await onMenuChanged()
     } catch (error) {
       toast.error('Could not delete menu item', { description: error instanceof Error ? error.message : 'The request failed.' })
     }
@@ -1639,7 +1894,7 @@ function CategoryMenuSection({
     try {
       const response = await deleteMenuCategory(category.id)
       toast.success('Category deleted', { description: response.message })
-      await onCategoriesChanged()
+      await onMenuChanged()
     } catch (error) {
       toast.error('Could not delete category', { description: error instanceof Error ? error.message : 'The request failed.' })
     }
@@ -1648,27 +1903,53 @@ function CategoryMenuSection({
   const money = new Intl.NumberFormat('en-AU', { style: 'currency', currency })
 
   return (
-    <Collapsible open={open} onOpenChange={handleOpenChange} className="menu-category-section">
+    <Collapsible open={forceOpen || open} onOpenChange={handleOpenChange} className="menu-category-section">
       <div className="menu-category-row">
-        <button
-          type="button"
-          className="menu-reorder-handle menu-category-reorder-handle"
-          disabled={categoryReorderDisabled}
-          aria-label={`Reorder ${category.name}`}
-          title={categoryDragTitle}
-        >
-          <GripVertical size={16} />
-        </button>
+        <div className="menu-category-order-controls">
+          <button
+            type="button"
+            className="menu-reorder-handle menu-category-reorder-handle"
+            disabled={categoryReorderDisabled}
+            aria-label={`Reorder ${category.name}`}
+            title={categoryDragTitle}
+          >
+            <GripVertical size={16} />
+          </button>
+          <div className="menu-order-buttons">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              disabled={categoryReorderDisabled || categoryIndex === 0}
+              onClick={() => void onMoveCategory(category.id, 'up')}
+              aria-label={`Move ${category.name} up`}
+              title="Move category up"
+            >
+              <ArrowUp size={14} />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              disabled={categoryReorderDisabled || categoryIndex === categoryCount - 1}
+              onClick={() => void onMoveCategory(category.id, 'down')}
+              aria-label={`Move ${category.name} down`}
+              title="Move category down"
+            >
+              <ArrowDown size={14} />
+            </Button>
+          </div>
+        </div>
         <CollapsibleTrigger asChild>
           <Button type="button" variant="ghost" className="menu-category-trigger">
-            <motion.span animate={{ rotate: open ? 180 : 0 }} transition={{ duration: 0.16 }}><ChevronDown size={18} /></motion.span>
+            <motion.span animate={{ rotate: forceOpen || open ? 180 : 0 }} transition={{ duration: 0.16 }}><ChevronDown size={18} /></motion.span>
             <span className="menu-category-name"><strong>{category.name}</strong><small>{category.description || 'No description'}</small></span>
           </Button>
         </CollapsibleTrigger>
         <span className="menu-category-order">Order {category.displayOrder}</span>
         <Badge variant={category.isActive ? 'secondary' : 'destructive'}>{category.isActive ? 'Active' : 'Inactive'}</Badge>
         <div className="row-actions">
-          <CategoryFormDialog restaurantId={restaurantId} category={category} onSaved={onCategoriesChanged} />
+          <CategoryFormDialog restaurantId={restaurantId} category={category} onSaved={onMenuChanged} />
           <AlertDialog>
             <AlertDialogTrigger asChild><Button type="button" variant="destructive" size="icon" title="Delete category" aria-label={`Delete ${category.name}`}><Trash2 size={16} /></Button></AlertDialogTrigger>
             <AlertDialogContent>
@@ -1681,15 +1962,23 @@ function CategoryMenuSection({
       <CollapsibleContent className="menu-category-content">
         <div className="menu-items-toolbar">
           <div className="directory-search"><Search size={16} /><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Search ${category.name}`} /></div>
-          <ItemFormDialog restaurantId={restaurantId} category={category} onSaved={() => loadItems()} />
-          <Button type="button" variant="secondary" size="icon" onClick={() => void loadItems(true)} disabled={loading} title="Refresh items" aria-label="Refresh items"><RefreshCw size={16} /></Button>
+          <ItemFormDialog restaurantId={restaurantId} category={category} onSaved={onMenuChanged} />
+          <Button type="button" variant="secondary" size="icon" onClick={() => void onMenuChanged(true)} disabled={loading} title="Refresh full menu" aria-label="Refresh full menu"><RefreshCw size={16} /></Button>
         </div>
+        {loadError && (
+          <div className="menu-inline-error" role="alert">
+            <AlertCircle size={17} />
+            <span>{loadError}</span>
+            <Button type="button" variant="outline" size="sm" onClick={() => void onMenuChanged()}>Retry</Button>
+          </div>
+        )}
         {loading ? (
           <div className="menu-items-loading"><motion.span animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 0.9, ease: 'linear' }}><RefreshCw size={18} /></motion.span>Loading menu items...</div>
         ) : (
           <>
           <div className="table-wrap menu-items-table-wrap">
             <table className="data-table menu-items-table">
+              <caption className="menu-table-caption">{category.name} menu items and operational controls</caption>
               <thead><tr><th>Reorder</th><th>Item</th><th>Price</th><th>Available</th><th>Sold out</th><th>Order</th><th>Actions</th></tr></thead>
               <tbody>
                 {filteredItems.map((item) => (
@@ -1720,21 +2009,34 @@ function CategoryMenuSection({
                     onDragEnd={resetDragState}
                   >
                     <td>
-                      <button
-                        type="button"
-                        className="menu-reorder-handle"
-                        disabled={isReorderDisabled}
-                        aria-label={`Reorder ${item.name}`}
-                        title={
-                          search.trim()
-                            ? 'Clear search to reorder menu items.'
-                            : orderedItems.length < 2
-                              ? 'Add more items to reorder this category.'
-                              : 'Drag to reorder items.'
-                        }
-                      >
-                        <GripVertical size={16} />
-                      </button>
+                      <div className="menu-item-leading-actions">
+                        <Button
+                          type="button"
+                          variant={selectedItemIds.has(item.id) ? 'default' : 'outline'}
+                          size="icon"
+                          aria-pressed={selectedItemIds.has(item.id)}
+                          aria-label={selectedItemIds.has(item.id) ? `Deselect ${item.name}` : `Select ${item.name}`}
+                          title={selectedItemIds.has(item.id) ? 'Deselect item' : 'Select item for bulk actions'}
+                          onClick={() => onToggleSelected(item.id)}
+                        >
+                          <Check size={15} />
+                        </Button>
+                        <button
+                          type="button"
+                          className="menu-reorder-handle"
+                          disabled={isReorderDisabled}
+                          aria-label={`Reorder ${item.name}`}
+                          title={
+                            hasItemFilters
+                              ? 'Clear filters to reorder menu items.'
+                              : orderedItems.length < 2
+                                ? 'Add more items to reorder this category.'
+                                : 'Drag to reorder items.'
+                          }
+                        >
+                          <GripVertical size={16} />
+                        </button>
+                      </div>
                     </td>
                     <td>
                       <div className="menu-item-cell">
@@ -1745,16 +2047,32 @@ function CategoryMenuSection({
                             <span><ImageIcon size={17} /></span>
                           )}
                           <div>
-                            <strong>{item.name}</strong>
+                            <strong className="menu-item-name-row">
+                              {item.name}
+                              <button
+                                type="button"
+                                className={`menu-watch-toggle${item.isWatched ? ' is-watched' : ''}`}
+                                aria-pressed={item.isWatched}
+                                aria-label={item.isWatched ? `Stop watching ${item.name}` : `Watch ${item.name}`}
+                                title={item.isWatched ? 'Watched on the dashboard' : 'Watch on the dashboard'}
+                                disabled={pendingItemIds.has(item.id)}
+                                onClick={() => void toggleWatch(item)}
+                              >
+                                <Star size={15} />
+                              </button>
+                              {item.stockQuantity !== null ? (
+                                <Badge variant="outline">{item.stockQuantity} left</Badge>
+                              ) : null}
+                            </strong>
                             <small>{item.description || 'No description'}</small>
                           </div>
                         </div>
-                        <MenuItemOptionSummary item={item} money={money} onChanged={() => loadItems()} />
+                        <MenuItemOptionSummary item={item} money={money} onChanged={onMenuChanged} />
                       </div>
                     </td>
                     <td><span className="menu-price"><CircleDollarSign size={15} />{money.format(item.price)}</span></td>
-                    <td><Switch checked={item.isAvailable} onCheckedChange={(value) => void toggleAvailability(item, value)} aria-label={`${item.name} availability`} /></td>
-                    <td><Switch checked={item.isSoldOut} onCheckedChange={(value) => void toggleSoldOut(item, value)} aria-label={`${item.name} sold out status`} /></td>
+                    <td><Switch checked={item.isAvailable} disabled={pendingItemIds.has(item.id)} onCheckedChange={(value) => void toggleAvailability(item, value)} aria-label={`${item.name} availability`} /></td>
+                    <td><Switch checked={item.isSoldOut} disabled={pendingItemIds.has(item.id)} onCheckedChange={(value) => void toggleSoldOut(item, value)} aria-label={`${item.name} sold out status`} /></td>
                     <td>
                       <div className="menu-order-controls">
                         <span>{item.displayOrder}</span>
@@ -1765,7 +2083,7 @@ function CategoryMenuSection({
                             size="icon"
                             disabled={isReorderDisabled || orderedItems[0]?.id === item.id}
                             onClick={() => void handleStepMove(item.id, 'up')}
-                            title={search.trim() ? 'Clear search to move menu items.' : 'Move item up'}
+                            title={hasItemFilters ? 'Clear filters to move menu items.' : 'Move item up'}
                             aria-label={`Move ${item.name} up`}
                           >
                             <ArrowUp size={15} />
@@ -1776,7 +2094,7 @@ function CategoryMenuSection({
                             size="icon"
                             disabled={isReorderDisabled || orderedItems[orderedItems.length - 1]?.id === item.id}
                             onClick={() => void handleStepMove(item.id, 'down')}
-                            title={search.trim() ? 'Clear search to move menu items.' : 'Move item down'}
+                            title={hasItemFilters ? 'Clear filters to move menu items.' : 'Move item down'}
                             aria-label={`Move ${item.name} down`}
                           >
                             <ArrowDown size={15} />
@@ -1784,10 +2102,10 @@ function CategoryMenuSection({
                         </div>
                       </div>
                     </td>
-                    <td><div className="row-actions"><ItemFormDialog restaurantId={restaurantId} category={category} item={item} onSaved={() => loadItems()} /><AlertDialog><AlertDialogTrigger asChild><Button type="button" variant="destructive" size="icon" title="Delete item" aria-label={`Delete ${item.name}`}><Trash2 size={16} /></Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete {item.name}?</AlertDialogTitle><AlertDialogDescription>This permanently removes the menu item. Existing order records remain unchanged.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void removeItem(item)}>Delete item</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div></td>
+                    <td><div className="row-actions"><ItemFormDialog restaurantId={restaurantId} category={category} item={item} onSaved={onMenuChanged} /><AlertDialog><AlertDialogTrigger asChild><Button type="button" variant="destructive" size="icon" title="Delete item" aria-label={`Delete ${item.name}`}><Trash2 size={16} /></Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete {item.name}?</AlertDialogTitle><AlertDialogDescription>This permanently removes the menu item. Existing order records remain unchanged.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void removeItem(item)}>Delete item</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div></td>
                   </tr>
                 ))}
-                {filteredItems.length === 0 && <tr><td colSpan={7} className="empty-cell">{search.trim() ? 'No menu items match this search.' : 'This category has no menu items yet.'}</td></tr>}
+                {filteredItems.length === 0 && <tr><td colSpan={7} className="empty-cell">{hasItemFilters ? 'No menu items match the current filters.' : 'This category has no menu items yet.'}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -1796,8 +2114,8 @@ function CategoryMenuSection({
               const imageUrl = resolvePublicAssetUrl(item.imageUrl)
               const optionGroupCount = item.optionGroups.length
               const optionCount = item.optionGroups.reduce((total, group) => total + group.options.length, 0)
-              const reorderTitle = search.trim()
-                ? 'Clear search to reorder menu items.'
+              const reorderTitle = hasItemFilters
+                ? 'Clear filters to reorder menu items.'
                 : orderedItems.length < 2
                   ? 'Add more items to reorder this category.'
                   : 'Drag to reorder items.'
@@ -1839,7 +2157,7 @@ function CategoryMenuSection({
                       <span title={item.description || undefined}>{item.description || 'No description'}</span>
                     </div>
                     <Badge variant={item.isAvailable && !item.isSoldOut ? 'secondary' : item.isSoldOut ? 'destructive' : 'outline'}>
-                      {item.isSoldOut ? 'Sold out' : item.isAvailable ? 'Live' : 'Hidden'}
+                      {menuItemStatusLabel(item)}
                     </Badge>
                   </header>
 
@@ -1863,19 +2181,26 @@ function CategoryMenuSection({
                       <Utensils size={15} />
                       <div>
                         <span>Available</span>
-                        <Switch checked={item.isAvailable} onCheckedChange={(value) => void toggleAvailability(item, value)} aria-label={`${item.name} availability`} />
+                        <Switch checked={item.isAvailable} disabled={pendingItemIds.has(item.id)} onCheckedChange={(value) => void toggleAvailability(item, value)} aria-label={`${item.name} availability`} />
                       </div>
                     </div>
                     <div className="restaurant-mobile-meta">
                       <Archive size={15} />
                       <div>
                         <span>Sold out</span>
-                        <Switch checked={item.isSoldOut} onCheckedChange={(value) => void toggleSoldOut(item, value)} aria-label={`${item.name} sold out status`} />
+                        <Switch checked={item.isSoldOut} disabled={pendingItemIds.has(item.id)} onCheckedChange={(value) => void toggleSoldOut(item, value)} aria-label={`${item.name} sold out status`} />
+                      </div>
+                    </div>
+                    <div className="restaurant-mobile-meta">
+                      <Star size={15} />
+                      <div>
+                        <span>Watched{item.stockQuantity !== null ? ` · ${item.stockQuantity} left` : ''}</span>
+                        <Switch checked={item.isWatched} disabled={pendingItemIds.has(item.id)} onCheckedChange={() => void toggleWatch(item)} aria-label={`${item.name} watch status`} />
                       </div>
                     </div>
                   </div>
 
-                  <MenuItemOptionSummary item={item} money={money} onChanged={() => loadItems()} />
+                  <MenuItemOptionSummary item={item} money={money} onChanged={onMenuChanged} />
 
                   <div className="restaurant-mobile-actions menu-item-mobile-actions">
                     <div className="menu-order-controls">
@@ -1896,7 +2221,7 @@ function CategoryMenuSection({
                           size="icon"
                           disabled={isReorderDisabled || orderedItems[0]?.id === item.id}
                           onClick={() => void handleStepMove(item.id, 'up')}
-                          title={search.trim() ? 'Clear search to move menu items.' : 'Move item up'}
+                          title={hasItemFilters ? 'Clear filters to move menu items.' : 'Move item up'}
                           aria-label={`Move ${item.name} up`}
                         >
                           <ArrowUp size={15} />
@@ -1907,7 +2232,7 @@ function CategoryMenuSection({
                           size="icon"
                           disabled={isReorderDisabled || orderedItems[orderedItems.length - 1]?.id === item.id}
                           onClick={() => void handleStepMove(item.id, 'down')}
-                          title={search.trim() ? 'Clear search to move menu items.' : 'Move item down'}
+                          title={hasItemFilters ? 'Clear filters to move menu items.' : 'Move item down'}
                           aria-label={`Move ${item.name} down`}
                         >
                           <ArrowDown size={15} />
@@ -1915,7 +2240,18 @@ function CategoryMenuSection({
                       </div>
                     </div>
                     <div className="row-actions">
-                      <ItemFormDialog restaurantId={restaurantId} category={category} item={item} onSaved={() => loadItems()} />
+                      <Button
+                        type="button"
+                        variant={selectedItemIds.has(item.id) ? 'default' : 'outline'}
+                        size="icon"
+                        aria-pressed={selectedItemIds.has(item.id)}
+                        aria-label={selectedItemIds.has(item.id) ? `Deselect ${item.name}` : `Select ${item.name}`}
+                        title={selectedItemIds.has(item.id) ? 'Deselect item' : 'Select item for bulk actions'}
+                        onClick={() => onToggleSelected(item.id)}
+                      >
+                        <Check size={15} />
+                      </Button>
+                      <ItemFormDialog restaurantId={restaurantId} category={category} item={item} onSaved={onMenuChanged} />
                       <AlertDialog>
                         <AlertDialogTrigger asChild>
                           <Button type="button" variant="destructive" size="icon" title="Delete item" aria-label={`Delete ${item.name}`}>
@@ -1940,7 +2276,7 @@ function CategoryMenuSection({
             })}
             {filteredItems.length === 0 && (
               <div className="restaurant-mobile-empty">
-                {search.trim() ? 'No menu items match this search.' : 'This category has no menu items yet.'}
+                {hasItemFilters ? 'No menu items match the current filters.' : 'This category has no menu items yet.'}
               </div>
             )}
           </div>
@@ -1951,80 +2287,320 @@ function CategoryMenuSection({
   )
 }
 
+function MenuPreviewDialog({
+  restaurant,
+  categories,
+  items,
+}: {
+  restaurant?: Restaurant
+  categories: MenuCategory[]
+  items: MenuItem[]
+}) {
+  const visibleCategories = sortMenuCategories(categories)
+    .filter((category) => category.isActive)
+    .map((category) => ({
+      category,
+      items: sortMenuItems(items.filter(
+        (item) => item.categoryId === category.id && item.isAvailable,
+      )),
+    }))
+    .filter((entry) => entry.items.length > 0)
+  const money = new Intl.NumberFormat('en-AU', {
+    style: 'currency',
+    currency: restaurant?.currency ?? 'AUD',
+  })
+
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <Button type="button" variant="outline" disabled={!restaurant}>
+          <Eye size={17} />
+          Customer preview
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="menu-preview-dialog">
+        <DialogHeader>
+          <DialogTitle>{restaurant?.name ?? 'Restaurant'} customer menu</DialogTitle>
+          <DialogDescription>
+            Active categories and visible items are shown below. Sold-out items remain visible.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="menu-preview-content">
+          {visibleCategories.map(({ category, items: categoryItems }) => (
+            <section key={category.id} className="menu-preview-category">
+              <div>
+                <h3>{category.name}</h3>
+                {category.description && <p>{category.description}</p>}
+              </div>
+              <div className="menu-preview-items">
+                {categoryItems.map((item) => (
+                  <article key={item.id} className="menu-preview-item">
+                    {resolvePublicAssetUrl(item.imageUrl) ? (
+                      <img src={resolvePublicAssetUrl(item.imageUrl) ?? undefined} alt="" />
+                    ) : (
+                      <span className="menu-preview-placeholder"><ImageIcon size={20} /></span>
+                    )}
+                    <div>
+                      <strong>{item.name}</strong>
+                      <p>{item.description || 'No description'}</p>
+                      <span>{money.format(item.price)}</span>
+                    </div>
+                    {item.isSoldOut && <Badge variant="destructive">Sold out</Badge>}
+                  </article>
+                ))}
+              </div>
+            </section>
+          ))}
+          {visibleCategories.length === 0 && (
+            <div className="menu-empty-state">
+              <Layers3 size={26} />
+              <strong>Nothing is visible to customers yet</strong>
+              <span>Activate a category and make at least one item available.</span>
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+const itemStatusLabels: Record<MenuItemStatusFilter, string> = {
+  all: 'All item states',
+  live: 'Live',
+  hidden: 'Hidden',
+  'sold-out': 'Sold out',
+  'low-stock': 'Low stock',
+  watched: 'Watched',
+}
+
+const validItemStatusFilters = new Set<MenuItemStatusFilter>(Object.keys(itemStatusLabels) as MenuItemStatusFilter[])
+
 export function AdminMenuPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const initialCategoryStatus = searchParams.get('categoryStatus')
+  const initialItemStatus = searchParams.get('itemStatus') as MenuItemStatusFilter | null
   const [restaurants, setRestaurants] = useState<Restaurant[]>([])
-  const [restaurantId, setRestaurantId] = useState('')
+  const [restaurantId, setRestaurantId] = useState(searchParams.get('restaurant') ?? '')
   const [categories, setCategories] = useState<MenuCategory[]>([])
-  const [loading, setLoading] = useState(true)
-  const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState<CategoryStatusFilter>('all')
+  const [items, setItems] = useState<MenuItem[]>([])
+  const [restaurantsLoading, setRestaurantsLoading] = useState(true)
+  const [menuLoading, setMenuLoading] = useState(false)
+  const [restaurantsError, setRestaurantsError] = useState<string | null>(null)
+  const [categoriesError, setCategoriesError] = useState<string | null>(null)
+  const [itemsError, setItemsError] = useState<string | null>(null)
+  const [search, setSearch] = useState(searchParams.get('q') ?? '')
+  const [statusFilter, setStatusFilter] = useState<CategoryStatusFilter>(
+    initialCategoryStatus === 'active' || initialCategoryStatus === 'inactive'
+      ? initialCategoryStatus
+      : 'all',
+  )
+  const [itemStatusFilter, setItemStatusFilter] = useState<MenuItemStatusFilter>(
+    initialItemStatus && validItemStatusFilters.has(initialItemStatus) ? initialItemStatus : 'all',
+  )
+  const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(() => new Set())
+  const [bulkUpdating, setBulkUpdating] = useState(false)
   const [draggedCategoryId, setDraggedCategoryId] = useState<string | null>(null)
   const [dropTargetCategoryId, setDropTargetCategoryId] = useState<string | null>(null)
   const [reorderingCategories, setReorderingCategories] = useState(false)
+  const [menuRevision, setMenuRevision] = useState(0)
 
-  const selectedRestaurantId = restaurantId || restaurants[0]?.id || ''
-  const selectedRestaurant = restaurants.find((restaurant) => restaurant.id === selectedRestaurantId)
+  const selectedRestaurant = restaurants.find((restaurant) => restaurant.id === restaurantId)
 
-  const loadCategories = async (showToast = false) => {
-    if (!selectedRestaurantId) return
-    setLoading(true)
+  useEffect(() => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+      const update = (key: string, value: string, defaultValue = '') => {
+        if (!value || value === defaultValue) next.delete(key)
+        else next.set(key, value)
+      }
+      update('restaurant', restaurantId)
+      update('q', search.trim())
+      update('categoryStatus', statusFilter, 'all')
+      update('itemStatus', itemStatusFilter, 'all')
+      return next
+    }, { replace: true })
+  }, [itemStatusFilter, restaurantId, search, setSearchParams, statusFilter])
+
+  const loadRestaurants = async () => {
+    setRestaurantsLoading(true)
+    setRestaurantsError(null)
     try {
-      setCategories(await getAdminMenuCategories(selectedRestaurantId))
-      if (showToast) toast.success('Menu categories refreshed')
+      const result = await getRestaurants()
+      setRestaurants(result)
+      setRestaurantId((current) => result.some((restaurant) => restaurant.id === current)
+        ? current
+        : result[0]?.id ?? '')
     } catch (error) {
-      toast.error('Could not load menu categories', { description: error instanceof Error ? error.message : 'The request failed.' })
+      const message = error instanceof Error ? error.message : 'The request failed.'
+      setRestaurantsError(message)
+      toast.error('Could not load restaurants', { description: message })
     } finally {
-      setLoading(false)
+      setRestaurantsLoading(false)
     }
   }
 
   useEffect(() => {
-    getRestaurants()
-      .then((items) => setRestaurants(items))
-      .catch((error) => toast.error('Could not load restaurants', { description: error instanceof Error ? error.message : 'The request failed.' }))
-  }, [])
-
-  useEffect(() => {
     let active = true
-
-    if (!selectedRestaurantId) {
-      return () => { active = false }
-    }
-
-    getAdminMenuCategories(selectedRestaurantId)
-      .then((items) => {
-        if (active) setCategories(items)
+    getRestaurants()
+      .then((result) => {
+        if (!active) return
+        setRestaurants(result)
+        setMenuLoading(result.length > 0)
+        setRestaurantId((current) => result.some((restaurant) => restaurant.id === current)
+          ? current
+          : result[0]?.id ?? '')
       })
       .catch((error) => {
         if (!active) return
-        toast.error('Could not load menu categories', {
-          description: error instanceof Error ? error.message : 'The request failed.',
-        })
+        const message = error instanceof Error ? error.message : 'The request failed.'
+        setRestaurantsError(message)
+        toast.error('Could not load restaurants', { description: message })
       })
       .finally(() => {
-        if (active) setLoading(false)
+        if (active) setRestaurantsLoading(false)
       })
-
     return () => { active = false }
-  }, [selectedRestaurantId])
+  }, [])
+
+  const loadMenu = async (showToast = false) => {
+    if (!restaurantId) return
+    setMenuLoading(true)
+    setCategoriesError(null)
+    setItemsError(null)
+
+    const [categoryResult, itemResult] = await Promise.allSettled([
+      getAdminMenuCategories(restaurantId),
+      getAdminMenuItems(restaurantId),
+    ])
+
+    if (categoryResult.status === 'fulfilled') {
+      setCategories(categoryResult.value)
+    } else {
+      const message = categoryResult.reason instanceof Error ? categoryResult.reason.message : 'The request failed.'
+      setCategoriesError(message)
+      toast.error('Could not load menu categories', { description: message })
+    }
+
+    if (itemResult.status === 'fulfilled') {
+      setItems(itemResult.value)
+      const existingIds = new Set(itemResult.value.map((item) => item.id))
+      setSelectedItemIds((current) => new Set([...current].filter((itemId) => existingIds.has(itemId))))
+      setMenuRevision((current) => current + 1)
+    } else {
+      const message = itemResult.reason instanceof Error ? itemResult.reason.message : 'The request failed.'
+      setItemsError(message)
+      toast.error('Could not load menu items', { description: message })
+    }
+
+    if (showToast && categoryResult.status === 'fulfilled' && itemResult.status === 'fulfilled') {
+      toast.success('Full menu refreshed')
+    }
+    setMenuLoading(false)
+  }
+
+  useEffect(() => {
+    if (!restaurantId) return
+    let active = true
+    Promise.allSettled([
+      getAdminMenuCategories(restaurantId),
+      getAdminMenuItems(restaurantId),
+    ]).then(([categoryResult, itemResult]) => {
+      if (!active) return
+      if (categoryResult.status === 'fulfilled') {
+        setCategories(categoryResult.value)
+        setCategoriesError(null)
+      } else {
+        const message = categoryResult.reason instanceof Error ? categoryResult.reason.message : 'The request failed.'
+        setCategoriesError(message)
+        toast.error('Could not load menu categories', { description: message })
+      }
+
+      if (itemResult.status === 'fulfilled') {
+        setItems(itemResult.value)
+        setItemsError(null)
+        setMenuRevision((current) => current + 1)
+      } else {
+        const message = itemResult.reason instanceof Error ? itemResult.reason.message : 'The request failed.'
+        setItemsError(message)
+        toast.error('Could not load menu items', { description: message })
+      }
+    }).finally(() => {
+      if (active) setMenuLoading(false)
+    })
+    return () => { active = false }
+  }, [restaurantId])
 
   const orderedCategories = useMemo(() => sortMenuCategories(categories), [categories])
+  const metrics = useMemo(() => getMenuMetrics(categories, items), [categories, items])
 
   const filteredCategories = useMemo(() => {
     const term = search.trim().toLowerCase()
-    return orderedCategories
-      .filter((category) => !term || [category.name, category.description ?? ''].some((value) => value.toLowerCase().includes(term)))
-      .filter((category) => statusFilter === 'all' || (statusFilter === 'active' ? category.isActive : !category.isActive))
-  }, [orderedCategories, search, statusFilter])
+    return orderedCategories.filter((category) => {
+      const categoryStatusMatches = statusFilter === 'all' ||
+        (statusFilter === 'active' ? category.isActive : !category.isActive)
+      if (!categoryStatusMatches) return false
 
-  const hasFilters = search.trim() !== '' || statusFilter !== 'all'
-  const selectedStatusFilterLabel = statusFilter === 'active' ? 'Active' : statusFilter === 'inactive' ? 'Inactive' : ''
-  const activeDropdownFilterCount = statusFilter !== 'all' ? 1 : 0
-  const isCategoryReorderDisabled = loading || reorderingCategories || hasFilters || orderedCategories.length < 2
+      const categoryItems = items.filter((item) => item.categoryId === category.id)
+      const categoryTextMatches = !term ||
+        [category.name, category.description ?? ''].some((value) => value.toLowerCase().includes(term))
+      const itemTextMatches = !term || categoryItems.some((item) => menuItemMatchesSearch(item, term))
+      const itemStateMatches = itemStatusFilter === 'all' ||
+        categoryItems.some((item) => menuItemMatchesStatus(item, itemStatusFilter))
+
+      return (categoryTextMatches || itemTextMatches) && itemStateMatches
+    })
+  }, [itemStatusFilter, items, orderedCategories, search, statusFilter])
+
+  const visibleItemIds = useMemo(() => {
+    const filteredCategoryIds = new Set(filteredCategories.map((category) => category.id))
+    return items
+      .filter((item) => filteredCategoryIds.has(item.categoryId))
+      .filter((item) => menuItemMatchesSearch(item, search))
+      .filter((item) => menuItemMatchesStatus(item, itemStatusFilter))
+      .map((item) => item.id)
+  }, [filteredCategories, itemStatusFilter, items, search])
+
+  const hasFilters = search.trim() !== '' || statusFilter !== 'all' || itemStatusFilter !== 'all'
+  const activeDropdownFilterCount = Number(statusFilter !== 'all') + Number(itemStatusFilter !== 'all')
+  const isCategoryReorderDisabled = menuLoading || reorderingCategories || hasFilters || orderedCategories.length < 2
 
   const resetFilters = () => {
     setSearch('')
     setStatusFilter('all')
+    setItemStatusFilter('all')
+  }
+
+  const toggleSelectedItem = (itemId: string) => {
+    setSelectedItemIds((current) => {
+      const next = new Set(current)
+      if (next.has(itemId)) next.delete(itemId)
+      else next.add(itemId)
+      return next
+    })
+  }
+
+  const applyBulkState = async (isAvailable: boolean, isSoldOut: boolean) => {
+    if (!restaurantId || selectedItemIds.size === 0 || bulkUpdating) return
+    setBulkUpdating(true)
+    try {
+      const response = await updateMenuItemsState({
+        restaurantId,
+        itemIds: [...selectedItemIds],
+        isAvailable,
+        isSoldOut,
+      })
+      setItems((current) => current.map((item) =>
+        selectedItemIds.has(item.id) ? { ...item, isAvailable, isSoldOut } : item))
+      setMenuRevision((current) => current + 1)
+      setSelectedItemIds(new Set())
+      toast.success(response.message)
+    } catch (error) {
+      toast.error('Could not update selected menu items', {
+        description: error instanceof Error ? error.message : 'The request failed.',
+      })
+    } finally {
+      setBulkUpdating(false)
+    }
   }
 
   const resetCategoryDragState = () => {
@@ -2032,15 +2608,17 @@ export function AdminMenuPage() {
     setDropTargetCategoryId(null)
   }
 
-  const handleCategoryDrop = async (targetCategoryId: string) => {
-    if (!draggedCategoryId || draggedCategoryId === targetCategoryId || isCategoryReorderDisabled) {
+  const handleCategoryDrop = async (
+    targetCategoryId: string,
+    sourceCategoryId = draggedCategoryId,
+  ) => {
+    if (!sourceCategoryId || sourceCategoryId === targetCategoryId || isCategoryReorderDisabled) {
       resetCategoryDragState()
       return
     }
 
     const previousCategories = categories
-    const reorderedCategories = moveMenuCategory(orderedCategories, draggedCategoryId, targetCategoryId)
-
+    const reorderedCategories = moveMenuCategory(orderedCategories, sourceCategoryId, targetCategoryId)
     if (reorderedCategories === orderedCategories) {
       resetCategoryDragState()
       return
@@ -2049,13 +2627,12 @@ export function AdminMenuPage() {
     setCategories(reorderedCategories)
     setReorderingCategories(true)
     resetCategoryDragState()
-
     try {
       const response = await reorderMenuCategories({
-        restaurantId: selectedRestaurantId,
+        restaurantId,
         categoryIds: reorderedCategories.map((category) => category.id),
       })
-      toast.success('Category order updated', { description: response.message })
+      toast.success(response.message)
     } catch (error) {
       setCategories(previousCategories)
       toast.error('Could not reorder categories', {
@@ -2066,30 +2643,68 @@ export function AdminMenuPage() {
     }
   }
 
+  const moveCategoryStep = async (categoryId: string, direction: 'up' | 'down') => {
+    if (isCategoryReorderDisabled) return
+    const currentIndex = orderedCategories.findIndex((category) => category.id === categoryId)
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= orderedCategories.length) return
+    await handleCategoryDrop(orderedCategories[targetIndex].id, categoryId)
+  }
+
+  const renderItemStatusSelect = (label: string) => (
+    <Select value={itemStatusFilter} onValueChange={(value) => setItemStatusFilter(value as MenuItemStatusFilter)}>
+      <SelectTrigger aria-label={label}><SelectValue /></SelectTrigger>
+      <SelectContent position="popper">
+        {Object.entries(itemStatusLabels).map(([value, text]) => (
+          <SelectItem key={value} value={value}>{text}</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+
   return (
     <main className="content-grid">
       <Card id="menu-categories">
         <CardHeader className="section-header">
-          <div className="admin-page-title"><Utensils size={22} /><div><CardTitle>Menu Management</CardTitle><CardDescription>Manage restaurant categories, menu items, visibility, and sold-out state.</CardDescription></div></div>
+          <div className="admin-page-title">
+            <Utensils size={22} />
+            <div>
+              <h1 className="menu-page-title">Menu Management</h1>
+              <CardDescription>Manage categories, items, customer visibility, options, and service state.</CardDescription>
+            </div>
+          </div>
           <div className="section-actions">
-            {selectedRestaurantId && <CategoryFormDialog restaurantId={selectedRestaurantId} onSaved={() => loadCategories()} />}
-            <Button type="button" variant="secondary" onClick={() => void loadCategories(true)} disabled={!selectedRestaurantId || loading}><RefreshCw size={18} />Refresh</Button>
+            <MenuPreviewDialog restaurant={selectedRestaurant} categories={categories} items={items} />
+            {restaurantId && <CategoryFormDialog restaurantId={restaurantId} onSaved={loadMenu} />}
+            <Button type="button" variant="secondary" onClick={() => void loadMenu(true)} disabled={!restaurantId || menuLoading}>
+              <RefreshCw size={18} />
+              Refresh menu
+            </Button>
           </div>
         </CardHeader>
         <CardContent className="menu-management-content">
+          {restaurantsError && (
+            <div className="menu-inline-error" role="alert">
+              <AlertCircle size={18} />
+              <span>Restaurants could not be loaded: {restaurantsError}</span>
+              <Button type="button" variant="outline" size="sm" onClick={() => void loadRestaurants()}>Retry</Button>
+            </div>
+          )}
+
           <div className="menu-directory-tools restaurant-filter-tools">
             <div className="menu-directory-restaurant-row restaurant-table-selector-row">
               <Select
-                value={selectedRestaurantId}
+                value={restaurantId}
                 onValueChange={(value) => {
                   setRestaurantId(value)
                   setCategories([])
-                  setLoading(true)
+                  setItems([])
+                  setSelectedItemIds(new Set())
                   resetFilters()
                 }}
-                disabled={restaurants.length === 0}
+                disabled={restaurantsLoading || restaurants.length === 0}
               >
-                <SelectTrigger><SelectValue placeholder="Select restaurant" /></SelectTrigger>
+                <SelectTrigger aria-label="Restaurant"><SelectValue placeholder="Select restaurant" /></SelectTrigger>
                 <SelectContent position="popper">
                   {restaurants.map((restaurant) => <SelectItem key={restaurant.id} value={restaurant.id}>{restaurant.name}</SelectItem>)}
                 </SelectContent>
@@ -2100,24 +2715,21 @@ export function AdminMenuPage() {
               <div className="restaurant-filter-search-row menu-directory-search-row">
                 <div className="directory-search">
                   <Search size={16} />
-                  <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filter categories" />
+                  <Input
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                    placeholder="Search categories, items, allergens, or options"
+                    aria-label="Search the full menu"
+                  />
                 </div>
                 <Popover>
                   <PopoverTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      className="restaurant-filter-trigger"
-                      aria-label="Filter menu categories"
-                    >
+                    <Button type="button" variant="outline" size="icon" className="restaurant-filter-trigger" aria-label="Filter menu">
                       <SlidersHorizontal size={16} />
-                      {activeDropdownFilterCount > 0 && (
-                        <span className="restaurant-filter-count">{activeDropdownFilterCount}</span>
-                      )}
+                      {activeDropdownFilterCount > 0 && <span className="restaurant-filter-count">{activeDropdownFilterCount}</span>}
                     </Button>
                   </PopoverTrigger>
-                  <PopoverContent className="restaurant-filter-popover menu-filter-popover" align="end">
+                  <PopoverContent className="restaurant-filter-popover menu-filter-popover" align="end" aria-label="Menu filters">
                     <div className="restaurant-filter-popover-header">
                       <strong>Filters</strong>
                       <Button type="button" variant="ghost" size="xs" onClick={resetFilters} disabled={!hasFilters}>
@@ -2127,15 +2739,19 @@ export function AdminMenuPage() {
                     </div>
                     <div className="restaurant-filter-fields">
                       <div className="restaurant-filter-field">
-                        <span>Status</span>
+                        <span>Category status</span>
                         <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as CategoryStatusFilter)}>
-                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectTrigger aria-label="Category status"><SelectValue /></SelectTrigger>
                           <SelectContent position="popper">
-                            <SelectItem value="all">All statuses</SelectItem>
+                            <SelectItem value="all">All category states</SelectItem>
                             <SelectItem value="active">Active</SelectItem>
                             <SelectItem value="inactive">Inactive</SelectItem>
                           </SelectContent>
                         </Select>
+                      </div>
+                      <div className="restaurant-filter-field">
+                        <span>Item status</span>
+                        {renderItemStatusSelect('Item status')}
                       </div>
                     </div>
                   </PopoverContent>
@@ -2144,13 +2760,14 @@ export function AdminMenuPage() {
 
               <div className="restaurant-inline-filters menu-directory-inline-filters">
                 <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as CategoryStatusFilter)}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectTrigger aria-label="Category status"><SelectValue /></SelectTrigger>
                   <SelectContent position="popper">
-                    <SelectItem value="all">All statuses</SelectItem>
+                    <SelectItem value="all">All category states</SelectItem>
                     <SelectItem value="active">Active</SelectItem>
                     <SelectItem value="inactive">Inactive</SelectItem>
                   </SelectContent>
                 </Select>
+                {renderItemStatusSelect('Item status')}
                 <Button type="button" variant="ghost" size="icon" disabled={!hasFilters} onClick={resetFilters} title="Clear filters" aria-label="Clear filters">
                   <X size={16} />
                 </Button>
@@ -2161,72 +2778,153 @@ export function AdminMenuPage() {
               <div className="restaurant-filter-chips menu-filter-chips" aria-label="Active menu filters">
                 {search.trim() && (
                   <button type="button" className="restaurant-filter-chip" onClick={() => setSearch('')} title={`Search: ${search.trim()}`}>
-                    <span>Search: {search.trim()}</span>
-                    <X size={13} />
+                    <span>Search: {search.trim()}</span><X size={13} />
                   </button>
                 )}
                 {statusFilter !== 'all' && (
-                  <button type="button" className="restaurant-filter-chip" onClick={() => setStatusFilter('all')} title={`Status: ${selectedStatusFilterLabel}`}>
-                    <span>Status: {selectedStatusFilterLabel}</span>
-                    <X size={13} />
+                  <button type="button" className="restaurant-filter-chip" onClick={() => setStatusFilter('all')}>
+                    <span>Category: {statusFilter === 'active' ? 'Active' : 'Inactive'}</span><X size={13} />
+                  </button>
+                )}
+                {itemStatusFilter !== 'all' && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => setItemStatusFilter('all')}>
+                    <span>Items: {itemStatusLabels[itemStatusFilter]}</span><X size={13} />
                   </button>
                 )}
                 <button type="button" className="restaurant-filter-chip restaurant-filter-chip-clear" onClick={resetFilters}>
-                  <X size={13} />
-                  <span>Clear all</span>
+                  <X size={13} /><span>Clear all</span>
                 </button>
               </div>
             )}
           </div>
+
           {selectedRestaurant && <p className="restaurant-table-scope">Managing menu for <strong>{selectedRestaurant.name}</strong></p>}
-          {loading ? (
-            <div className="restaurant-loading"><motion.span animate={{ rotate: 360 }} transition={{ duration: 0.9, repeat: Infinity, ease: 'linear' }}><RefreshCw size={18} /></motion.span>Loading menu categories...</div>
+
+          {restaurantId && (
+            <div className="menu-metrics" aria-label="Menu overview">
+              <div className="menu-metric"><span>Categories</span><strong>{metrics.categories}</strong></div>
+              <div className="menu-metric"><span>Items</span><strong>{metrics.items}</strong></div>
+              <button type="button" className="menu-metric" onClick={() => setItemStatusFilter('live')} aria-pressed={itemStatusFilter === 'live'}><span>Live</span><strong>{metrics.live}</strong></button>
+              <button type="button" className="menu-metric" onClick={() => setItemStatusFilter('hidden')} aria-pressed={itemStatusFilter === 'hidden'}><span>Hidden</span><strong>{metrics.hidden}</strong></button>
+              <button type="button" className="menu-metric" onClick={() => setItemStatusFilter('sold-out')} aria-pressed={itemStatusFilter === 'sold-out'}><span>Sold out</span><strong>{metrics.soldOut}</strong></button>
+              <button type="button" className="menu-metric" onClick={() => setItemStatusFilter('low-stock')} aria-pressed={itemStatusFilter === 'low-stock'}><span>Low stock</span><strong>{metrics.lowStock}</strong></button>
+            </div>
+          )}
+
+          {selectedItemIds.size > 0 && (
+            <div className="menu-bulk-toolbar" role="region" aria-label="Bulk item actions">
+              <strong>{selectedItemIds.size} selected</strong>
+              <span>Apply one operational state to all selected items.</span>
+              <div>
+                <Button type="button" size="sm" disabled={bulkUpdating} onClick={() => void applyBulkState(true, false)}>Set live</Button>
+                <Button type="button" variant="outline" size="sm" disabled={bulkUpdating} onClick={() => void applyBulkState(false, false)}>Hide</Button>
+                <Button type="button" variant="destructive" size="sm" disabled={bulkUpdating} onClick={() => void applyBulkState(true, true)}>Mark sold out</Button>
+                <Button type="button" variant="ghost" size="sm" disabled={bulkUpdating} onClick={() => setSelectedItemIds(new Set())}>Clear selection</Button>
+              </div>
+            </div>
+          )}
+
+          {!selectedItemIds.size && visibleItemIds.length > 1 && hasFilters && (
+            <div className="menu-select-results">
+              <span>{visibleItemIds.length} matching items</span>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setSelectedItemIds(new Set(visibleItemIds))}>
+                Select matching items
+              </Button>
+            </div>
+          )}
+
+          {(categoriesError || itemsError) && (
+            <div className="menu-inline-error" role="alert">
+              <AlertCircle size={18} />
+              <div>
+                <strong>Some menu data could not be loaded.</strong>
+                <span>{[categoriesError, itemsError].filter(Boolean).join(' ')}</span>
+              </div>
+              <Button type="button" variant="outline" size="sm" onClick={() => void loadMenu()}>Retry</Button>
+            </div>
+          )}
+
+          {restaurantsLoading || menuLoading && categories.length === 0 && items.length === 0 ? (
+            <div className="restaurant-loading">
+              <motion.span animate={{ rotate: 360 }} transition={{ duration: 0.9, repeat: Infinity, ease: 'linear' }}><RefreshCw size={18} /></motion.span>
+              Loading full menu...
+            </div>
+          ) : !restaurantId ? (
+            <div className="menu-empty-state">
+              <Layers3 size={26} />
+              <strong>No restaurants available</strong>
+              <span>Create or gain access to a restaurant before building a menu.</span>
+            </div>
           ) : (
             <div id="menu-items" className="menu-category-list">
-              {filteredCategories.map((category) => (
-                <div
-                  key={category.id}
-                  className={[
-                    'menu-category-shell',
-                    !isCategoryReorderDisabled ? 'is-draggable' : '',
-                    draggedCategoryId === category.id ? 'is-dragging' : '',
-                    dropTargetCategoryId === category.id ? 'is-drop-target' : '',
-                  ].filter(Boolean).join(' ')}
-                  draggable={!isCategoryReorderDisabled}
-                  onDragStart={() => setDraggedCategoryId(category.id)}
-                  onDragEnter={() => {
-                    if (!isCategoryReorderDisabled && draggedCategoryId && draggedCategoryId !== category.id) {
-                      setDropTargetCategoryId(category.id)
-                    }
-                  }}
-                  onDragOver={(event) => {
-                    if (!isCategoryReorderDisabled) {
+              {filteredCategories.map((category) => {
+                const categoryIndex = orderedCategories.findIndex((entry) => entry.id === category.id)
+                const categoryTextMatches = search.trim() !== '' &&
+                  [category.name, category.description ?? '']
+                    .some((value) => value.toLowerCase().includes(search.trim().toLowerCase()))
+                return (
+                  <div
+                    key={`${category.id}:${menuRevision}`}
+                    className={[
+                      'menu-category-shell',
+                      !isCategoryReorderDisabled ? 'is-draggable' : '',
+                      draggedCategoryId === category.id ? 'is-dragging' : '',
+                      dropTargetCategoryId === category.id ? 'is-drop-target' : '',
+                    ].filter(Boolean).join(' ')}
+                    draggable={!isCategoryReorderDisabled}
+                    onDragStart={() => setDraggedCategoryId(category.id)}
+                    onDragEnter={() => {
+                      if (!isCategoryReorderDisabled && draggedCategoryId && draggedCategoryId !== category.id) {
+                        setDropTargetCategoryId(category.id)
+                      }
+                    }}
+                    onDragOver={(event) => {
+                      if (!isCategoryReorderDisabled) event.preventDefault()
+                    }}
+                    onDrop={(event) => {
                       event.preventDefault()
-                    }
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault()
-                    void handleCategoryDrop(category.id)
-                  }}
-                  onDragEnd={resetCategoryDragState}
-                >
-                  <CategoryMenuSection
-                    restaurantId={selectedRestaurantId}
-                    category={category}
-                    currency={selectedRestaurant?.currency ?? 'AUD'}
-                    onCategoriesChanged={() => loadCategories()}
-                    categoryReorderDisabled={isCategoryReorderDisabled}
-                    categoryDragTitle={
-                      hasFilters
-                        ? 'Clear filters to reorder categories.'
-                        : orderedCategories.length < 2
-                          ? 'Add more categories to reorder them.'
-                          : 'Drag to reorder categories.'
-                    }
-                  />
+                      void handleCategoryDrop(category.id)
+                    }}
+                    onDragEnd={resetCategoryDragState}
+                  >
+                    <CategoryMenuSection
+                      restaurantId={restaurantId}
+                      category={category}
+                      currency={selectedRestaurant?.currency ?? 'AUD'}
+                      directoryItems={items.filter((item) => item.categoryId === category.id)}
+                      globalSearch={categoryTextMatches ? '' : search}
+                      itemStatusFilter={itemStatusFilter}
+                      loading={menuLoading}
+                      loadError={itemsError}
+                      forceOpen={search.trim() !== '' || itemStatusFilter !== 'all'}
+                      selectedItemIds={selectedItemIds}
+                      onToggleSelected={toggleSelectedItem}
+                      onItemPatched={(itemId, patch) => setItems((current) => current.map(
+                        (item) => item.id === itemId ? { ...item, ...patch } : item,
+                      ))}
+                      onMenuChanged={loadMenu}
+                      categoryReorderDisabled={isCategoryReorderDisabled}
+                      categoryDragTitle={
+                        hasFilters
+                          ? 'Clear filters to reorder categories.'
+                          : orderedCategories.length < 2
+                            ? 'Add more categories to reorder them.'
+                            : 'Drag to reorder categories.'
+                      }
+                      categoryIndex={categoryIndex}
+                      categoryCount={orderedCategories.length}
+                      onMoveCategory={moveCategoryStep}
+                    />
+                  </div>
+                )
+              })}
+              {filteredCategories.length === 0 && (
+                <div className="menu-empty-state">
+                  <Layers3 size={26} />
+                  <strong>{hasFilters ? 'No matching menu entries' : 'No menu categories yet'}</strong>
+                  <span>{hasFilters ? 'Clear or adjust the filters to see the full menu.' : 'Create the first category to begin building this restaurant menu.'}</span>
                 </div>
-              ))}
-              {filteredCategories.length === 0 && <div className="menu-empty-state"><Layers3 size={26} /><strong>{hasFilters ? 'No matching categories' : 'No menu categories yet'}</strong><span>{hasFilters ? 'Clear the filters to see the full menu.' : 'Create the first category to begin building this restaurant menu.'}</span></div>}
+              )}
             </div>
           )}
         </CardContent>

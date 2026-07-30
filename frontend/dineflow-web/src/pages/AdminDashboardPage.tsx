@@ -7,7 +7,6 @@ import {
   CreditCard,
   ExternalLink,
   LayoutDashboard,
-  Power,
   QrCode,
   RefreshCw,
   Store,
@@ -19,14 +18,15 @@ import { toast } from 'sonner'
 import {
   getAdminOrders,
   getAdminOrderSummary,
+  getCurrentRestaurantTradingStatus,
   getRestaurants,
   getRestaurantTables,
-  updateRestaurantOrderingStatus,
   type AdminOrder,
   type AdminOrderSummary,
   type AuthUser,
   type Restaurant,
   type RestaurantTable,
+  type RestaurantTradingStatus,
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { Badge } from '../components/ui/badge'
@@ -44,8 +44,18 @@ import {
   DialogTrigger,
 } from '../components/ui/dialog'
 import { buildTablePublicUrl, buildTakeawayPublicUrl } from '../lib/publicUrls'
+import {
+  OrderingPauseControl,
+  RestaurantOpeningHoursPanel,
+  RestaurantSpecialCalendarPanel,
+  RestaurantStatusBanner,
+} from '../components/restaurant/openingHours'
+import { DashboardCanvas } from '../components/dashboard/DashboardCanvas'
+import { WatchedMenuItemsWidget } from '../components/dashboard/WatchedMenuItemsWidget'
+import type { DashboardWidget } from '../components/dashboard/dashboardLayout'
 
-type DashboardRestaurant = Pick<Restaurant, 'id' | 'name' | 'isActive' | 'currency' | 'acceptingOrders'>
+/** The panels need the whole entity (schedule JSON + availability), not just the summary bits. */
+type DashboardRestaurant = Restaurant
 
 function formatMoney(amount: number, currencyCode?: string | null) {
   return new Intl.NumberFormat(undefined, {
@@ -63,23 +73,6 @@ function hasRole(user: AuthUser | null, role: string) {
   return Boolean(user?.roles.includes(role))
 }
 
-function getScopedRestaurantFromOrders(user: AuthUser | null, orders: AdminOrder[]): DashboardRestaurant | null {
-  const restaurantId = user?.restaurantId ?? orders.find((order) => order.restaurantId)?.restaurantId
-
-  if (!restaurantId) {
-    return null
-  }
-
-  const matchingOrder = orders.find((order) => order.restaurantId === restaurantId)
-
-  return {
-    id: restaurantId,
-    name: matchingOrder?.restaurantName || 'Assigned restaurant',
-    isActive: true,
-    currency: matchingOrder?.currency || 'AUD',
-    acceptingOrders: true,
-  }
-}
 
 function PublicMenuCard({
   restaurant,
@@ -282,9 +275,9 @@ export function AdminDashboardPage() {
     revenue: 0,
   })
   const [restaurants, setRestaurants] = useState<DashboardRestaurant[]>([])
+  const [tradingStatus, setTradingStatus] = useState<RestaurantTradingStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [orderingBusy, setOrderingBusy] = useState(false)
 
   const isPlatformOwner = hasRole(user, 'PlatformOwner')
   const isStaff = hasRole(user, 'Staff') && !hasRole(user, 'Admin') && !hasRole(user, 'RestaurantOwner') && !isPlatformOwner
@@ -305,9 +298,11 @@ export function AdminDashboardPage() {
       if (canLoadRestaurantDirectory) {
         const loadedRestaurants = await getRestaurants()
         setRestaurants(loadedRestaurants)
+        setTradingStatus(null)
       } else {
-        const scopedRestaurant = getScopedRestaurantFromOrders(user, loadedOrders.items)
-        setRestaurants(scopedRestaurant ? [scopedRestaurant] : [])
+        // Staff can't reach the admin restaurant API, so they get the read-only trading status.
+        setRestaurants([])
+        setTradingStatus(await getCurrentRestaurantTradingStatus().catch(() => null))
       }
 
       if (showToast) {
@@ -336,6 +331,9 @@ export function AdminDashboardPage() {
 
   const scopedCurrency = activeRestaurants[0]?.currency || orders[0]?.currency || 'AUD'
   const primaryRestaurant = activeRestaurants[0] ?? null
+  // Admin roles get availability off the full entity; staff get it from the read-only endpoint.
+  const dashboardAvailability = primaryRestaurant?.availability ?? tradingStatus?.availability ?? null
+  const dashboardRestaurantName = primaryRestaurant?.name ?? tradingStatus?.name
   const recentOrders = orders.slice(0, 5)
   const dashboardRoleLabel = isPlatformOwner
     ? 'Platform owner'
@@ -345,40 +343,104 @@ export function AdminDashboardPage() {
         ? 'Restaurant owner'
         : 'Admin workspace'
 
-  const toggleOrderingStatus = async () => {
-    if (!primaryRestaurant || orderingBusy) {
-      return
-    }
+  const updateRestaurantInState = useCallback((restaurant: Restaurant) => {
+    setRestaurants((current) =>
+      current.map((item) => (item.id === restaurant.id ? restaurant : item)),
+    )
+  }, [])
 
-    const nextAcceptingOrders = !primaryRestaurant.acceptingOrders
-    setOrderingBusy(true)
-
-    try {
-      const response = await updateRestaurantOrderingStatus(primaryRestaurant.id, nextAcceptingOrders)
-      setRestaurants((current) =>
-        current.map((restaurant) =>
-          restaurant.id === response.restaurant.id
-            ? {
-                ...restaurant,
-                acceptingOrders: response.restaurant.acceptingOrders,
-                isActive: response.restaurant.isActive,
-                currency: response.restaurant.currency,
-                name: response.restaurant.name,
-              }
-            : restaurant,
+  const canEditSchedule = canLoadRestaurantDirectory && restaurants.length > 0
+  const dashboardWidgets = useMemo<DashboardWidget[]>(() => {
+    // Registry order and the first allowed size together form the default layout: two 1x1 cards
+    // side by side, then the two schedule editors full width beneath them.
+    const registry: DashboardWidget[] = [
+      {
+        id: 'recent-orders',
+        title: isStaff ? 'Staff order panel' : 'Recent orders',
+        allowedSizes: [{ w: 1, h: 1 }, { w: 1, h: 2 }, { w: 2, h: 1 }],
+        render: () => (
+          <RecentOrdersWidget isStaff={isStaff} recentOrders={recentOrders} loading={loading} />
         ),
+      },
+      {
+        id: 'public-urls',
+        title: isPlatformOwner ? 'Public restaurant URLs' : 'Restaurant menu URL',
+        allowedSizes: [{ w: 1, h: 1 }, { w: 1, h: 2 }, { w: 2, h: 1 }],
+        render: () => (
+          <PublicUrlsWidget
+            isPlatformOwner={isPlatformOwner}
+            activeRestaurants={activeRestaurants}
+            canShowTableUrls={canLoadRestaurantDirectory}
+            loading={loading}
+          />
+        ),
+      },
+    ]
+
+    // The schedule editors and the menu watch list write through admin-only endpoints, so staff
+    // never see them.
+    if (canEditSchedule) {
+      registry.push(
+        {
+          id: 'watched-menu-items',
+          title: 'Watched menu items',
+          allowedSizes: [{ w: 2, h: 1 }, { w: 1, h: 1 }, { w: 1, h: 2 }],
+          render: () => (
+            <WatchedMenuItemsWidget
+              restaurantId={primaryRestaurant?.id ?? null}
+              currency={scopedCurrency}
+            />
+          ),
+        },
+        {
+          id: 'opening-hours',
+          title: 'Opening hours',
+          allowedSizes: [{ w: 2, h: 1 }, { w: 2, h: 2 }, { w: 1, h: 2 }],
+          render: () => (
+            <RestaurantOpeningHoursPanel
+              restaurants={restaurants}
+              restaurantsLoading={loading}
+              canSelectRestaurant={isPlatformOwner}
+              onSaved={() => loadDashboard()}
+              onRestaurantUpdated={updateRestaurantInState}
+            />
+          ),
+        },
+        {
+          id: 'special-calendar',
+          title: 'Special calendar',
+          allowedSizes: [{ w: 2, h: 1 }, { w: 2, h: 2 }, { w: 1, h: 2 }],
+          render: () => (
+            <RestaurantSpecialCalendarPanel
+              restaurants={restaurants}
+              restaurantsLoading={loading}
+              canSelectRestaurant={isPlatformOwner}
+              onSaved={() => loadDashboard()}
+              onRestaurantUpdated={updateRestaurantInState}
+            />
+          ),
+        },
       )
-      toast.success(nextAcceptingOrders ? 'Ordering resumed' : 'Ordering paused', {
-        description: response.message,
-      })
-    } catch (toggleError) {
-      toast.error('Could not update ordering status', {
-        description: toggleError instanceof Error ? toggleError.message : 'The request failed.',
-      })
-    } finally {
-      setOrderingBusy(false)
     }
-  }
+
+    return registry
+  }, [
+    activeRestaurants,
+    canEditSchedule,
+    canLoadRestaurantDirectory,
+    dashboardAvailability,
+    dashboardRestaurantName,
+    isPlatformOwner,
+    isStaff,
+    loadDashboard,
+    loading,
+    primaryRestaurant,
+    recentOrders,
+    restaurants,
+    scopedCurrency,
+    stats,
+    updateRestaurantInState,
+  ])
 
   return (
     <main className="content-grid dashboard-page">
@@ -402,22 +464,6 @@ export function AdminDashboardPage() {
               </div>
             </div>
             <div className="dashboard-hero-actions">
-              {primaryRestaurant && canLoadRestaurantDirectory ? (
-                <Button
-                  type="button"
-                  variant={primaryRestaurant.acceptingOrders ? 'outline' : 'secondary'}
-                  className="dashboard-ordering-toggle"
-                  onClick={() => void toggleOrderingStatus()}
-                  disabled={orderingBusy || loading}
-                >
-                  <Power size={18} />
-                  {orderingBusy
-                    ? 'Updating'
-                    : primaryRestaurant.acceptingOrders
-                      ? 'Pause orders'
-                      : 'Resume orders'}
-                </Button>
-              ) : null}
               <Button
                 type="button"
                 variant="secondary"
@@ -431,8 +477,26 @@ export function AdminDashboardPage() {
             </div>
           </div>
         </CardHeader>
+        {/*
+          * Trading status and metrics stay pinned here rather than becoming draggable widgets:
+          * they answer "are we open" and "how busy are we", which should never be reordered away
+          * from the top or accidentally hidden.
+          */}
         <CardContent className="dashboard-stack dashboard-hero-content">
           {error && <p className="form-error">{error}</p>}
+
+          <RestaurantStatusBanner
+            availability={dashboardAvailability}
+            name={isPlatformOwner ? dashboardRestaurantName : undefined}
+          />
+
+          {primaryRestaurant && canLoadRestaurantDirectory ? (
+            <OrderingPauseControl
+              restaurant={primaryRestaurant}
+              onRestaurantUpdated={updateRestaurantInState}
+            />
+          ) : null}
+
           <div className="dashboard-metrics-grid">
             <MetricCard label="Orders" value={stats.total} detail="Visible to this role" tone="orders" />
             <MetricCard label="Kitchen active" value={stats.activeKitchen} detail="Pending through ready" tone="kitchen" />
@@ -442,8 +506,29 @@ export function AdminDashboardPage() {
         </CardContent>
       </Card>
 
-      <div className="dashboard-two-column">
-        <Card id="dashboard-access" className="dashboard-panel-card">
+      <DashboardCanvas
+        key={user?.id ?? 'anonymous'}
+        widgets={dashboardWidgets}
+        storageScope={user?.id ?? 'anonymous'}
+      />
+    </main>
+  )
+}
+
+/** Each widget below is registered in AdminDashboardPage and placed by DashboardCanvas. */
+function PublicUrlsWidget({
+  isPlatformOwner,
+  activeRestaurants,
+  canShowTableUrls,
+  loading,
+}: {
+  isPlatformOwner: boolean
+  activeRestaurants: DashboardRestaurant[]
+  canShowTableUrls: boolean
+  loading: boolean
+}) {
+  return (
+    <Card className="dashboard-panel-card">
           <CardHeader>
             <div className="admin-page-title">
               <Utensils size={22} />
@@ -463,7 +548,7 @@ export function AdminDashboardPage() {
                 <PublicMenuCard
                   key={restaurant.id}
                   restaurant={restaurant}
-                  canShowTableUrls={canLoadRestaurantDirectory}
+                  canShowTableUrls={canShowTableUrls}
                 />
               ))}
               {!loading && activeRestaurants.length === 0 && (
@@ -472,8 +557,20 @@ export function AdminDashboardPage() {
             </div>
           </CardContent>
         </Card>
+  )
+}
 
-        <Card id="dashboard-orders" className="dashboard-panel-card">
+function RecentOrdersWidget({
+  isStaff,
+  recentOrders,
+  loading,
+}: {
+  isStaff: boolean
+  recentOrders: AdminOrder[]
+  loading: boolean
+}) {
+  return (
+        <Card className="dashboard-panel-card">
           <CardHeader>
             <div className="admin-page-title">
               <ClipboardList size={22} />
@@ -531,7 +628,5 @@ export function AdminDashboardPage() {
             </div>
           </CardContent>
         </Card>
-      </div>
-    </main>
   )
 }

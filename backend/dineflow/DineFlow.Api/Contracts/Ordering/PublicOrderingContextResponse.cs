@@ -31,6 +31,8 @@ public sealed class PublicOrderingRestaurantResponse
 
     public required string PaymentPolicy { get; init; }
 
+    public bool OnlinePaymentsEnabled { get; init; }
+
     public bool AcceptingOrders { get; init; }
 
     public required string OpeningHoursJson { get; init; }

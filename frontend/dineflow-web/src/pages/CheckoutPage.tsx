@@ -17,6 +17,7 @@ export type CheckoutNavigationState = {
   restaurantName: string
   tableNumber: string | null
   paymentPolicy: 'PrepayRequired' | 'PayAtCounterAllowed'
+  onlinePaymentsEnabled: boolean
   returnPath?: string
 }
 
@@ -40,7 +41,16 @@ export function CheckoutPage() {
     return <Navigate to="/" replace />
   }
 
-  const { order, cartId, participantToken, currency, restaurantName, tableNumber, paymentPolicy } = routerState
+  const {
+    order,
+    cartId,
+    participantToken,
+    currency,
+    restaurantName,
+    tableNumber,
+    paymentPolicy,
+    onlinePaymentsEnabled,
+  } = routerState
   const returnPath = routerState.returnPath ?? (order.restaurantId ? `/r/${encodeURIComponent(order.restaurantId)}/menu` : '/')
   const isDineIn = order.orderType === 0
   const displayedTableNumber = order.tableNumber ?? tableNumber
@@ -204,7 +214,7 @@ export function CheckoutPage() {
         <Button
           type="button"
           className="h-12 w-full rounded-xl text-base"
-          disabled={isPaying}
+          disabled={isPaying || !onlinePaymentsEnabled}
           onClick={() => void handlePay()}
         >
           {isOnlinePaying ? (
@@ -212,7 +222,9 @@ export function CheckoutPage() {
           ) : (
             <CreditCard className="size-5" />
           )}
-          {isOnlinePaying
+          {!onlinePaymentsEnabled
+            ? 'Online payment unavailable'
+            : isOnlinePaying
             ? 'Redirecting to payment...'
             : `Pay ${currencyFormatter.format(order.totalAmount)}`}
         </Button>
@@ -240,7 +252,11 @@ export function CheckoutPage() {
         ) : null}
 
         <p className="text-center text-xs leading-5 text-muted-foreground">
-          {paymentPolicy === 'PrepayRequired'
+          {!onlinePaymentsEnabled
+            ? paymentPolicy === 'PayAtCounterAllowed'
+              ? 'Online payment is not configured yet. You can still place the order and pay at the counter.'
+              : 'This restaurant must finish Stripe setup before it can accept prepaid orders.'
+            : paymentPolicy === 'PrepayRequired'
             ? 'Online payment is required before the restaurant can process this order.'
             : 'Choose secure online payment or settle this order at the counter.'}
         </p>

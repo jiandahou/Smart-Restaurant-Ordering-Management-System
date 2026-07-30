@@ -7,6 +7,28 @@ using DineFlow.Infrastructure.Reporting;
 
 namespace DineFlow.Api.Services;
 
+public sealed record ReportActor(
+    string Type,
+    string DisplayName,
+    string? UserId = null,
+    string? Email = null,
+    string? Roles = null,
+    string Source = "DineFlow")
+{
+    public static ReportActor Automation(string displayName = "DineFlow automation") =>
+        new("Automation", displayName, Source: "DineFlow");
+
+    public static ReportActor Provider(string provider) =>
+        new("Provider", provider, Source: provider);
+
+    public static ReportActor User(
+        string userId,
+        string displayName,
+        string? email,
+        IEnumerable<string> roles) =>
+        new("User", displayName, userId, email, string.Join(",", roles), "DineFlow");
+}
+
 public sealed class ReportLogWriter
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -27,9 +49,11 @@ public sealed class ReportLogWriter
         Guid? restaurantId,
         string? summary,
         object? before = null,
-        object? after = null)
+        object? after = null,
+        ReportActor? actorOverride = null,
+        string? correlationId = null)
     {
-        var actor = GetActor();
+        var actor = GetActor(actorOverride);
         _dbContext.AuditLogs.Add(new AuditLog
         {
             Id = Guid.NewGuid(),
@@ -37,6 +61,9 @@ public sealed class ReportLogWriter
             ActorUserId = actor.UserId,
             ActorEmail = actor.Email,
             ActorRoles = actor.Roles,
+            ActorType = actor.Type,
+            Source = actor.Source,
+            CorrelationId = TrimNullable(correlationId, 120),
             Action = Trim(action, 120),
             EntityType = Trim(entityType, 80),
             EntityId = TrimNullable(entityId, 120),
@@ -53,9 +80,11 @@ public sealed class ReportLogWriter
         Order order,
         string eventType,
         string message,
-        object? data = null)
+        object? data = null,
+        ReportActor? actorOverride = null,
+        string? correlationId = null)
     {
-        var actor = GetActor();
+        var actor = GetActor(actorOverride);
         _dbContext.OrderEventLogs.Add(new OrderEventLog
         {
             Id = Guid.NewGuid(),
@@ -65,6 +94,9 @@ public sealed class ReportLogWriter
             ActorUserId = actor.UserId,
             ActorDisplayName = actor.DisplayName,
             ActorRoles = actor.Roles,
+            ActorType = actor.Type,
+            Source = actor.Source,
+            CorrelationId = TrimNullable(correlationId, 120),
             EventType = Trim(eventType, 120),
             Message = Trim(message, 700),
             DataJson = Serialize(data),
@@ -81,9 +113,18 @@ public sealed class ReportLogWriter
         string? status,
         string message,
         object? data = null,
-        string provider = PaymentProviders.Stripe)
+        string provider = PaymentProviders.Stripe,
+        ReportActor? actorOverride = null,
+        string? correlationId = null)
     {
-        var actor = GetActor();
+        var actor = GetActor(actorOverride);
+        if (actor.UserId is null &&
+            actorOverride is null &&
+            string.Equals(provider, PaymentProviders.Stripe, StringComparison.OrdinalIgnoreCase))
+        {
+            actor = GetActor(ReportActor.Provider(PaymentProviders.Stripe));
+        }
+
         _dbContext.PaymentEventLogs.Add(new PaymentEventLog
         {
             Id = Guid.NewGuid(),
@@ -101,12 +142,28 @@ public sealed class ReportLogWriter
             ActorUserId = actor.UserId,
             ActorDisplayName = actor.DisplayName,
             ActorRoles = actor.Roles,
+            ActorType = actor.Type,
+            Source = actor.Source,
+            CorrelationId = TrimNullable(correlationId, 120),
             CreatedAt = DateTime.UtcNow
         });
     }
 
-    private ActorContext GetActor()
+    private ActorContext GetActor(ReportActor? actorOverride = null)
     {
+        if (actorOverride is not null)
+        {
+            return new ActorContext(
+                actorOverride.UserId,
+                actorOverride.Email,
+                actorOverride.DisplayName,
+                actorOverride.Roles,
+                actorOverride.Type,
+                actorOverride.Source,
+                null,
+                null);
+        }
+
         var httpContext = _httpContextAccessor.HttpContext;
         var user = httpContext?.User;
         var roles = user?.Claims
@@ -116,13 +173,22 @@ public sealed class ReportLogWriter
             .OrderBy(role => role)
             .ToArray() ?? [];
 
+        var userId = user?.FindFirstValue(ClaimTypes.NameIdentifier);
+        var actorType = userId is null
+            ? "System"
+            : roles.Contains("Customer", StringComparer.OrdinalIgnoreCase)
+                ? "Customer"
+                : "User";
+
         return new ActorContext(
-            UserId: user?.FindFirstValue(ClaimTypes.NameIdentifier),
+            UserId: userId,
             Email: user?.FindFirstValue(ClaimTypes.Email),
             DisplayName: user?.FindFirstValue(ClaimTypes.Name)
                 ?? user?.FindFirstValue("name")
                 ?? user?.FindFirstValue(ClaimTypes.Email),
             Roles: roles.Length == 0 ? null : string.Join(",", roles),
+            Type: actorType,
+            Source: "DineFlow",
             IpAddress: TrimNullable(httpContext?.Connection.RemoteIpAddress?.ToString(), 64),
             UserAgent: TrimNullable(httpContext?.Request.Headers.UserAgent.ToString(), 512));
     }
@@ -152,6 +218,8 @@ public sealed class ReportLogWriter
         string? Email,
         string? DisplayName,
         string? Roles,
+        string Type,
+        string Source,
         string? IpAddress,
         string? UserAgent);
 }

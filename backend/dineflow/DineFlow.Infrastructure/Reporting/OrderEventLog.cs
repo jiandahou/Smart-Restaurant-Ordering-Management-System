@@ -16,6 +16,12 @@ public class OrderEventLog
 
     public string? ActorRoles { get; set; }
 
+    public string? ActorType { get; set; }
+
+    public string? Source { get; set; }
+
+    public string? CorrelationId { get; set; }
+
     public string EventType { get; set; } = string.Empty;
 
     public string Message { get; set; } = string.Empty;

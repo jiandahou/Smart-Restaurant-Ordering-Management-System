@@ -2276,13 +2276,21 @@ export async function printKitchenTicketWithWebUsb(ticket: KitchenTicket, settin
 }
 
 export function readStoredThermalPrinterSettings(): ThermalPrinterSettings {
+  return readStoredPrinterSettings('dineflow.thermalPrinterSettings')
+}
+
+export function readStoredFrontCounterPrinterSettings(): ThermalPrinterSettings {
+  return readStoredPrinterSettings('dineflow.frontCounterPrinterSettings')
+}
+
+function readStoredPrinterSettings(storageKey: string): ThermalPrinterSettings {
   if (typeof window === 'undefined') {
-    return defaultThermalPrinterSettings
+    return { ...defaultThermalPrinterSettings }
   }
 
   try {
-    const raw = window.localStorage.getItem('dineflow.thermalPrinterSettings')
-    if (!raw) return defaultThermalPrinterSettings
+    const raw = window.localStorage.getItem(storageKey)
+    if (!raw) return { ...defaultThermalPrinterSettings }
     const stored = JSON.parse(raw) as Partial<ThermalPrinterSettings>
 
     // Migration: settings saved before the QZ connection-type dropdown carry no
@@ -2297,12 +2305,19 @@ export function readStoredThermalPrinterSettings(): ThermalPrinterSettings {
 
     return normalizePrinterSettings({ ...defaultThermalPrinterSettings, ...stored })
   } catch {
-    return defaultThermalPrinterSettings
+    return { ...defaultThermalPrinterSettings }
   }
 }
 
 export function storeThermalPrinterSettings(settings: ThermalPrinterSettings): void {
   window.localStorage.setItem('dineflow.thermalPrinterSettings', JSON.stringify(normalizePrinterSettings(settings)))
+}
+
+export function storeFrontCounterPrinterSettings(settings: ThermalPrinterSettings): void {
+  window.localStorage.setItem(
+    'dineflow.frontCounterPrinterSettings',
+    JSON.stringify(normalizePrinterSettings({ ...settings, autoPrintNewOrders: false })),
+  )
 }
 
 function normalizePrinterSettings(settings: ThermalPrinterSettings): ThermalPrinterSettings {

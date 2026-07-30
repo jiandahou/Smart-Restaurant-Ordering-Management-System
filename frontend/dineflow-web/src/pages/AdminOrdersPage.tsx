@@ -1,4 +1,4 @@
-import { Fragment, type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
@@ -11,24 +11,32 @@ import {
   ClipboardList,
   CreditCard,
   History,
+  MoreHorizontal,
   RefreshCw,
   ReceiptText,
   Search,
   SlidersHorizontal,
   Undo2,
   UserRound,
+  Wifi,
+  WifiOff,
   X,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { useSearchParams } from 'react-router-dom'
 import {
+  getAdminOrderSummary,
   getAdminOrderStatusHistory,
   getAdminOrders,
+  getRestaurants,
   recordCounterPayment,
   refundAdminOrder,
   transitionAdminOrder,
   type AdminOrder,
+  type AdminOrderSummary,
   type AdminOrderStatusHistory,
   type OrderTransitionAction,
+  type Restaurant,
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { OrderStatusBadge, getOrderStatusLabel, orderStatusOptions } from '../components/orders/OrderStatusBadge'
@@ -38,6 +46,16 @@ import { OrderStatusHistoryList } from '../components/orders/OrderStatusHistoryL
 import { OrderTransitionReasonField } from '../components/orders/OrderTransitionReasonField'
 import { PaymentRefundHistory } from '../components/orders/PaymentRefundHistory'
 import { PaymentStatusBadge, getPaymentStatusLabel, paymentStatusOptions } from '../components/orders/PaymentStatusBadge'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '../components/ui/alert-dialog'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
@@ -59,16 +77,18 @@ import {
   SelectValue,
 } from '../components/ui/select'
 import { HorizontalTableScroll } from '../components/HorizontalTableScroll'
-import { getOrderStats } from '../lib/orderStats'
+import {
+  adminOrderPageSizes,
+  adminOrderSortKeys,
+  adminOrderTransitionNeedsConfirmation,
+  getAdminOrderArrayValue,
+  getAdminOrderPage,
+  getAdminOrderPageSize,
+  splitAdminOrderActions,
+  type AdminOrderSortKey,
+} from '../lib/adminOrderManagement'
 import { canRefundOrder } from '../lib/paymentRefunds'
-
-type SortKey =
-  | 'createdAt'
-  | 'orderNumber'
-  | 'restaurantName'
-  | 'status'
-  | 'paymentStatus'
-  | 'totalAmount'
+import { useRestaurantPrinting } from '../printing/RestaurantPrintingContext'
 
 const orderTypeLabels: Record<string, string> = {
   DineIn: 'Dine in',
@@ -77,6 +97,11 @@ const orderTypeLabels: Record<string, string> = {
 }
 
 const orderTypeOptions = ['DineIn', 'Takeaway', 'Scheduled']
+const orderFilterOptions = ['all', ...orderStatusOptions] as const
+const paymentFilterOptions = ['all', ...paymentStatusOptions] as const
+const orderTypeFilterOptions = ['all', ...orderTypeOptions] as const
+const searchDebounceMs = 300
+const realtimeRefreshDebounceMs = 250
 
 const transitionLabels: Record<OrderTransitionAction, string> = {
   Accept: 'Accept',
@@ -91,7 +116,7 @@ const transitionLabels: Record<OrderTransitionAction, string> = {
 const reasonRequiredActions = new Set<OrderTransitionAction>(['Reject', 'Cancel', 'Reopen'])
 
 function formatMoney(amount: number, currencyCode?: string | null) {
-  return new Intl.NumberFormat(undefined, {
+  return new Intl.NumberFormat(document.documentElement.lang || 'en-AU', {
     style: 'currency',
     currency: (currencyCode || 'AUD').toUpperCase(),
   }).format(amount)
@@ -99,7 +124,7 @@ function formatMoney(amount: number, currencyCode?: string | null) {
 
 function formatDate(value: string | null) {
   if (!value) return '—'
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(document.documentElement.lang || 'en-AU', {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(new Date(value))
@@ -166,13 +191,102 @@ function SortHeader({
   )
 }
 
+function OrderActionMenu({
+  actions,
+  busy,
+  order,
+  onAction,
+}: {
+  actions: OrderTransitionAction[]
+  busy: boolean
+  order: AdminOrder
+  onAction: (action: OrderTransitionAction) => void
+}) {
+  const [open, setOpen] = useState(false)
+
+  if (actions.length === 0) {
+    return null
+  }
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          aria-label={`More actions for ${order.orderNumber}`}
+        >
+          <MoreHorizontal size={15} />
+          More
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        className="admin-order-action-popover"
+        align="end"
+        aria-label={`More actions for ${order.orderNumber}`}
+      >
+        {actions.map((action) => (
+          <Button
+            key={action}
+            type="button"
+            variant={action === 'Reject' || action === 'Cancel' ? 'destructive' : 'ghost'}
+            size="sm"
+            aria-label={`${transitionLabels[action]} ${order.orderNumber}`}
+            onClick={() => {
+              setOpen(false)
+              onAction(action)
+            }}
+          >
+            {transitionLabels[action]}
+          </Button>
+        ))}
+      </PopoverContent>
+    </Popover>
+  )
+}
+
 export function AdminOrdersPage() {
   const { user } = useAuth()
+  const { orderEventRevision, orderRealtimeState } = useRestaurantPrinting()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const urlSearch = searchParams.get('q')?.trim() ?? ''
+  const statusFilter = getAdminOrderArrayValue(searchParams.get('status'), orderFilterOptions, 'all')
+  const paymentFilter = getAdminOrderArrayValue(searchParams.get('payment'), paymentFilterOptions, 'all')
+  const orderTypeFilter = getAdminOrderArrayValue(searchParams.get('type'), orderTypeFilterOptions, 'all')
+  const restaurantFilter = searchParams.get('restaurant') || 'all'
+  const page = getAdminOrderPage(searchParams.get('page'))
+  const pageSize = getAdminOrderPageSize(searchParams.get('pageSize'))
+  const sort: { key: AdminOrderSortKey; direction: 'asc' | 'desc' } = {
+    key: getAdminOrderArrayValue(searchParams.get('sort'), adminOrderSortKeys, 'createdAt'),
+    direction: searchParams.get('direction') === 'asc' ? 'asc' : 'desc',
+  }
   const [orders, setOrders] = useState<AdminOrder[]>([])
-  const [loading, setLoading] = useState(true)
+  const [restaurants, setRestaurants] = useState<Restaurant[]>([])
+  const [summary, setSummary] = useState<AdminOrderSummary>({
+    total: 0,
+    activeKitchen: 0,
+    paid: 0,
+    pendingPayment: 0,
+    failedPayment: 0,
+    payable: 0,
+    revenue: 0,
+  })
+  const [initialLoading, setInitialLoading] = useState(true)
+  const [isFetching, setIsFetching] = useState(false)
+  const [optionsLoading, setOptionsLoading] = useState(false)
+  const [optionsError, setOptionsError] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null)
   const [settlingOrderId, setSettlingOrderId] = useState<string | null>(null)
   const [refundingOrderId, setRefundingOrderId] = useState<string | null>(null)
   const [transitioningOrderId, setTransitioningOrderId] = useState<string | null>(null)
+  const [pendingConfirmation, setPendingConfirmation] = useState<
+    | { kind: 'counter-payment'; order: AdminOrder }
+    | { kind: 'transition'; order: AdminOrder; action: OrderTransitionAction }
+    | null
+  >(null)
   const [pendingTransition, setPendingTransition] = useState<{
     order: AdminOrder
     action: OrderTransitionAction
@@ -182,53 +296,49 @@ export function AdminOrdersPage() {
   const [refundReason, setRefundReason] = useState('')
   const [statusHistoryByOrderId, setStatusHistoryByOrderId] = useState<Record<string, AdminOrderStatusHistory[]>>({})
   const [statusHistoryLoadingId, setStatusHistoryLoadingId] = useState<string | null>(null)
-  const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState('all')
-  const [paymentFilter, setPaymentFilter] = useState('all')
-  const [orderTypeFilter, setOrderTypeFilter] = useState('all')
-  const [restaurantFilter, setRestaurantFilter] = useState('all')
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(20)
+  const [search, setSearch] = useState(urlSearch)
   const [totalItems, setTotalItems] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
-  const [sort, setSort] = useState<{ key: SortKey; direction: 'asc' | 'desc' }>({
-    key: 'createdAt',
-    direction: 'desc',
-  })
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null)
   const tableWrapRef = useRef<HTMLDivElement | null>(null)
   const [tableViewportWidth, setTableViewportWidth] = useState<number | null>(null)
+  const requestIdRef = useRef(0)
+  const requestAbortRef = useRef<AbortController | null>(null)
+  const committedSearchRef = useRef<string | null>(null)
+  const lastOrderEventRevisionRef = useRef(orderEventRevision)
   const canManageWorkflow = user?.roles.some((role) =>
     ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff'].includes(role),
   ) ?? false
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
 
-  const restaurantOptions = useMemo(() => {
-    return Array.from(
-      new Map(
-        orders.map((order) => [
-          order.restaurantId || order.restaurantName || 'unknown',
-          {
-            value: order.restaurantId || order.restaurantName || 'unknown',
-            label: order.restaurantName || 'Unknown restaurant',
-          },
-        ]),
-      ).values(),
-    ).sort((first, second) => first.label.localeCompare(second.label))
-  }, [orders])
+  const updateOrderParams = useCallback((
+    updates: Record<string, string | null>,
+    replace = false,
+  ) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+
+      Object.entries(updates).forEach(([key, value]) => {
+        if (value === null || value === '') {
+          next.delete(key)
+        } else {
+          next.set(key, value)
+        }
+      })
+
+      return next
+    }, { replace })
+  }, [setSearchParams])
 
   const filteredOrders = orders
 
-  const totals = useMemo(() => {
-    return getOrderStats(filteredOrders)
-  }, [filteredOrders])
   const pageStart = totalItems === 0 ? 0 : (page - 1) * pageSize + 1
   const pageEnd = Math.min(page * pageSize, totalItems)
   const currentPage = totalPages === 0 ? 0 : page
   const selectedStatusFilterLabel = statusFilter === 'all' ? '' : getOrderStatusLabel(statusFilter)
   const selectedPaymentFilterLabel = paymentFilter === 'all' ? '' : getPaymentStatusLabel(paymentFilter)
   const selectedOrderTypeFilterLabel = orderTypeFilter === 'all' ? '' : getOrderTypeLabel(orderTypeFilter)
-  const selectedRestaurantFilterLabel = restaurantOptions.find((restaurant) => restaurant.value === restaurantFilter)?.label ?? restaurantFilter
+  const selectedRestaurantFilterLabel = restaurants.find((restaurant) => restaurant.id === restaurantFilter)?.name ?? restaurantFilter
   const activeDropdownFilterCount = [
     statusFilter !== 'all',
     paymentFilter !== 'all',
@@ -236,40 +346,126 @@ export function AdminOrdersPage() {
   ].filter(Boolean).length
 
   const hasActiveFilters =
-    search.trim() !== ''
+    urlSearch !== ''
     || statusFilter !== 'all'
     || paymentFilter !== 'all'
     || orderTypeFilter !== 'all'
     || (isPlatformOwner && restaurantFilter !== 'all')
 
   const loadOrders = useCallback(async (showToast = false) => {
-    setLoading(true)
+    const requestId = ++requestIdRef.current
+    requestAbortRef.current?.abort()
+    const controller = new AbortController()
+    requestAbortRef.current = controller
+    setIsFetching(true)
+    setError(null)
+
+    const query = {
+      search: urlSearch || undefined,
+      status: statusFilter === 'all' ? undefined : statusFilter,
+      paymentStatus: paymentFilter === 'all' ? undefined : paymentFilter,
+      orderType: orderTypeFilter === 'all' ? undefined : orderTypeFilter,
+      restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
+    }
+
     try {
-      const response = await getAdminOrders({
-        page,
-        pageSize,
-        search: search.trim() || undefined,
-        sortBy: sort.key,
-        sortDirection: sort.direction,
-        status: statusFilter === 'all' ? undefined : statusFilter,
-        paymentStatus: paymentFilter === 'all' ? undefined : paymentFilter,
-        orderType: orderTypeFilter === 'all' ? undefined : orderTypeFilter,
-        restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
-      })
+      const [response, nextSummary] = await Promise.all([
+        getAdminOrders({
+          ...query,
+          page,
+          pageSize,
+          sortBy: sort.key,
+          sortDirection: sort.direction,
+        }, { signal: controller.signal }),
+        getAdminOrderSummary(query, { signal: controller.signal }),
+      ])
+
+      if (requestId !== requestIdRef.current) {
+        return
+      }
+
       setOrders(response.items)
       setTotalItems(response.totalItems)
       setTotalPages(response.totalPages)
+      setSummary(nextSummary)
+      setLastUpdatedAt(new Date())
+
+      if (page > 1 && (response.totalPages === 0 || page > response.totalPages)) {
+        updateOrderParams({
+          page: response.totalPages > 1 ? String(response.totalPages) : null,
+        }, true)
+      }
       if (showToast) {
         toast.success('Orders refreshed')
       }
-    } catch (error) {
+    } catch (loadError) {
+      if (requestId !== requestIdRef.current || (
+        loadError instanceof DOMException && loadError.name === 'AbortError'
+      )) {
+        return
+      }
+
+      const message = loadError instanceof Error ? loadError.message : 'Order loading failed'
+      setError(message)
       toast.error('Could not load orders', {
-        description: error instanceof Error ? error.message : 'Order loading failed',
+        description: message,
       })
     } finally {
-      setLoading(false)
+      if (requestId === requestIdRef.current) {
+        setInitialLoading(false)
+        setIsFetching(false)
+        requestAbortRef.current = null
+      }
     }
-  }, [isPlatformOwner, orderTypeFilter, page, pageSize, paymentFilter, restaurantFilter, search, sort, statusFilter])
+  }, [
+    isPlatformOwner,
+    orderTypeFilter,
+    page,
+    pageSize,
+    paymentFilter,
+    restaurantFilter,
+    setError,
+    setInitialLoading,
+    setIsFetching,
+    setLastUpdatedAt,
+    setOrders,
+    setSummary,
+    setTotalItems,
+    setTotalPages,
+    sort.direction,
+    sort.key,
+    statusFilter,
+    updateOrderParams,
+    urlSearch,
+  ])
+
+  const loadRestaurantOptions = useCallback(async (showToast = false) => {
+    if (!isPlatformOwner) {
+      return
+    }
+
+    setOptionsLoading(true)
+    setOptionsError(null)
+    try {
+      setRestaurants(await getRestaurants())
+      if (showToast) {
+        toast.success('Restaurant options refreshed')
+      }
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : 'Restaurant loading failed'
+      setOptionsError(message)
+      if (showToast) {
+        toast.error('Could not load restaurant options', { description: message })
+      }
+    } finally {
+      setOptionsLoading(false)
+    }
+  }, [
+    isPlatformOwner,
+    setOptionsError,
+    setOptionsLoading,
+    setRestaurants,
+  ])
 
   const handleCounterPayment = async (order: AdminOrder) => {
     setSettlingOrderId(order.id)
@@ -333,6 +529,7 @@ export function AdminOrdersPage() {
       })
       setPendingRefundOrder(null)
       setRefundReason('')
+      await loadOrders()
     } catch (error) {
       toast.error('Could not refund order', {
         description: error instanceof Error ? error.message : 'Stripe refund failed.',
@@ -364,6 +561,7 @@ export function AdminOrdersPage() {
       })
       setPendingTransition(null)
       setTransitionReason('')
+      await loadOrders()
     } catch (error) {
       toast.error('Could not update order status', {
         description: error instanceof Error ? error.message : 'The request failed.',
@@ -380,12 +578,62 @@ export function AdminOrdersPage() {
       return
     }
 
+    if (adminOrderTransitionNeedsConfirmation(order, action)) {
+      setPendingConfirmation({ kind: 'transition', order, action })
+      return
+    }
+
     void submitTransition(order, action)
   }
 
   useEffect(() => {
+    if (committedSearchRef.current === urlSearch) {
+      committedSearchRef.current = null
+      return
+    }
+
+    setSearch(urlSearch)
+  }, [urlSearch])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const nextSearch = search.trim()
+      if (nextSearch !== urlSearch) {
+        committedSearchRef.current = nextSearch
+        updateOrderParams({
+          q: nextSearch || null,
+          page: null,
+        }, true)
+      }
+    }, searchDebounceMs)
+
+    return () => window.clearTimeout(timer)
+  }, [search, updateOrderParams, urlSearch])
+
+  useEffect(() => {
     void Promise.resolve().then(() => loadOrders())
   }, [loadOrders])
+
+  useEffect(() => {
+    void Promise.resolve().then(() => loadRestaurantOptions())
+  }, [loadRestaurantOptions])
+
+  useEffect(() => {
+    if (lastOrderEventRevisionRef.current === orderEventRevision) {
+      return undefined
+    }
+
+    lastOrderEventRevisionRef.current = orderEventRevision
+    const timer = window.setTimeout(() => {
+      void loadOrders()
+    }, realtimeRefreshDebounceMs)
+
+    return () => window.clearTimeout(timer)
+  }, [loadOrders, orderEventRevision])
+
+  useEffect(() => () => {
+    requestAbortRef.current?.abort()
+  }, [])
 
   useEffect(() => {
     const element = tableWrapRef.current
@@ -410,43 +658,49 @@ export function AdminOrdersPage() {
     }
   }, [])
 
-  const updateSort = (key: SortKey) => {
-    setPage(1)
-    setSort((current) => ({
-      key,
-      direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
-    }))
+  const updateSort = (key: AdminOrderSortKey) => {
+    const direction = sort.key === key && sort.direction === 'asc' ? 'desc' : 'asc'
+    updateOrderParams({
+      page: null,
+      sort: key === 'createdAt' ? null : key,
+      direction: direction === 'desc' ? null : direction,
+    })
   }
 
   const resetFilters = () => {
-    setPage(1)
     setSearch('')
-    setStatusFilter('all')
-    setPaymentFilter('all')
-    setOrderTypeFilter('all')
-    setRestaurantFilter('all')
-    setSort({
-      key: 'createdAt',
-      direction: 'desc',
+    updateOrderParams({
+      page: null,
+      q: null,
+      status: null,
+      payment: null,
+      type: null,
+      restaurant: null,
+      sort: null,
+      direction: null,
     })
     setExpandedOrderId(null)
   }
 
   const renderOrderActions = (order: AdminOrder) => {
     const refundable = canRefundOrder(order)
-    const busy = settlingOrderId !== null || transitioningOrderId !== null || refundingOrderId !== null
+    const busy = settlingOrderId === order.id
+      || transitioningOrderId === order.id
+      || refundingOrderId === order.id
+    const actions = splitAdminOrderActions(order)
 
     return (
-      <div className="admin-order-actions">
+      <div className="admin-order-actions" onClick={(event) => event.stopPropagation()}>
         {order.paymentMethod === 'PayAtCounter' && order.paymentStatus !== 'Paid' ? (
           <Button
             type="button"
             variant="outline"
             size="sm"
             disabled={busy}
+            aria-label={`Mark ${order.orderNumber} as paid`}
             onClick={(event) => {
               event.stopPropagation()
-              void handleCounterPayment(order)
+              setPendingConfirmation({ kind: 'counter-payment', order })
             }}
           >
             {settlingOrderId === order.id ? 'Recording' : 'Mark paid'}
@@ -458,6 +712,7 @@ export function AdminOrdersPage() {
             variant="destructive"
             size="sm"
             disabled={busy}
+            aria-label={`Refund ${order.orderNumber}`}
             onClick={(event) => {
               event.stopPropagation()
               setRefundReason('')
@@ -468,21 +723,27 @@ export function AdminOrdersPage() {
             {refundingOrderId === order.id ? 'Refunding' : 'Refund'}
           </Button>
         ) : null}
-        {(order.availableActions ?? []).map((action) => (
+        {actions.primary ? (
           <Button
-            key={action}
             type="button"
-            variant={action === 'Reject' || action === 'Cancel' ? 'destructive' : 'secondary'}
+            variant="secondary"
             size="sm"
             disabled={busy}
+            aria-label={`${transitionLabels[actions.primary]} ${order.orderNumber}`}
             onClick={(event) => {
               event.stopPropagation()
-              handleTransition(order, action)
+              handleTransition(order, actions.primary!)
             }}
           >
-            {transitioningOrderId === order.id ? 'Updating' : transitionLabels[action]}
+            {transitioningOrderId === order.id ? 'Updating' : transitionLabels[actions.primary]}
           </Button>
-        ))}
+        ) : null}
+        <OrderActionMenu
+          actions={actions.secondary}
+          busy={busy}
+          order={order}
+          onAction={(action) => handleTransition(order, action)}
+        />
         {(order.availableActions ?? []).length === 0 &&
         !(order.paymentMethod === 'PayAtCounter' && order.paymentStatus !== 'Paid') &&
         !refundable ? (
@@ -586,23 +847,56 @@ export function AdminOrdersPage() {
 
   return (
     <main className="content-grid">
+      <h1 className="admin-orders-page-heading">Order Management</h1>
       <Card>
         <CardHeader>
           <div className="section-header">
             <div className="admin-page-title">
               <ClipboardList size={22} />
               <div>
-                <CardTitle>Order Management</CardTitle>
+                <CardTitle aria-hidden="true">Order Management</CardTitle>
                 <CardDescription>Live orders and payment state from the real order backend.</CardDescription>
               </div>
             </div>
-            <Button type="button" variant="secondary" onClick={() => loadOrders(true)} disabled={loading}>
-              <RefreshCw size={18} />
-              {loading ? 'Refreshing' : 'Refresh'}
-            </Button>
+            <div className="admin-orders-header-actions">
+              <div
+                className="admin-orders-live-status"
+                data-state={orderRealtimeState}
+                role="status"
+                aria-live="polite"
+                title={lastUpdatedAt ? `Last updated ${formatDate(lastUpdatedAt.toISOString())}` : undefined}
+              >
+                {orderRealtimeState === 'connected' ? <Wifi size={15} /> : <WifiOff size={15} />}
+                <span>
+                  {orderRealtimeState === 'connected'
+                    ? 'Live'
+                    : orderRealtimeState === 'connecting'
+                      ? 'Connecting'
+                      : orderRealtimeState === 'reconnecting'
+                        ? 'Reconnecting'
+                        : 'Offline'}
+                </span>
+                {isFetching && <small>Updating</small>}
+              </div>
+              <Button type="button" variant="secondary" onClick={() => loadOrders(true)} disabled={isFetching}>
+                <RefreshCw size={18} />
+                {isFetching ? 'Refreshing' : 'Refresh'}
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="directory-stack">
+          {error && (
+            <div className="admin-orders-error" role="alert">
+              <span>
+                <strong>Orders may be out of date.</strong>
+                <small>{error}</small>
+              </span>
+              <Button type="button" variant="outline" size="sm" onClick={() => loadOrders()}>
+                Retry
+              </Button>
+            </div>
+          )}
           <div className="placeholder-grid order-summary-grid">
             <div className="placeholder-item">
               <strong>
@@ -613,43 +907,55 @@ export function AdminOrdersPage() {
             </div>
             <div className="placeholder-item">
               <strong>
-                <span className="order-summary-label-full">Kitchen active this page</span>
-                <span className="order-summary-label-short">Kitchen</span>
+                <span>Kitchen active</span>
               </strong>
-              <span>{totals.activeKitchen}</span>
+              <span>{summary.activeKitchen}</span>
             </div>
             <div className="placeholder-item">
               <strong>
-                <span className="order-summary-label-full">Paid this page</span>
-                <span className="order-summary-label-short">Paid</span>
+                <span>Paid</span>
               </strong>
-              <span>{totals.paid}</span>
+              <span>{summary.paid}</span>
             </div>
             <div className="placeholder-item">
               <strong>
-                <span className="order-summary-label-full">Awaiting payment this page</span>
-                <span className="order-summary-label-short">Awaiting</span>
+                <span>Awaiting payment</span>
               </strong>
-              <span>{totals.pendingPayment}</span>
+              <span>{summary.pendingPayment}</span>
             </div>
           </div>
 
           <div className="directory-tools admin-orders-tools restaurant-filter-tools">
             {isPlatformOwner && (
               <div className="admin-orders-restaurant-row restaurant-table-selector-row">
-                <Select value={restaurantFilter} onValueChange={(value) => { setPage(1); setRestaurantFilter(value) }}>
-                  <SelectTrigger className="filter-select">
+                <Select
+                  value={restaurantFilter}
+                  disabled={optionsLoading}
+                  onValueChange={(value) => updateOrderParams({
+                    page: null,
+                    restaurant: value === 'all' ? null : value,
+                  })}
+                >
+                  <SelectTrigger className="filter-select" aria-label="Filter by restaurant">
                     <SelectValue placeholder="All restaurants" />
                   </SelectTrigger>
                   <SelectContent position="popper">
                     <SelectItem value="all">All restaurants</SelectItem>
-                    {restaurantOptions.map((restaurant) => (
-                      <SelectItem key={restaurant.value} value={restaurant.value}>
-                        {restaurant.label}
+                    {restaurants.map((restaurant) => (
+                      <SelectItem key={restaurant.id} value={restaurant.id}>
+                        {restaurant.name}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
+                {optionsError && (
+                  <div className="admin-orders-options-error" role="alert">
+                    <span>Restaurant list unavailable</span>
+                    <Button type="button" variant="ghost" size="xs" onClick={() => loadRestaurantOptions(true)}>
+                      Retry
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -659,8 +965,9 @@ export function AdminOrdersPage() {
                   <Search size={16} />
                   <Input
                     value={search}
-                    onChange={(event) => { setPage(1); setSearch(event.target.value) }}
+                    onChange={(event) => setSearch(event.target.value)}
                     placeholder="Search order, customer, restaurant, table, or item"
+                    aria-label="Search orders"
                   />
                 </div>
                 <Popover>
@@ -678,7 +985,11 @@ export function AdminOrdersPage() {
                       )}
                     </Button>
                   </PopoverTrigger>
-                  <PopoverContent className="restaurant-filter-popover admin-orders-filter-popover" align="end">
+                  <PopoverContent
+                    className="restaurant-filter-popover admin-orders-filter-popover"
+                    align="end"
+                    aria-label="Order filters"
+                  >
                     <div className="restaurant-filter-popover-header">
                       <strong>Filters</strong>
                       <Button type="button" variant="ghost" size="xs" onClick={resetFilters} disabled={!hasActiveFilters}>
@@ -689,8 +1000,8 @@ export function AdminOrdersPage() {
                     <div className="restaurant-filter-fields">
                       <div className="restaurant-filter-field">
                         <span>Order status</span>
-                        <Select value={statusFilter} onValueChange={(value) => { setPage(1); setStatusFilter(value) }}>
-                          <SelectTrigger className="filter-select">
+                        <Select value={statusFilter} onValueChange={(value) => updateOrderParams({ page: null, status: value === 'all' ? null : value })}>
+                          <SelectTrigger className="filter-select" aria-label="Filter by order status">
                             <SelectValue placeholder="All order status" />
                           </SelectTrigger>
                           <SelectContent position="popper">
@@ -705,8 +1016,8 @@ export function AdminOrdersPage() {
                       </div>
                       <div className="restaurant-filter-field">
                         <span>Payment</span>
-                        <Select value={paymentFilter} onValueChange={(value) => { setPage(1); setPaymentFilter(value) }}>
-                          <SelectTrigger className="filter-select">
+                        <Select value={paymentFilter} onValueChange={(value) => updateOrderParams({ page: null, payment: value === 'all' ? null : value })}>
+                          <SelectTrigger className="filter-select" aria-label="Filter by payment status">
                             <SelectValue placeholder="All payment status" />
                           </SelectTrigger>
                           <SelectContent position="popper">
@@ -721,8 +1032,8 @@ export function AdminOrdersPage() {
                       </div>
                       <div className="restaurant-filter-field">
                         <span>Order type</span>
-                        <Select value={orderTypeFilter} onValueChange={(value) => { setPage(1); setOrderTypeFilter(value) }}>
-                          <SelectTrigger className="filter-select">
+                        <Select value={orderTypeFilter} onValueChange={(value) => updateOrderParams({ page: null, type: value === 'all' ? null : value })}>
+                          <SelectTrigger className="filter-select" aria-label="Filter by order type">
                             <SelectValue placeholder="All order types" />
                           </SelectTrigger>
                           <SelectContent position="popper">
@@ -741,8 +1052,8 @@ export function AdminOrdersPage() {
               </div>
 
               <div className="restaurant-inline-filters admin-orders-inline-filters">
-                <Select value={statusFilter} onValueChange={(value) => { setPage(1); setStatusFilter(value) }}>
-                  <SelectTrigger className="filter-select">
+                <Select value={statusFilter} onValueChange={(value) => updateOrderParams({ page: null, status: value === 'all' ? null : value })}>
+                  <SelectTrigger className="filter-select" aria-label="Filter by order status">
                     <SelectValue placeholder="All order status" />
                   </SelectTrigger>
                   <SelectContent position="popper">
@@ -755,8 +1066,8 @@ export function AdminOrdersPage() {
                   </SelectContent>
                 </Select>
 
-                <Select value={paymentFilter} onValueChange={(value) => { setPage(1); setPaymentFilter(value) }}>
-                  <SelectTrigger className="filter-select">
+                <Select value={paymentFilter} onValueChange={(value) => updateOrderParams({ page: null, payment: value === 'all' ? null : value })}>
+                  <SelectTrigger className="filter-select" aria-label="Filter by payment status">
                     <SelectValue placeholder="All payment status" />
                   </SelectTrigger>
                   <SelectContent position="popper">
@@ -769,8 +1080,8 @@ export function AdminOrdersPage() {
                   </SelectContent>
                 </Select>
 
-                <Select value={orderTypeFilter} onValueChange={(value) => { setPage(1); setOrderTypeFilter(value) }}>
-                  <SelectTrigger className="filter-select">
+                <Select value={orderTypeFilter} onValueChange={(value) => updateOrderParams({ page: null, type: value === 'all' ? null : value })}>
+                  <SelectTrigger className="filter-select" aria-label="Filter by order type">
                     <SelectValue placeholder="All order types" />
                   </SelectTrigger>
                   <SelectContent position="popper">
@@ -791,32 +1102,32 @@ export function AdminOrdersPage() {
 
             {hasActiveFilters && (
               <div className="restaurant-filter-chips admin-orders-filter-chips" aria-label="Active order filters">
-                {search.trim() && (
-                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setSearch('') }} title={`Search: ${search.trim()}`}>
-                    <span>Search: {search.trim()}</span>
+                {urlSearch && (
+                  <button type="button" className="restaurant-filter-chip" onClick={() => { setSearch(''); updateOrderParams({ page: null, q: null }) }} title={`Search: ${urlSearch}`} aria-label={`Remove search filter ${urlSearch}`}>
+                    <span>Search: {urlSearch}</span>
                     <X size={13} />
                   </button>
                 )}
                 {isPlatformOwner && restaurantFilter !== 'all' && (
-                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setRestaurantFilter('all') }} title={`Restaurant: ${selectedRestaurantFilterLabel}`}>
+                  <button type="button" className="restaurant-filter-chip" onClick={() => updateOrderParams({ page: null, restaurant: null })} title={`Restaurant: ${selectedRestaurantFilterLabel}`} aria-label={`Remove restaurant filter ${selectedRestaurantFilterLabel}`}>
                     <span>Restaurant: {selectedRestaurantFilterLabel}</span>
                     <X size={13} />
                   </button>
                 )}
                 {statusFilter !== 'all' && (
-                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setStatusFilter('all') }} title={`Status: ${selectedStatusFilterLabel}`}>
+                  <button type="button" className="restaurant-filter-chip" onClick={() => updateOrderParams({ page: null, status: null })} title={`Status: ${selectedStatusFilterLabel}`} aria-label={`Remove status filter ${selectedStatusFilterLabel}`}>
                     <span>Status: {selectedStatusFilterLabel}</span>
                     <X size={13} />
                   </button>
                 )}
                 {paymentFilter !== 'all' && (
-                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setPaymentFilter('all') }} title={`Payment: ${selectedPaymentFilterLabel}`}>
+                  <button type="button" className="restaurant-filter-chip" onClick={() => updateOrderParams({ page: null, payment: null })} title={`Payment: ${selectedPaymentFilterLabel}`} aria-label={`Remove payment filter ${selectedPaymentFilterLabel}`}>
                     <span>Payment: {selectedPaymentFilterLabel}</span>
                     <X size={13} />
                   </button>
                 )}
                 {orderTypeFilter !== 'all' && (
-                  <button type="button" className="restaurant-filter-chip" onClick={() => { setPage(1); setOrderTypeFilter('all') }} title={`Type: ${selectedOrderTypeFilterLabel}`}>
+                  <button type="button" className="restaurant-filter-chip" onClick={() => updateOrderParams({ page: null, type: null })} title={`Type: ${selectedOrderTypeFilterLabel}`} aria-label={`Remove order type filter ${selectedOrderTypeFilterLabel}`}>
                     <span>Type: {selectedOrderTypeFilterLabel}</span>
                     <X size={13} />
                   </button>
@@ -831,10 +1142,16 @@ export function AdminOrdersPage() {
 
           <div className="admin-orders-table-wrap">
             <HorizontalTableScroll ref={tableWrapRef} topScrollLabel="Scroll orders table horizontally">
-              <table className="data-table payment-orders-table">
+              <table
+                className={`data-table payment-orders-table admin-orders-table${isFetching ? ' is-fetching' : ''}`}
+                aria-busy={isFetching}
+              >
+                <caption className="admin-orders-table-caption">
+                  Orders matching the current search and filters
+                </caption>
                 <thead>
                   <tr>
-                    <th>
+                    <th aria-sort={sort.key === 'orderNumber' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <SortHeader
                         active={sort.key === 'orderNumber'}
                         direction={sort.direction}
@@ -842,7 +1159,7 @@ export function AdminOrdersPage() {
                         onClick={() => updateSort('orderNumber')}
                       />
                     </th>
-                    <th>
+                    <th aria-sort={sort.key === 'restaurantName' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <SortHeader
                         active={sort.key === 'restaurantName'}
                         direction={sort.direction}
@@ -850,7 +1167,7 @@ export function AdminOrdersPage() {
                         onClick={() => updateSort('restaurantName')}
                       />
                     </th>
-                    <th>
+                    <th aria-sort={sort.key === 'status' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <SortHeader
                         active={sort.key === 'status'}
                         direction={sort.direction}
@@ -858,7 +1175,7 @@ export function AdminOrdersPage() {
                         onClick={() => updateSort('status')}
                       />
                     </th>
-                    <th>
+                    <th aria-sort={sort.key === 'paymentStatus' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <SortHeader
                         active={sort.key === 'paymentStatus'}
                         direction={sort.direction}
@@ -866,7 +1183,7 @@ export function AdminOrdersPage() {
                         onClick={() => updateSort('paymentStatus')}
                       />
                     </th>
-                    <th>
+                    <th aria-sort={sort.key === 'totalAmount' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <SortHeader
                         active={sort.key === 'totalAmount'}
                         direction={sort.direction}
@@ -875,8 +1192,7 @@ export function AdminOrdersPage() {
                       />
                     </th>
                     <th>Customer</th>
-                    <th>Latest payment</th>
-                    <th>
+                    <th aria-sort={sort.key === 'createdAt' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <SortHeader
                         active={sort.key === 'createdAt'}
                         direction={sort.direction}
@@ -884,7 +1200,7 @@ export function AdminOrdersPage() {
                         onClick={() => updateSort('createdAt')}
                       />
                     </th>
-                    {canManageWorkflow && <th>Actions</th>}
+                    {canManageWorkflow && <th className="admin-orders-actions-column">Actions</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -905,7 +1221,7 @@ export function AdminOrdersPage() {
                                 variant="ghost"
                                 size="icon"
                                 className="row-expand-button"
-                                aria-label={isExpanded ? 'Collapse order details' : 'Expand order details'}
+                                aria-label={`${isExpanded ? 'Collapse' : 'Expand'} details for ${order.orderNumber}`}
                                 onClick={(event) => {
                                   event.stopPropagation()
                                   toggleOrderExpansion(order)
@@ -922,11 +1238,10 @@ export function AdminOrdersPage() {
                           </td>
                           <td>
                             <strong>{order.restaurantName || 'Unknown restaurant'}</strong>
-                            <span className="table-subtext">{order.restaurantId || 'No restaurant id'}</span>
+                            <span className="table-subtext">{getOrderTypeLabel(order.orderType)}</span>
                           </td>
                           <td>
                             <OrderStatusBadge status={order.status} />
-                            <span className="table-subtext">{getOrderTypeLabel(order.orderType)}</span>
                           </td>
                           <td>
                             <PaymentStatusBadge status={order.paymentStatus} />
@@ -937,6 +1252,11 @@ export function AdminOrdersPage() {
                                 ? `${order.paymentAttempts} payment attempt${order.paymentAttempts === 1 ? '' : 's'}`
                                 : 'No payment attempts yet'}
                             </span>
+                            {order.latestPayment && (
+                              <span className="table-subtext">
+                                Latest: {getPaymentStatusLabel(order.latestPayment.status)}
+                              </span>
+                            )}
                           </td>
                           <td>
                             <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
@@ -945,26 +1265,16 @@ export function AdminOrdersPage() {
                             <strong>{order.customerName || order.customerEmail || 'Guest / unknown'}</strong>
                             <span className="table-subtext">{order.customerEmail || order.customerId || 'No customer account'}</span>
                           </td>
-                          <td>
-                            <strong>
-                              {order.latestPayment
-                                ? getPaymentStatusLabel(order.latestPayment.status)
-                                : 'No payment yet'}
-                            </strong>
-                            <span className="table-subtext">
-                              {order.latestPayment?.providerCheckoutSessionId || 'No checkout session yet'}
-                            </span>
-                          </td>
                           <td>{formatDate(order.createdAt)}</td>
                           {canManageWorkflow && (
-                            <td>
+                            <td className="admin-orders-actions-column">
                               {renderOrderActions(order)}
                             </td>
                           )}
                         </tr>
                         {isExpanded && (
                           <tr className="order-detail-row">
-                            <td colSpan={canManageWorkflow ? 9 : 8}>
+                            <td colSpan={canManageWorkflow ? 8 : 7}>
                               {renderOrderDetailPanel(order, {
                                 style: tableViewportWidth ? { width: `${tableViewportWidth}px` } : undefined,
                               })}
@@ -976,8 +1286,8 @@ export function AdminOrdersPage() {
                   })}
                   {filteredOrders.length === 0 && (
                     <tr>
-                      <td colSpan={canManageWorkflow ? 9 : 8} className="empty-cell">
-                        {loading
+                      <td colSpan={canManageWorkflow ? 8 : 7} className="empty-cell">
+                        {initialLoading
                           ? 'Loading real orders...'
                           : hasActiveFilters
                             ? 'No orders match the current filters.'
@@ -1001,13 +1311,17 @@ export function AdminOrdersPage() {
                   : 'No payment attempts yet'
 
               return (
-                <article className="restaurant-mobile-card admin-order-mobile-card" key={order.id}>
+                <article
+                  className="restaurant-mobile-card admin-order-mobile-card"
+                  key={order.id}
+                  aria-labelledby={`admin-order-${order.id}`}
+                >
                   <header className="restaurant-mobile-card-header admin-order-mobile-card-header">
                     <span className="restaurant-mobile-avatar">
                       <ClipboardList size={18} />
                     </span>
                     <div className="restaurant-mobile-primary">
-                      <strong title={order.orderNumber}>{order.orderNumber}</strong>
+                      <strong id={`admin-order-${order.id}`} title={order.orderNumber}>{order.orderNumber}</strong>
                       <span title={`${getOrderScope(order)} - ${order.items.length} item${order.items.length === 1 ? '' : 's'}`}>
                         {getOrderScope(order)} - {order.items.length} item{order.items.length === 1 ? '' : 's'}
                       </span>
@@ -1017,7 +1331,7 @@ export function AdminOrdersPage() {
                       variant="outline"
                       size="icon"
                       className="admin-order-card-toggle"
-                      aria-label={isExpanded ? 'Collapse order details' : 'Expand order details'}
+                      aria-label={`${isExpanded ? 'Collapse' : 'Expand'} details for ${order.orderNumber}`}
                       aria-expanded={isExpanded}
                       onClick={() => toggleOrderExpansion(order)}
                     >
@@ -1085,7 +1399,7 @@ export function AdminOrdersPage() {
             })}
             {filteredOrders.length === 0 && (
               <div className="restaurant-mobile-empty">
-                {loading
+                {initialLoading
                   ? 'Loading real orders...'
                   : hasActiveFilters
                     ? 'No orders match the current filters.'
@@ -1099,24 +1413,97 @@ export function AdminOrdersPage() {
               <span className="pagination-compact">{pageStart}-{pageEnd} / {totalItems}</span>
             </span>
             <div className="pagination-actions">
-              <Select value={String(pageSize)} onValueChange={(value) => { setPage(1); setPageSize(Number(value)) }}>
+              <Select
+                value={String(pageSize)}
+                onValueChange={(value) => updateOrderParams({
+                  page: null,
+                  pageSize: Number(value) === 20 ? null : value,
+                })}
+              >
                 <SelectTrigger className="page-size-select" aria-label="Orders per page">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent position="popper">
-                  {[10, 20, 50, 100].map((size) => <SelectItem key={size} value={String(size)}>{size} / page</SelectItem>)}
+                  {adminOrderPageSizes.map((size) => <SelectItem key={size} value={String(size)}>{size} / page</SelectItem>)}
                 </SelectContent>
               </Select>
               <span className="pagination-page">
                 <span className="pagination-full">Page {currentPage} of {totalPages}</span>
                 <span className="pagination-compact">{currentPage} / {totalPages}</span>
               </span>
-              <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={loading || page <= 1} aria-label="Previous page"><ChevronLeft size={16} /></Button>
-              <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={loading || page >= totalPages} aria-label="Next page"><ChevronRight size={16} /></Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={() => updateOrderParams({ page: page - 1 <= 1 ? null : String(page - 1) })}
+                disabled={isFetching || page <= 1}
+                aria-label="Previous page"
+              >
+                <ChevronLeft size={16} />
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={() => updateOrderParams({ page: String(Math.min(totalPages, page + 1)) })}
+                disabled={isFetching || page >= totalPages}
+                aria-label="Next page"
+              >
+                <ChevronRight size={16} />
+              </Button>
             </div>
           </div>
         </CardContent>
       </Card>
+
+      <AlertDialog
+        open={pendingConfirmation !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingConfirmation(null)
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingConfirmation?.kind === 'counter-payment'
+                ? 'Record counter payment?'
+                : pendingConfirmation
+                  ? `${transitionLabels[pendingConfirmation.action]} this order?`
+                  : 'Confirm order action'}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingConfirmation?.kind === 'counter-payment'
+                ? `${pendingConfirmation.order.orderNumber} will be marked paid for ${formatMoney(
+                    pendingConfirmation.order.totalAmount,
+                    pendingConfirmation.order.currency,
+                  )}. Confirm that payment was received at the counter.`
+                : pendingConfirmation
+                  ? pendingConfirmation.order.status === 'Pending' && pendingConfirmation.action === 'MarkReady'
+                    ? `${pendingConfirmation.order.orderNumber} will move directly from Pending to Ready, skipping acceptance and preparation.`
+                    : `${pendingConfirmation.order.orderNumber} will be marked Completed. This remains visible in the status history.`
+                  : 'Review this order action before continuing.'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep current state</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const confirmation = pendingConfirmation
+                setPendingConfirmation(null)
+                if (confirmation?.kind === 'counter-payment') {
+                  void handleCounterPayment(confirmation.order)
+                } else if (confirmation) {
+                  void submitTransition(confirmation.order, confirmation.action)
+                }
+              }}
+            >
+              {pendingConfirmation?.kind === 'counter-payment' ? 'Confirm payment' : 'Confirm change'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <OrderRefundDialog
         order={pendingRefundOrder}

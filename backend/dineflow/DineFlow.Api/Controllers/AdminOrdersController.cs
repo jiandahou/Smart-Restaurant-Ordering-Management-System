@@ -33,6 +33,7 @@ public class AdminOrdersController : ControllerBase
     private readonly AppDbContext _dbContext;
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
+    private readonly OrderAutoAcceptanceService _orderAutoAcceptanceService;
     private readonly OrderRefundProcessor _orderRefundProcessor;
     private readonly ReportLogWriter _reportLogWriter;
 
@@ -40,12 +41,14 @@ public class AdminOrdersController : ControllerBase
         AppDbContext dbContext,
         UserManager<ApplicationUser> userManager,
         OrderRealtimeNotifier orderRealtimeNotifier,
+        OrderAutoAcceptanceService orderAutoAcceptanceService,
         OrderRefundProcessor orderRefundProcessor,
         ReportLogWriter reportLogWriter)
     {
         _dbContext = dbContext;
         _userManager = userManager;
         _orderRealtimeNotifier = orderRealtimeNotifier;
+        _orderAutoAcceptanceService = orderAutoAcceptanceService;
         _orderRefundProcessor = orderRefundProcessor;
         _reportLogWriter = reportLogWriter;
     }
@@ -111,9 +114,24 @@ public class AdminOrdersController : ControllerBase
         if (request.PayableOnly == true)
         {
             query = query.Where(order =>
-                order.PaymentStatus != PaymentStatus.Paid &&
+                order.PaymentMethod == PaymentMethod.Online &&
+                (order.PaymentStatus == PaymentStatus.Pending ||
+                 order.PaymentStatus == PaymentStatus.Unpaid ||
+                 order.PaymentStatus == PaymentStatus.Failed ||
+                 order.PaymentStatus == PaymentStatus.Cancelled ||
+                 order.PaymentStatus == PaymentStatus.Expired) &&
                 order.Status != OrderStatus.Cancelled &&
                 order.Status != OrderStatus.Rejected);
+        }
+
+        if (request.CreatedFromUtc.HasValue)
+        {
+            query = query.Where(order => order.CreatedAt >= request.CreatedFromUtc.Value);
+        }
+
+        if (request.CreatedToUtc.HasValue)
+        {
+            query = query.Where(order => order.CreatedAt < request.CreatedToUtc.Value);
         }
 
         var search = request.Search?.Trim();
@@ -159,7 +177,9 @@ public class AdminOrdersController : ControllerBase
     }
 
     [HttpGet("summary")]
-    public async Task<ActionResult<AdminOrderSummaryResponse>> GetOrderSummary(CancellationToken cancellationToken)
+    public async Task<ActionResult<AdminOrderSummaryResponse>> GetOrderSummary(
+        [FromQuery] AdminOrderListRequest request,
+        CancellationToken cancellationToken)
     {
         var currentRestaurantId = await GetCurrentRestaurantIdAsync();
 
@@ -178,6 +198,75 @@ public class AdminOrdersController : ControllerBase
             query = query.Where(order => order.RestaurantId == currentRestaurantId);
         }
 
+        if (request.RestaurantId.HasValue)
+        {
+            query = query.Where(order => order.RestaurantId == request.RestaurantId);
+        }
+
+        if (!TryParseFilter<OrderStatus>(request.Status, nameof(request.Status), out var orderStatus, out var filterError) ||
+            !TryParseFilter<PaymentStatus>(request.PaymentStatus, nameof(request.PaymentStatus), out var paymentStatus, out filterError) ||
+            !TryParseFilter<OrderType>(request.OrderType, nameof(request.OrderType), out var orderType, out filterError))
+        {
+            return BadRequest(new { message = filterError });
+        }
+
+        if (orderStatus.HasValue)
+        {
+            query = query.Where(order => order.Status == orderStatus.Value);
+        }
+
+        if (paymentStatus.HasValue)
+        {
+            query = query.Where(order => order.PaymentStatus == paymentStatus.Value);
+        }
+
+        if (orderType.HasValue)
+        {
+            query = query.Where(order => order.OrderType == orderType.Value);
+        }
+
+        if (request.PayableOnly == true)
+        {
+            query = query.Where(order =>
+                order.PaymentMethod == PaymentMethod.Online &&
+                (order.PaymentStatus == PaymentStatus.Pending ||
+                 order.PaymentStatus == PaymentStatus.Unpaid ||
+                 order.PaymentStatus == PaymentStatus.Failed ||
+                 order.PaymentStatus == PaymentStatus.Cancelled ||
+                 order.PaymentStatus == PaymentStatus.Expired) &&
+                order.Status != OrderStatus.Cancelled &&
+                order.Status != OrderStatus.Rejected);
+        }
+
+        if (request.CreatedFromUtc.HasValue)
+        {
+            query = query.Where(order => order.CreatedAt >= request.CreatedFromUtc.Value);
+        }
+
+        if (request.CreatedToUtc.HasValue)
+        {
+            query = query.Where(order => order.CreatedAt < request.CreatedToUtc.Value);
+        }
+
+        var search = request.Search?.Trim();
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var pattern = $"%{search}%";
+            var pickupSearch = search.TrimStart('#');
+            var hasPickupNumber = int.TryParse(pickupSearch, out var pickupNumber);
+            query = query.Where(order =>
+                EF.Functions.ILike(order.OrderNumber, pattern) ||
+                (hasPickupNumber && order.PickupNumber == pickupNumber) ||
+                (order.Restaurant != null && EF.Functions.ILike(order.Restaurant.Name, pattern)) ||
+                (order.Customer != null && order.Customer.FullName != null && EF.Functions.ILike(order.Customer.FullName, pattern)) ||
+                (order.Customer != null && order.Customer.Email != null && EF.Functions.ILike(order.Customer.Email, pattern)) ||
+                (order.Table != null && EF.Functions.ILike(order.Table.TableNumber, pattern)) ||
+                order.OrderItems.Any(item => EF.Functions.ILike(item.MenuItemNameSnapshot, pattern)) ||
+                order.Payments.Any(payment =>
+                    (payment.ProviderCheckoutSessionId != null && EF.Functions.ILike(payment.ProviderCheckoutSessionId, pattern)) ||
+                    (payment.ProviderPaymentIntentId != null && EF.Functions.ILike(payment.ProviderPaymentIntentId, pattern))));
+        }
+
         var summary = await query
             .GroupBy(_ => 1)
             .Select(group => new AdminOrderSummaryResponse
@@ -192,7 +281,12 @@ public class AdminOrdersController : ControllerBase
                 PendingPayment = group.Count(order => order.PaymentStatus == PaymentStatus.Pending),
                 FailedPayment = group.Count(order => order.PaymentStatus == PaymentStatus.Failed),
                 Payable = group.Count(order =>
-                    order.PaymentStatus != PaymentStatus.Paid &&
+                    order.PaymentMethod == PaymentMethod.Online &&
+                    (order.PaymentStatus == PaymentStatus.Pending ||
+                     order.PaymentStatus == PaymentStatus.Unpaid ||
+                     order.PaymentStatus == PaymentStatus.Failed ||
+                     order.PaymentStatus == PaymentStatus.Cancelled ||
+                     order.PaymentStatus == PaymentStatus.Expired) &&
                     order.Status != OrderStatus.Cancelled &&
                     order.Status != OrderStatus.Rejected),
                 Revenue = group
@@ -244,9 +338,14 @@ public class AdminOrdersController : ControllerBase
             return Conflict(new { message = "Only pay-at-counter orders can be settled at the counter." });
         }
 
-        if (order.PaymentStatus == PaymentStatus.Paid)
+        if (OrderPaymentEligibility.IsSettledForFulfillment(order.PaymentStatus))
         {
             return Ok(MapToAdminResponse(order));
+        }
+
+        if (order.PaymentStatus == PaymentStatus.Refunded)
+        {
+            return Conflict(new { message = "Fully refunded orders cannot be charged again." });
         }
 
         if (order.Status is OrderStatus.Cancelled or OrderStatus.Rejected)
@@ -317,6 +416,7 @@ public class AdminOrdersController : ControllerBase
             },
             PaymentProviders.Counter);
 
+        await _orderAutoAcceptanceService.TryAcceptAsync(order, cancellationToken);
         await _dbContext.SaveChangesAsync(cancellationToken);
         await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
         return Ok(MapToAdminResponse(order));
@@ -810,7 +910,7 @@ public class AdminOrdersController : ControllerBase
     }
 
     private static bool CanProcess(Infrastructure.Orders.Order order) =>
-        order.PaymentStatus == PaymentStatus.Paid || order.PaymentMethod == PaymentMethod.PayAtCounter;
+        OrderPaymentEligibility.CanProcess(order.PaymentMethod, order.PaymentStatus);
 
     private static List<string> GetAvailableActions(Infrastructure.Orders.Order order) =>
         OrderStatusTransitions.GetAvailableActions(order.Status)

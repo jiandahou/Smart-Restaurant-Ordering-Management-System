@@ -14,6 +14,16 @@ public class Payment
 
     public string? ProviderPaymentIntentId { get; set; }
 
+    public string? StripeAccountId { get; set; }
+
+    public string? CheckoutUrl { get; set; }
+
+    public string? IdempotencyKey { get; set; }
+
+    public long PlatformFeeAmountCents { get; set; }
+
+    public DateTime? LastProviderEventCreatedAt { get; set; }
+
     public long AmountCents { get; set; }
 
     public string Currency { get; set; } = "aud";
@@ -144,7 +154,23 @@ public enum PaymentRefundRequestStatus
     Pending = 0,
     Approved = 1,
     Rejected = 2,
-    Cancelled = 3
+    Cancelled = 3,
+    Processing = 4
+}
+
+public class StripeWebhookEvent
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string EventId { get; set; } = string.Empty;
+
+    public string? StripeAccountId { get; set; }
+
+    public string EventType { get; set; } = string.Empty;
+
+    public DateTime ProviderCreatedAt { get; set; }
+
+    public DateTime ProcessedAt { get; set; } = DateTime.UtcNow;
 }
 
 public enum PaymentMethod
@@ -157,4 +183,6 @@ public static class PaymentProviders
 {
     public const string Stripe = "Stripe";
     public const string Counter = "Counter";
+    public const string CounterCash = "CounterCash";
+    public const string CounterCard = "CounterCard";
 }

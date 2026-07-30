@@ -118,6 +118,15 @@ export type CreateAvatarUploadUrlResponse = {
 export type UserListItem = AuthUser & {
   createdAt: string
   updatedAt: string | null
+  lastLoginAt: string | null
+  emailConfirmed: boolean
+  lockoutEnd: string | null
+  /** Currently unable to sign in, whether deliberately disabled or temporarily locked out. */
+  isLockedOut: boolean
+  /** Deliberately disabled by an admin, as opposed to locked out by failed sign-ins. */
+  isDisabled: boolean
+  accessFailedCount: number
+  twoFactorEnabled: boolean
 }
 
 export type UserListParams = {
@@ -129,6 +138,10 @@ export type UserListParams = {
   role?: string
   restaurantId?: string
   scope?: 'all' | 'platform' | 'restaurant'
+  /** Narrows to staff or customers; customers swamp the directory once a venue is live. */
+  audience?: 'staff' | 'customers' | 'all'
+  /** Server-side account state filter so pagination totals remain accurate. */
+  status?: 'all' | 'active' | 'disabled' | 'locked' | 'unverified' | 'mfa'
 }
 
 export type CreateRestaurantUserRole = 'RestaurantOwner' | 'Admin' | 'Staff'
@@ -137,6 +150,7 @@ export type ManagedUserRole = CreateRestaurantUserRole | 'Customer'
 export type CreateRestaurantUserRequest = {
   email: string
   password: string
+  sendPasswordSetupEmail: boolean
   fullName?: string
   restaurantId?: string
   role: CreateRestaurantUserRole
@@ -147,6 +161,7 @@ export type CreateRestaurantUserResponse = {
   userId: string
   email: string | null
   restaurantId: string | null
+  passwordSetupEmailSent: boolean
   role: CreateRestaurantUserRole
 }
 
@@ -180,13 +195,119 @@ export type Restaurant = {
   paymentPolicy: RestaurantPaymentPolicy
   isActive: boolean
   acceptingOrders: boolean
+  /** UTC instant a timed pause lapses. Null when not paused or paused indefinitely. */
+  acceptingOrdersPausedUntil: string | null
+  autoAcceptOrders: boolean
   openingHoursJson: string
   specialOpeningDaysJson: string
+  availability: RestaurantAvailability | null
+  stripeConnectStatus?: StripeConnectStatus
+  onlinePaymentsEnabled?: boolean
+  orderPlatformFeePercent?: number
+  oneTimePlatformFeeCents?: number
+  oneTimePlatformFeeStatus?: PlatformFeeStatus
   createdAt: string
   updatedAt: string | null
 }
 
+export type StripeConnectStatus = 'NotConnected' | 'OnboardingIncomplete' | 'Restricted' | 'Ready'
+export type PlatformFeeStatus = 'NotRequired' | 'Pending' | 'Paid' | 'Failed'
+
+export type RestaurantPaymentSettings = {
+  restaurantId: string
+  restaurantName: string
+  currency: string
+  stripeAccountId: string | null
+  stripeConnectStatus: StripeConnectStatus
+  stripeDetailsSubmitted: boolean
+  stripeChargesEnabled: boolean
+  stripePayoutsEnabled: boolean
+  stripeRequirementsDue: string[]
+  stripeRestrictions: StripeConnectRestriction[]
+  stripeCurrentDeadline: string | null
+  stripeConnectedAt: string | null
+  stripeAccountUpdatedAt: string | null
+  orderPlatformFeePercent: number
+  oneTimePlatformFeeCents: number
+  oneTimePlatformFeeStatus: PlatformFeeStatus
+  oneTimePlatformFeePaidAt: string | null
+  onlinePaymentsEnabled: boolean
+}
+
+export type StripeConnectRestriction = {
+  code: string
+  title: string
+  message: string
+  severity: 'Info' | 'Warning' | 'Error'
+  requirement: string | null
+  actionRequired: boolean
+}
+
+export type StripeConnectDiagnosticCheck = {
+  code: string
+  label: string
+  status: 'Passed' | 'Warning' | 'Failed'
+  message: string
+}
+
+export type StripeConnectDiagnostic = {
+  mode: 'Test'
+  checkedAt: string
+  settings: RestaurantPaymentSettings
+  checks: StripeConnectDiagnosticCheck[]
+}
+
+export type StripeActionLinkResponse = {
+  message: string
+  url: string | null
+  stripeAccountId: string | null
+  expiresAt: string | null
+}
+
+export type PlatformFeeCheckoutResponse = {
+  message: string
+  required: boolean
+  paid: boolean
+  checkoutUrl: string | null
+  sessionId: string | null
+}
+
+/** Staff-visible subset of a restaurant: trading state only, no editable profile fields. */
+export type RestaurantTradingStatus = {
+  id: string
+  name: string
+  timezone: string
+  isActive: boolean
+  acceptingOrders: boolean
+  acceptingOrdersPausedUntil: string | null
+  openingHoursJson: string
+  specialOpeningDaysJson: string
+  availability: RestaurantAvailability | null
+}
+
+/** Server-evaluated open/closed state, so the client never re-derives it in the wrong timezone. */
+export type RestaurantAvailability = {
+  isOrderingAvailable: boolean
+  isWithinOpeningHours: boolean
+  acceptingOrders: boolean
+  reason: 'Open' | 'Closed' | 'Paused' | 'Inactive'
+  message: string
+  /** Restaurant-local time the state next flips (ISO, no offset). Null when it never does. */
+  nextTransitionLocal: string | null
+  /** Restaurant-local time of the next opening; while trading, the one after the current run. */
+  nextOpeningLocal: string | null
+  /** The restaurant's current local time (ISO, no offset). */
+  localNow: string
+  pausedUntilUtc: string | null
+}
+
 export type RestaurantPaymentPolicy = 'PrepayRequired' | 'PayAtCounterAllowed'
+
+export type RestaurantOperations = {
+  id: string
+  name: string
+  autoAcceptOrders: boolean
+}
 
 export type RestaurantListParams = {
   page?: number
@@ -350,15 +471,36 @@ export type MenuItem = {
   imageUrl: string | null
   isAvailable: boolean
   isSoldOut: boolean
+  /** Pinned to the dashboard watch list for quick availability changes. */
+  isWatched: boolean
+  /** Remaining portions, or null when the item is untracked / unlimited. */
+  stockQuantity: number | null
   isVegetarian: boolean
   isVegan: boolean
   isGlutenFree: boolean
   isHalal: boolean
   allergens: string | null
+  spiceLevel: number
+  servingSize: string | null
+  calories: number | null
+  isPopular: boolean
+  isRecommended: boolean
   displayOrder: number
   createdAt: string
   updatedAt: string | null
   optionGroups: MenuOptionGroup[]
+}
+
+/** Trimmed menu item for the dashboard watch widget. */
+export type WatchedMenuItem = {
+  id: string
+  restaurantId: string
+  name: string
+  categoryName: string
+  price: number
+  isAvailable: boolean
+  isSoldOut: boolean
+  stockQuantity: number | null
 }
 
 export type CreateMenuItemRequest = {
@@ -370,6 +512,16 @@ export type CreateMenuItemRequest = {
   imageUrl?: string | null
   isAvailable: boolean
   isSoldOut: boolean
+  isVegetarian: boolean
+  isVegan: boolean
+  isGlutenFree: boolean
+  isHalal: boolean
+  allergens?: string | null
+  spiceLevel: number
+  servingSize?: string | null
+  calories?: number | null
+  isPopular: boolean
+  isRecommended: boolean
   displayOrder: number
 }
 
@@ -387,6 +539,20 @@ export type ReorderMenuItemsRequest = {
 
 export type ReorderMenuItemsResponse = {
   message: string
+}
+
+export type UpdateMenuItemsStateRequest = {
+  restaurantId: string
+  itemIds: string[]
+  isAvailable: boolean
+  isSoldOut: boolean
+}
+
+export type UpdateMenuItemsStateResponse = {
+  message: string
+  itemIds: string[]
+  isAvailable: boolean
+  isSoldOut: boolean
 }
 
 export type DeleteMenuItemResponse = {
@@ -554,10 +720,14 @@ export type AdminOrder = {
 export type FrontCounterListParams = {
   restaurantId?: string
   search?: string
+  pageSize?: number
 }
 
 export type FrontCounterTakeawayResponse = {
   generatedAt: string
+  /** The restaurant's current business day (YYYY-MM-DD). Pickup numbers reset on this boundary. */
+  businessDate: string
+  totalOrders: number
   orders: AdminOrder[]
 }
 
@@ -632,8 +802,23 @@ export type FrontCounterSettleOrderResponse = {
   order: AdminOrder
 }
 
+export type FrontCounterTender = 'Cash' | 'Card'
+
+export type FrontCounterRecordPaymentRequest = {
+  tender: FrontCounterTender
+  amountReceived?: number
+}
+
+export type FrontCounterRecordPaymentResponse = {
+  order: AdminOrder
+  amountReceived: number
+  changeDue: number
+}
+
 export type FrontCounterSettleTableSessionResponse = {
   tableSession: FrontCounterTableSessionDetail
+  amountReceived: number
+  changeDue: number
 }
 
 export type CustomerOrderItem = {
@@ -683,7 +868,7 @@ export type CustomerOrder = {
   orderItems: CustomerOrderItem[]
 }
 
-export type CustomerRefundRequestStatus = 'Pending' | 'Approved' | 'Rejected' | 'Cancelled'
+export type CustomerRefundRequestStatus = 'Pending' | 'Processing' | 'Approved' | 'Rejected' | 'Cancelled'
 
 export type CustomerRefundRequest = {
   id: string
@@ -726,12 +911,79 @@ export type ReportLogListParams = {
   createdTo?: string
 }
 
+export type ActivityLogListParams = {
+  page?: number
+  pageSize?: number
+  search?: string
+  restaurantId?: string
+  category?: string
+  actorType?: string
+  outcome?: string
+  createdFrom?: string
+  createdTo?: string
+}
+
+export type ActivityLog = {
+  id: string
+  restaurantId: string | null
+  restaurantName: string | null
+  restaurantTimeZone: string | null
+  occurredAt: string
+  category: string
+  severity: 'Success' | 'Warning' | 'Error' | 'Info'
+  eventType: string
+  actionLabel: string
+  actorType: 'User' | 'Customer' | 'Automation' | 'Provider' | 'System' | string
+  actorName: string
+  actorRoles: string | null
+  source: string
+  description: string
+  subjectType: string | null
+  subjectId: string | null
+  subjectLabel: string | null
+  orderId: string | null
+  orderNumber: string | null
+  paymentId: string | null
+  status: string | null
+  amountCents: number | null
+  currency: string | null
+  correlationId: string | null
+  technicalJson: string | null
+}
+
+export type ActivityMoneyTotal = {
+  currency: string
+  count: number
+  amountCents: number
+}
+
+export type ActivitySummary = {
+  timeZone: string
+  activityCountToday: number
+  completedOrdersToday: number
+  failedPaymentsToday: number
+  paymentsReceivedToday: ActivityMoneyTotal[]
+  refundsSucceededToday: ActivityMoneyTotal[]
+}
+
+export type ReportPolicy = {
+  maxExportRows: number
+  auditRetentionDays: number
+  orderEventRetentionDays: number
+  paymentEventRetentionDays: number
+  logsAreImmutable: boolean
+  sensitiveTechnicalDetailsRequirePlatformOwner: boolean
+}
+
 export type AuditLog = {
   id: string
   restaurantId: string | null
   actorUserId: string | null
   actorEmail: string | null
   actorRoles: string | null
+  actorType: string | null
+  source: string | null
+  correlationId: string | null
   action: string
   entityType: string
   entityId: string | null
@@ -751,6 +1003,9 @@ export type OrderEventLog = {
   actorUserId: string | null
   actorDisplayName: string | null
   actorRoles: string | null
+  actorType: string | null
+  source: string | null
+  correlationId: string | null
   eventType: string
   message: string
   dataJson: string | null
@@ -773,6 +1028,9 @@ export type PaymentEventLog = {
   actorUserId: string | null
   actorDisplayName: string | null
   actorRoles: string | null
+  actorType: string | null
+  source: string | null
+  correlationId: string | null
   createdAt: string
 }
 
@@ -787,6 +1045,8 @@ export type AdminOrderListParams = {
   orderType?: string
   restaurantId?: string
   payableOnly?: boolean
+  createdFromUtc?: string
+  createdToUtc?: string
 }
 
 export type AdminPaymentListParams = {
@@ -805,6 +1065,8 @@ export type AdminRefundSummaryParams = {
   restaurantId?: string
   search?: string
   status?: AdminPaymentRefundStatus
+  createdFromUtc?: string
+  createdToUtc?: string
 }
 
 export type AdminRefundListParams = AdminRefundSummaryParams & {
@@ -814,7 +1076,7 @@ export type AdminRefundListParams = AdminRefundSummaryParams & {
   sortDirection?: 'asc' | 'desc'
 }
 
-export type AdminRefundRequestStatus = 'Pending' | 'Approved' | 'Rejected' | 'Cancelled'
+export type AdminRefundRequestStatus = 'Pending' | 'Approved' | 'Rejected' | 'Cancelled' | 'Processing'
 
 export type AdminRefundRequestListParams = {
   page?: number
@@ -822,6 +1084,8 @@ export type AdminRefundRequestListParams = {
   search?: string
   status?: AdminRefundRequestStatus
   restaurantId?: string
+  createdFromUtc?: string
+  createdToUtc?: string
   sortBy?: string
   sortDirection?: 'asc' | 'desc'
 }
@@ -859,6 +1123,11 @@ export type AdminRefundRequest = {
   customerEmail: string | null
   status: AdminRefundRequestStatus
   requestedAmountCents: number
+  originalPaymentAmountCents: number
+  alreadyRefundedAmountCents: number
+  refundableAmountCents: number
+  previousRefundCount: number
+  providerPaymentIntentId: string | null
   currency: string
   reason: string | null
   adminNote: string | null
@@ -1243,7 +1512,11 @@ async function requestBlob(path: string, options: RequestInit = {}) {
     throw new Error(message)
   }
 
-  return response.blob()
+  return {
+    blob: await response.blob(),
+    truncated: response.headers.get('X-Export-Truncated') === 'true',
+    rowLimit: Number(response.headers.get('X-Export-Row-Limit') ?? 0),
+  }
 }
 
 export function login(email: string, password: string) {
@@ -1395,9 +1668,50 @@ export function getRestaurantUserPage(params: UserListParams = {}) {
   return request<PagedResponse<UserListItem>>(`/api/restaurant/users${toQueryString(params)}`)
 }
 
-export async function getRestaurantUsers() {
-  const response = await getRestaurantUserPage({ pageSize: 100, sortBy: 'email', sortDirection: 'asc' })
-  return response.items
+/**
+ * Every page, not just the first. These lists back name lookups and pickers, and silently stopping
+ * at 100 made the users table print raw restaurant GUIDs once a deployment grew past that.
+ */
+async function fetchAllPages<T>(
+  load: (page: number, pageSize: number) => Promise<PagedResponse<T>>,
+): Promise<T[]> {
+  // PagedRequest caps this at 100. Keeping the shared loader on that contract prevents every
+  // restaurant/user picker from failing with HTTP 400.
+  const pageSize = 100
+  const maximumPages = 50 // Guard against an unbounded loop if the server misreports totals.
+  const first = await load(1, pageSize)
+  const items = [...first.items]
+
+  for (let page = 2; page <= Math.min(first.totalPages, maximumPages); page++) {
+    const next = await load(page, pageSize)
+    items.push(...next.items)
+  }
+
+  return items
+}
+
+export function getRestaurantUsers() {
+  return fetchAllPages<UserListItem>((page, pageSize) =>
+    getRestaurantUserPage({ page, pageSize, sortBy: 'email', sortDirection: 'asc' }))
+}
+
+export function updateUserStatus(userId: string, isDisabled: boolean) {
+  return request<{ message: string; userId: string; isDisabled: boolean }>(
+    `/api/users/${userId}/status`,
+    { method: 'PATCH', body: JSON.stringify({ isDisabled }) },
+  )
+}
+
+export function unlockUser(userId: string) {
+  return request<{ message: string; userId: string }>(`/api/users/${userId}/unlock`, {
+    method: 'POST',
+  })
+}
+
+export function sendUserPasswordReset(userId: string) {
+  return request<{ message: string; userId: string }>(`/api/users/${userId}/send-password-reset`, {
+    method: 'POST',
+  })
 }
 
 export function createRestaurantUser({
@@ -1433,9 +1747,9 @@ export function getRestaurantPage(params: RestaurantListParams = {}) {
   return request<PagedResponse<Restaurant>>(`/api/restaurant${toQueryString(params)}`)
 }
 
-export async function getRestaurants() {
-  const response = await getRestaurantPage({ pageSize: 100, sortBy: 'name', sortDirection: 'asc' })
-  return response.items
+export function getRestaurants() {
+  return fetchAllPages<Restaurant>((page, pageSize) =>
+    getRestaurantPage({ page, pageSize, sortBy: 'name', sortDirection: 'asc' }))
 }
 
 export function createRestaurant(payload: RestaurantRequest) {
@@ -1452,11 +1766,67 @@ export function updateRestaurant(restaurantId: string, payload: RestaurantReques
   })
 }
 
-export function updateRestaurantOrderingStatus(restaurantId: string, acceptingOrders: boolean) {
+export type PauseOrderingOptions = {
+  /** Auto-resume after this many minutes. */
+  pauseMinutes?: number
+  /** Auto-resume at the next scheduled opening. Takes precedence over pauseMinutes. */
+  pauseUntilNextOpening?: boolean
+}
+
+export function updateRestaurantOrderingStatus(
+  restaurantId: string,
+  acceptingOrders: boolean,
+  options: PauseOrderingOptions = {},
+) {
   return request<UpdateRestaurantResponse>(`/api/restaurant/${restaurantId}/ordering-status`, {
     method: 'PATCH',
-    body: JSON.stringify({ acceptingOrders }),
+    body: JSON.stringify({
+      acceptingOrders,
+      pauseMinutes: options.pauseMinutes ?? null,
+      pauseUntilNextOpening: Boolean(options.pauseUntilNextOpening),
+    }),
   })
+}
+
+/**
+ * Scoped writes: these touch only their own column, so the hours editor and the special calendar
+ * can no longer overwrite each other with a stale copy of the whole restaurant.
+ */
+export function updateRestaurantOpeningHours(restaurantId: string, openingHoursJson: string) {
+  return request<UpdateRestaurantResponse>(`/api/restaurant/${restaurantId}/opening-hours`, {
+    method: 'PUT',
+    body: JSON.stringify({ openingHoursJson }),
+  })
+}
+
+export function updateRestaurantSpecialDays(restaurantId: string, specialOpeningDaysJson: string) {
+  return request<UpdateRestaurantResponse>(`/api/restaurant/${restaurantId}/special-days`, {
+    method: 'PUT',
+    body: JSON.stringify({ specialOpeningDaysJson }),
+  })
+}
+
+export function updateRestaurantAutoAccept(restaurantId: string, autoAcceptOrders: boolean) {
+  return request<RestaurantOperations>(`/api/staff/restaurants/${restaurantId}/auto-accept`, {
+    method: 'PATCH',
+    body: JSON.stringify({ autoAcceptOrders }),
+  })
+}
+
+/**
+ * Read-only trading status on the staff policy. Use this when the caller may only have the Staff
+ * role — the admin restaurant API (getRestaurants, updateRestaurant*) is not available to them.
+ */
+export function getCurrentRestaurantTradingStatus() {
+  return request<RestaurantTradingStatus>('/api/staff/restaurants/current/trading-status')
+}
+
+export function getRestaurantTradingStatus(restaurantId: string) {
+  return request<RestaurantTradingStatus>(`/api/staff/restaurants/${restaurantId}/trading-status`)
+}
+
+export function getRestaurantOperations(restaurantId: string) {
+  return request<RestaurantOperations>(`/api/staff/restaurants/${restaurantId}/operations`)
 }
 
 export function deleteRestaurant(restaurantId: string) {
@@ -1550,6 +1920,77 @@ export function reorderMenuItems(payload: ReorderMenuItemsRequest) {
   })
 }
 
+export function getRestaurantPaymentSettings(restaurantId: string) {
+  return request<RestaurantPaymentSettings>(`/api/restaurant/${restaurantId}/payment-settings`)
+}
+
+export function updateRestaurantPlatformFees(
+  restaurantId: string,
+  payload: Pick<RestaurantPaymentSettings, 'orderPlatformFeePercent' | 'oneTimePlatformFeeCents'>,
+) {
+  return request<RestaurantPaymentSettings>(`/api/restaurant/${restaurantId}/payment-settings`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function createRestaurantStripeConnectLink(restaurantId: string) {
+  return request<StripeActionLinkResponse>(`/api/restaurant/${restaurantId}/stripe/connect-link`, {
+    method: 'POST',
+  })
+}
+
+export function refreshRestaurantStripeStatus(restaurantId: string) {
+  return request<RestaurantPaymentSettings>(`/api/restaurant/${restaurantId}/stripe/refresh`, {
+    method: 'POST',
+  })
+}
+
+export function runRestaurantStripeDiagnostics(restaurantId: string) {
+  return request<StripeConnectDiagnostic>(`/api/restaurant/${restaurantId}/stripe/diagnostics`, {
+    method: 'POST',
+  })
+}
+
+export function createRestaurantPlatformFeeCheckout(restaurantId: string) {
+  return request<PlatformFeeCheckoutResponse>(`/api/restaurant/${restaurantId}/platform-fee/checkout`, {
+    method: 'POST',
+  })
+}
+
+export type PaymentEnvironment = {
+  provider: 'Stripe'
+  mode: 'Live' | 'Test' | 'Unconfigured'
+  destructiveActionsRequireConfirmation: boolean
+}
+
+export function updateMenuItemsState(payload: UpdateMenuItemsStateRequest) {
+  return request<UpdateMenuItemsStateResponse>('/api/admin/menu/items/bulk-state', {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function getWatchedMenuItems(restaurantId?: string) {
+  const query = restaurantId ? `?restaurantId=${encodeURIComponent(restaurantId)}` : ''
+  return request<WatchedMenuItem[]>(`/api/admin/menu/items/watched${query}`)
+}
+
+export function updateMenuItemWatch(itemId: string, isWatched: boolean) {
+  return request<{ message: string; itemId: string; isWatched: boolean }>(
+    `/api/admin/menu/items/${itemId}/watch`,
+    { method: 'PATCH', body: JSON.stringify({ isWatched }) },
+  )
+}
+
+/** Pass null to stop tracking stock, which makes the item unlimited again. */
+export function updateMenuItemStock(itemId: string, stockQuantity: number | null) {
+  return request<{ message: string; itemId: string; stockQuantity: number | null; isSoldOut: boolean }>(
+    `/api/admin/menu/items/${itemId}/stock`,
+    { method: 'PATCH', body: JSON.stringify({ stockQuantity }) },
+  )
+}
+
 export function updateMenuItemAvailability(itemId: string, isAvailable: boolean) {
   return request<UpdateMenuItemAvailabilityResponse>(`/api/admin/menu/items/${itemId}/availability`, {
     method: 'PATCH',
@@ -1584,6 +2025,13 @@ export function updateMenuOptionGroup(itemId: string, groupId: string, payload: 
   })
 }
 
+export function reorderMenuOptionGroups(itemId: string, groupIds: string[]) {
+  return request<{ message: string }>(`/api/menu/items/${itemId}/option-groups/reorder`, {
+    method: 'POST',
+    body: JSON.stringify({ groupIds }),
+  })
+}
+
 export function archiveMenuOptionGroup(itemId: string, groupId: string) {
   return request<void>(`/api/menu/items/${itemId}/option-groups/${groupId}/archive`, {
     method: 'POST',
@@ -1608,6 +2056,16 @@ export function updateMenuOption(itemId: string, groupId: string, optionId: stri
     method: 'PUT',
     body: JSON.stringify(payload),
   })
+}
+
+export function reorderMenuOptions(itemId: string, groupId: string, optionIds: string[]) {
+  return request<{ message: string }>(
+    `/api/menu/items/${itemId}/option-groups/${groupId}/options/reorder`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ optionIds }),
+    },
+  )
 }
 
 export function archiveMenuOption(itemId: string, groupId: string, optionId: string) {
@@ -1670,8 +2128,11 @@ function toQueryString(params: Record<string, string | number | boolean | undefi
   return value ? `?${value}` : ''
 }
 
-export function getAdminOrders(params: AdminOrderListParams = {}) {
-  return request<PagedResponse<AdminOrder>>(`/api/admin/orders${toQueryString(params)}`)
+export function getAdminOrders(
+  params: AdminOrderListParams = {},
+  options: Pick<RequestInit, 'signal'> = {},
+) {
+  return request<PagedResponse<AdminOrder>>(`/api/admin/orders${toQueryString(params)}`, options)
 }
 
 export function getStaffOrders(params: AdminOrderListParams = {}) {
@@ -1702,8 +2163,11 @@ export function getFrontCounterTableSession(sessionId: string, params: { restaur
   )
 }
 
-export function getAdminOrderSummary() {
-  return request<AdminOrderSummary>('/api/admin/orders/summary')
+export function getAdminOrderSummary(
+  params: AdminOrderListParams = {},
+  options: Pick<RequestInit, 'signal'> = {},
+) {
+  return request<AdminOrderSummary>(`/api/admin/orders/summary${toQueryString(params)}`, options)
 }
 
 export function getAdminOrderStatusHistory(orderId: string) {
@@ -1716,20 +2180,39 @@ export function recordCounterPayment(orderId: string) {
   })
 }
 
-export function settleCompleteFrontCounterOrder(orderId: string, params: { restaurantId?: string } = {}) {
+export function recordFrontCounterPayment(
+  orderId: string,
+  payload: FrontCounterRecordPaymentRequest,
+  params: { restaurantId?: string } = {},
+) {
+  return request<FrontCounterRecordPaymentResponse>(
+    `/api/staff/front-counter/orders/${orderId}/record-payment${toQueryString(params)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export function completeFrontCounterOrder(orderId: string, params: { restaurantId?: string } = {}) {
   return request<FrontCounterSettleOrderResponse>(
-    `/api/staff/front-counter/orders/${orderId}/settle-complete${toQueryString(params)}`,
+    `/api/staff/front-counter/orders/${orderId}/complete${toQueryString(params)}`,
     {
       method: 'POST',
     },
   )
 }
 
-export function settleCompleteFrontCounterTableSession(sessionId: string, params: { restaurantId?: string } = {}) {
+export function settleCompleteFrontCounterTableSession(
+  sessionId: string,
+  payload: FrontCounterRecordPaymentRequest,
+  params: { restaurantId?: string } = {},
+) {
   return request<FrontCounterSettleTableSessionResponse>(
     `/api/staff/front-counter/table-sessions/${sessionId}/settle-complete${toQueryString(params)}`,
     {
       method: 'POST',
+      body: JSON.stringify(payload),
     },
   )
 }
@@ -1774,31 +2257,77 @@ export function getAdminPayments(params: AdminPaymentListParams = {}) {
   return request<PagedResponse<AdminPayment>>(`/api/payments${toQueryString(params)}`)
 }
 
-export function getAdminRefundSummary(params: AdminRefundSummaryParams = {}) {
-  return request<AdminRefundSummary>(`/api/payments/refunds/summary${toQueryString(params)}`)
+export function getPaymentEnvironment() {
+  return request<PaymentEnvironment>('/api/payments/environment')
 }
 
-export function getAdminRefunds(params: AdminRefundListParams = {}) {
-  return request<PagedResponse<AdminRefund>>(`/api/payments/refunds${toQueryString(params)}`)
+export function getAdminRefundSummary(
+  params: AdminRefundSummaryParams = {},
+  options: Pick<RequestInit, 'signal'> = {},
+) {
+  return request<AdminRefundSummary>(`/api/payments/refunds/summary${toQueryString(params)}`, options)
 }
 
-export function getAdminRefundRequests(params: AdminRefundRequestListParams = {}) {
-  return request<PagedResponse<AdminRefundRequest>>(`/api/payments/refund-requests${toQueryString(params)}`)
+export function getAdminRefunds(
+  params: AdminRefundListParams = {},
+  options: Pick<RequestInit, 'signal'> = {},
+) {
+  return request<PagedResponse<AdminRefund>>(`/api/payments/refunds${toQueryString(params)}`, options)
 }
 
-export function getAuditLogs(params: ReportLogListParams = {}) {
-  return request<PagedResponse<AuditLog>>(`/api/admin/reports/audit${toQueryString(params)}`)
+export function getAdminRefundRequests(
+  params: AdminRefundRequestListParams = {},
+  options: Pick<RequestInit, 'signal'> = {},
+) {
+  return request<PagedResponse<AdminRefundRequest>>(`/api/payments/refund-requests${toQueryString(params)}`, options)
 }
 
-export function getOrderEventLogs(params: ReportLogListParams = {}) {
-  return request<PagedResponse<OrderEventLog>>(`/api/admin/reports/orders${toQueryString(params)}`)
+export function getActivityLogs(
+  params: ActivityLogListParams = {},
+  options: Pick<RequestInit, 'signal'> = {},
+) {
+  return request<PagedResponse<ActivityLog>>(`/api/admin/reports/activity${toQueryString(params)}`, options)
 }
 
-export function getPaymentEventLogs(params: ReportLogListParams = {}) {
-  return request<PagedResponse<PaymentEventLog>>(`/api/admin/reports/payments${toQueryString(params)}`)
+export function getActivitySummary(
+  restaurantId?: string,
+  options: Pick<RequestInit, 'signal'> = {},
+) {
+  return request<ActivitySummary>(
+    `/api/admin/reports/activity/summary${toQueryString({ restaurantId })}`,
+    options,
+  )
 }
 
-export function downloadReportLogsCsv(kind: 'audit' | 'orders' | 'payments', params: ReportLogListParams = {}) {
+export function getReportPolicy(options: Pick<RequestInit, 'signal'> = {}) {
+  return request<ReportPolicy>('/api/admin/reports/policy', options)
+}
+
+export function getAuditLogs(
+  params: ReportLogListParams = {},
+  options: Pick<RequestInit, 'signal'> = {},
+) {
+  return request<PagedResponse<AuditLog>>(`/api/admin/reports/audit${toQueryString(params)}`, options)
+}
+
+export function getOrderEventLogs(
+  params: ReportLogListParams = {},
+  options: Pick<RequestInit, 'signal'> = {},
+) {
+  return request<PagedResponse<OrderEventLog>>(`/api/admin/reports/orders${toQueryString(params)}`, options)
+}
+
+export function getPaymentEventLogs(
+  params: ReportLogListParams = {},
+  options: Pick<RequestInit, 'signal'> = {},
+) {
+  return request<PagedResponse<PaymentEventLog>>(`/api/admin/reports/payments${toQueryString(params)}`, options)
+}
+
+export function downloadReportLogsCsv(
+  kind: 'activity' | 'audit' | 'orders' | 'payments',
+  params: ReportLogListParams | ActivityLogListParams = {},
+) {
   return requestBlob(`/api/admin/reports/${kind}/export${toQueryString(params)}`)
 }
 

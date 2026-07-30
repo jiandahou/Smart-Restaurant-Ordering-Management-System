@@ -21,6 +21,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
     public DbSet<OrderItemOption> OrderItemOptions => Set<OrderItemOption>();
     public DbSet<OrderStatusHistory> OrderStatusHistories => Set<OrderStatusHistory>();
+    public DbSet<RestaurantPickupCounter> RestaurantPickupCounters => Set<RestaurantPickupCounter>();
     public DbSet<MenuCategory> MenuCategories => Set<MenuCategory>();
     public DbSet<MenuItem> MenuItems => Set<MenuItem>();
     public DbSet<MenuItemOptionGroup> MenuItemOptionGroups => Set<MenuItemOptionGroup>();
@@ -32,6 +33,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<Payment> Payments => Set<Payment>();
     public DbSet<PaymentRefund> PaymentRefunds => Set<PaymentRefund>();
     public DbSet<PaymentRefundRequest> PaymentRefundRequests => Set<PaymentRefundRequest>();
+    public DbSet<StripeWebhookEvent> StripeWebhookEvents => Set<StripeWebhookEvent>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<OrderEventLog> OrderEventLogs => Set<OrderEventLog>();
     public DbSet<PaymentEventLog> PaymentEventLogs => Set<PaymentEventLog>();
@@ -149,6 +151,28 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(restaurant => restaurant.ImageUrl)
                 .HasMaxLength(2048);
 
+            entity.Property(restaurant => restaurant.StripeAccountId)
+                .HasMaxLength(255);
+
+            entity.Property(restaurant => restaurant.StripeRequirementsDueJson)
+                .HasDefaultValue("[]")
+                .IsRequired();
+
+            entity.Property(restaurant => restaurant.OneTimePlatformFeeCheckoutSessionId)
+                .HasMaxLength(255);
+
+            entity.Property(restaurant => restaurant.OneTimePlatformFeePaymentIntentId)
+                .HasMaxLength(255);
+
+            entity.Property(restaurant => restaurant.OneTimePlatformFeeCheckoutUrl)
+                .HasMaxLength(2_048);
+
+            entity.Property(restaurant => restaurant.OneTimePlatformFeeIdempotencyKey)
+                .HasMaxLength(255);
+
+            entity.HasIndex(restaurant => restaurant.StripeAccountId)
+                .IsUnique();
+
             entity.Property(restaurant => restaurant.CountryCode)
                 .HasMaxLength(2)
                 .HasDefaultValue("AU")
@@ -164,6 +188,19 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(restaurant => restaurant.SpecialOpeningDaysJson)
                 .HasDefaultValue("[]")
                 .IsRequired();
+
+            entity.ToTable(table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_Restaurants_OrderPlatformFeeBps",
+                    "\"OrderPlatformFeeBps\" >= 0 AND \"OrderPlatformFeeBps\" <= 10000");
+                table.HasCheckConstraint(
+                    "CK_Restaurants_OneTimePlatformFeeCents",
+                    "\"OneTimePlatformFeeCents\" >= 0");
+                table.HasCheckConstraint(
+                    "CK_Restaurants_OneTimePlatformFeeStatus",
+                    "\"OneTimePlatformFeeStatus\" IN (0, 1, 2, 3)");
+            });
         });
 
               builder.Entity<RestaurantTable>(entity =>
@@ -193,6 +230,20 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasKey(item => item.Id);
             entity.HasIndex(item => item.RestaurantId);
             entity.HasIndex(item => item.CategoryId);
+
+            // The dashboard widget reads only the watched items for one restaurant.
+            entity.HasIndex(item => new { item.RestaurantId, item.IsWatched })
+                .HasDatabaseName("IX_MenuItems_RestaurantId_IsWatched")
+                .HasFilter("\"IsWatched\"");
+
+            entity.ToTable(table =>
+            {
+                // Stock is opt-in: NULL means untracked, never negative when tracked.
+                table.HasCheckConstraint(
+                    "CK_MenuItems_StockQuantity",
+                    "\"StockQuantity\" IS NULL OR \"StockQuantity\" >= 0");
+            });
+
             entity.HasMany(item => item.OptionGroups)
                 .WithOne(group => group.MenuItem)
                 .HasForeignKey(group => group.MenuItemId)
@@ -413,6 +464,18 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
+        builder.Entity<RestaurantPickupCounter>(entity =>
+        {
+            entity.HasKey(counter => new { counter.RestaurantId, counter.PickupDate });
+
+            entity.ToTable(table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_RestaurantPickupCounters_LastNumber",
+                    "\"LastNumber\" > 0");
+            });
+        });
+
         builder.Entity<TableSession>(entity =>
         {
             entity.HasKey(session => session.Id);
@@ -489,12 +552,16 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(payment => payment.Provider).HasMaxLength(64).IsRequired();
             entity.Property(payment => payment.ProviderCheckoutSessionId).HasMaxLength(255);
             entity.Property(payment => payment.ProviderPaymentIntentId).HasMaxLength(255);
+            entity.Property(payment => payment.StripeAccountId).HasMaxLength(255);
+            entity.Property(payment => payment.CheckoutUrl).HasMaxLength(2_048);
+            entity.Property(payment => payment.IdempotencyKey).HasMaxLength(255);
             entity.Property(payment => payment.Currency).HasMaxLength(8).IsRequired();
             entity.Property(payment => payment.FailureReason).HasMaxLength(1_000);
             entity.Property(payment => payment.RecordedByUserId).HasMaxLength(450);
             entity.HasIndex(payment => payment.OrderId);
             entity.HasIndex(payment => payment.ProviderCheckoutSessionId);
             entity.HasIndex(payment => payment.ProviderPaymentIntentId);
+            entity.HasIndex(payment => payment.IdempotencyKey).IsUnique();
             entity.HasMany(payment => payment.Refunds)
                 .WithOne(refund => refund.Payment)
                 .HasForeignKey(refund => refund.PaymentId)
@@ -558,6 +625,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(log => log.ActorUserId).HasMaxLength(450);
             entity.Property(log => log.ActorEmail).HasMaxLength(256);
             entity.Property(log => log.ActorRoles).HasMaxLength(300);
+            entity.Property(log => log.ActorType).HasMaxLength(32);
+            entity.Property(log => log.Source).HasMaxLength(64);
+            entity.Property(log => log.CorrelationId).HasMaxLength(120);
             entity.Property(log => log.Action).HasMaxLength(120).IsRequired();
             entity.Property(log => log.EntityType).HasMaxLength(80).IsRequired();
             entity.Property(log => log.EntityId).HasMaxLength(120);
@@ -567,6 +637,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(log => new { log.RestaurantId, log.CreatedAt });
             entity.HasIndex(log => log.ActorUserId);
             entity.HasIndex(log => log.Action);
+            entity.HasIndex(log => log.CorrelationId);
             entity.HasIndex(log => new { log.EntityType, log.EntityId });
         });
 
@@ -577,11 +648,15 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(log => log.ActorUserId).HasMaxLength(450);
             entity.Property(log => log.ActorDisplayName).HasMaxLength(256);
             entity.Property(log => log.ActorRoles).HasMaxLength(300);
+            entity.Property(log => log.ActorType).HasMaxLength(32);
+            entity.Property(log => log.Source).HasMaxLength(64);
+            entity.Property(log => log.CorrelationId).HasMaxLength(120);
             entity.Property(log => log.EventType).HasMaxLength(120).IsRequired();
             entity.Property(log => log.Message).HasMaxLength(700).IsRequired();
             entity.HasIndex(log => new { log.RestaurantId, log.CreatedAt });
             entity.HasIndex(log => new { log.OrderId, log.CreatedAt });
             entity.HasIndex(log => log.EventType);
+            entity.HasIndex(log => log.CorrelationId);
         });
 
         builder.Entity<PaymentEventLog>(entity =>
@@ -596,12 +671,26 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(log => log.ActorUserId).HasMaxLength(450);
             entity.Property(log => log.ActorDisplayName).HasMaxLength(256);
             entity.Property(log => log.ActorRoles).HasMaxLength(300);
+            entity.Property(log => log.ActorType).HasMaxLength(32);
+            entity.Property(log => log.Source).HasMaxLength(64);
+            entity.Property(log => log.CorrelationId).HasMaxLength(120);
             entity.HasIndex(log => new { log.RestaurantId, log.CreatedAt });
             entity.HasIndex(log => new { log.OrderId, log.CreatedAt });
             entity.HasIndex(log => new { log.PaymentId, log.CreatedAt });
             entity.HasIndex(log => log.PaymentRefundId);
             entity.HasIndex(log => log.EventType);
             entity.HasIndex(log => log.ProviderEventId);
+            entity.HasIndex(log => log.CorrelationId);
+        });
+
+        builder.Entity<StripeWebhookEvent>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.EventId).HasMaxLength(255).IsRequired();
+            entity.Property(item => item.StripeAccountId).HasMaxLength(255);
+            entity.Property(item => item.EventType).HasMaxLength(120).IsRequired();
+            entity.HasIndex(item => item.EventId).IsUnique();
+            entity.HasIndex(item => new { item.StripeAccountId, item.ProviderCreatedAt });
         });
 
     }

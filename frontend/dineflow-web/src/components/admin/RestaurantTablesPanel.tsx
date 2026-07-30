@@ -251,10 +251,18 @@ type RestaurantTablesPanelProps = {
   restaurants: Restaurant[]
   restaurantsLoading: boolean
   canSelectRestaurant: boolean
+  selectedRestaurantId?: string
+  onSelectedRestaurantIdChange?: (restaurantId: string) => void
 }
 
-export function RestaurantTablesPanel({ restaurants, restaurantsLoading, canSelectRestaurant }: RestaurantTablesPanelProps) {
-  const [restaurantId, setRestaurantId] = useState('')
+export function RestaurantTablesPanel({
+  restaurants,
+  restaurantsLoading,
+  canSelectRestaurant,
+  selectedRestaurantId: selectedRestaurantIdProp,
+  onSelectedRestaurantIdChange,
+}: RestaurantTablesPanelProps) {
+  const [restaurantIdState, setRestaurantIdState] = useState('')
   const [tables, setTables] = useState<RestaurantTable[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -264,7 +272,10 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading, canSele
   const [qrFilter, setQrFilter] = useState<QrFilter>('all')
   const [sort, setSort] = useState<{ key: TableSortKey; direction: SortDirection }>({ key: 'tableNumber', direction: 'asc' })
 
-  const selectedRestaurantId = restaurantId || restaurants[0]?.id || ''
+  const requestedRestaurantId = selectedRestaurantIdProp ?? restaurantIdState
+  const selectedRestaurantId = requestedRestaurantId && restaurants.some((restaurant) => restaurant.id === requestedRestaurantId)
+    ? requestedRestaurantId
+    : restaurants[0]?.id || ''
   const selectedRestaurant = restaurants.find((restaurant) => restaurant.id === selectedRestaurantId)
 
   const loadTables = async (showToast = false) => {
@@ -395,14 +406,15 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading, canSele
               <Select
                 value={selectedRestaurantId}
                 onValueChange={(value) => {
-                  setRestaurantId(value)
+                  setRestaurantIdState(value)
+                  onSelectedRestaurantIdChange?.(value)
                   resetFilters()
                   setLoading(true)
                   setError(null)
                 }}
                 disabled={restaurantsLoading || restaurants.length === 0}
               >
-                <SelectTrigger><SelectValue placeholder="Select restaurant" /></SelectTrigger>
+                <SelectTrigger aria-label="Select restaurant for table management"><SelectValue placeholder="Select restaurant" /></SelectTrigger>
                 <SelectContent position="popper">
                   {restaurants.map((restaurant) => (
                     <SelectItem key={restaurant.id} value={restaurant.id}>{restaurant.name}</SelectItem>
@@ -437,7 +449,7 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading, canSele
                   <div className="restaurant-filter-field">
                     <span>Status</span>
                     <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as TableStatusFilter)}>
-                      <SelectTrigger><SelectValue placeholder="Status" /></SelectTrigger>
+                      <SelectTrigger aria-label="Filter tables by status"><SelectValue placeholder="Status" /></SelectTrigger>
                       <SelectContent position="popper">
                         <SelectItem value="all">All statuses</SelectItem>
                         <SelectItem value="active">Active</SelectItem>
@@ -448,7 +460,7 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading, canSele
                   <div className="restaurant-filter-field">
                     <span>Capacity</span>
                     <Select value={capacityFilter} onValueChange={(value) => setCapacityFilter(value as CapacityFilter)}>
-                      <SelectTrigger><SelectValue placeholder="Capacity" /></SelectTrigger>
+                      <SelectTrigger aria-label="Filter tables by capacity"><SelectValue placeholder="Capacity" /></SelectTrigger>
                       <SelectContent position="popper">
                         <SelectItem value="all">All capacities</SelectItem>
                         <SelectItem value="small">1-2 seats</SelectItem>
@@ -461,7 +473,7 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading, canSele
                   <div className="restaurant-filter-field">
                     <span>QR status</span>
                     <Select value={qrFilter} onValueChange={(value) => setQrFilter(value as QrFilter)}>
-                      <SelectTrigger><SelectValue placeholder="QR status" /></SelectTrigger>
+                      <SelectTrigger aria-label="Filter tables by QR status"><SelectValue placeholder="QR status" /></SelectTrigger>
                       <SelectContent position="popper">
                         <SelectItem value="all">All QR statuses</SelectItem>
                         <SelectItem value="available">QR available</SelectItem>
@@ -476,7 +488,7 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading, canSele
 
           <div className="restaurant-table-inline-filters">
             <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as TableStatusFilter)}>
-              <SelectTrigger><SelectValue placeholder="Status" /></SelectTrigger>
+              <SelectTrigger aria-label="Filter tables by status"><SelectValue placeholder="Status" /></SelectTrigger>
               <SelectContent position="popper">
                 <SelectItem value="all">All statuses</SelectItem>
                 <SelectItem value="active">Active</SelectItem>
@@ -484,7 +496,7 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading, canSele
               </SelectContent>
             </Select>
             <Select value={capacityFilter} onValueChange={(value) => setCapacityFilter(value as CapacityFilter)}>
-              <SelectTrigger><SelectValue placeholder="Capacity" /></SelectTrigger>
+              <SelectTrigger aria-label="Filter tables by capacity"><SelectValue placeholder="Capacity" /></SelectTrigger>
               <SelectContent position="popper">
                 <SelectItem value="all">All capacities</SelectItem>
                 <SelectItem value="small">1-2 seats</SelectItem>
@@ -494,7 +506,7 @@ export function RestaurantTablesPanel({ restaurants, restaurantsLoading, canSele
               </SelectContent>
             </Select>
             <Select value={qrFilter} onValueChange={(value) => setQrFilter(value as QrFilter)}>
-              <SelectTrigger><SelectValue placeholder="QR status" /></SelectTrigger>
+              <SelectTrigger aria-label="Filter tables by QR status"><SelectValue placeholder="QR status" /></SelectTrigger>
               <SelectContent position="popper">
                 <SelectItem value="all">All QR statuses</SelectItem>
                 <SelectItem value="available">QR available</SelectItem>

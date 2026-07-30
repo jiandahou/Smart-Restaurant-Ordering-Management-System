@@ -15,5 +15,7 @@ public class ApplicationUser : IdentityUser
 
     public DateTime? UpdatedAt { get; set; }
 
+    public DateTime? LastLoginAt { get; set; }
+
     public RestaurantEntity? Restaurant { get; set; }
 }

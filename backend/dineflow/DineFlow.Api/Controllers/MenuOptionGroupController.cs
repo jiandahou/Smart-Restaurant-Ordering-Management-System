@@ -128,6 +128,52 @@ public class MenuOptionGroupController : ControllerBase
         return CreatedAtAction(nameof(ListGroups), new { itemId }, MapGroup(group));
     }
 
+    [HttpPost("reorder")]
+    public async Task<IActionResult> ReorderGroups(
+        Guid itemId,
+        [FromBody] ReorderMenuOptionGroupsRequest request,
+        CancellationToken cancellationToken)
+    {
+        var item = await LoadItemForTenantAsync(itemId);
+        if (item is null) return NotFound(new { message = "Menu item not found." });
+
+        if (request.GroupIds.Count == 0 || request.GroupIds.Distinct().Count() != request.GroupIds.Count)
+            return BadRequest(new { message = "Submit a unique, complete option group order." });
+
+        var groups = await _db.MenuItemOptionGroups
+            .Where(group => group.MenuItemId == itemId)
+            .ToListAsync(cancellationToken);
+
+        if (groups.Count != request.GroupIds.Count ||
+            request.GroupIds.Any(groupId => groups.All(group => group.Id != groupId)))
+            return BadRequest(new { message = "Submit the full option group order for this menu item." });
+
+        var orderById = request.GroupIds
+            .Select((groupId, index) => new { groupId, displayOrder = (index + 1) * 10 })
+            .ToDictionary(entry => entry.groupId, entry => entry.displayOrder);
+        var before = groups.Select(group => new { group.Id, group.Name, group.DisplayOrder }).ToList();
+        var updatedAt = DateTime.UtcNow;
+
+        foreach (var group in groups)
+        {
+            group.DisplayOrder = orderById[group.Id];
+            group.UpdatedAt = updatedAt;
+        }
+
+        _reportLogWriter.AddAudit(
+            "MenuOptionGroup.Reordered",
+            "MenuItem",
+            item.Id.ToString(),
+            item.RestaurantId,
+            $"Reordered option groups for {item.Name}.",
+            before,
+            groups.OrderBy(group => group.DisplayOrder)
+                .Select(group => new { group.Id, group.Name, group.DisplayOrder })
+                .ToList());
+        await _db.SaveChangesAsync(cancellationToken);
+        return Ok(new { message = "Option group order updated." });
+    }
+
     [HttpPut("{groupId:guid}")]
     public async Task<IActionResult> UpdateGroup(Guid itemId, Guid groupId, [FromBody] UpdateMenuOptionGroupRequest request)
     {
@@ -283,6 +329,60 @@ public class MenuOptionGroupController : ControllerBase
             after: SnapshotOption(option, group.Name, item.Name));
         await _db.SaveChangesAsync();
         return CreatedAtAction(nameof(ListOptions), new { itemId, groupId }, MapOption(option));
+    }
+
+    [HttpPost("{groupId:guid}/options/reorder")]
+    public async Task<IActionResult> ReorderOptions(
+        Guid itemId,
+        Guid groupId,
+        [FromBody] ReorderMenuOptionsRequest request,
+        CancellationToken cancellationToken)
+    {
+        var item = await LoadItemForTenantAsync(itemId);
+        if (item is null) return NotFound(new { message = "Menu item not found." });
+
+        var group = await _db.MenuItemOptionGroups
+            .AsNoTracking()
+            .FirstOrDefaultAsync(
+                optionGroup => optionGroup.Id == groupId && optionGroup.MenuItemId == itemId,
+                cancellationToken);
+        if (group is null) return NotFound(new { message = "Option group not found." });
+
+        if (request.OptionIds.Count == 0 || request.OptionIds.Distinct().Count() != request.OptionIds.Count)
+            return BadRequest(new { message = "Submit a unique, complete option order." });
+
+        var options = await _db.MenuItemOptions
+            .Where(option => option.MenuItemId == itemId && option.GroupId == groupId)
+            .ToListAsync(cancellationToken);
+
+        if (options.Count != request.OptionIds.Count ||
+            request.OptionIds.Any(optionId => options.All(option => option.Id != optionId)))
+            return BadRequest(new { message = "Submit the full option order for this group." });
+
+        var orderById = request.OptionIds
+            .Select((optionId, index) => new { optionId, displayOrder = (index + 1) * 10 })
+            .ToDictionary(entry => entry.optionId, entry => entry.displayOrder);
+        var before = options.Select(option => new { option.Id, option.Name, option.DisplayOrder }).ToList();
+        var updatedAt = DateTime.UtcNow;
+
+        foreach (var option in options)
+        {
+            option.DisplayOrder = orderById[option.Id];
+            option.UpdatedAt = updatedAt;
+        }
+
+        _reportLogWriter.AddAudit(
+            "MenuOption.Reordered",
+            "MenuOptionGroup",
+            group.Id.ToString(),
+            item.RestaurantId,
+            $"Reordered options in {group.Name} for {item.Name}.",
+            before,
+            options.OrderBy(option => option.DisplayOrder)
+                .Select(option => new { option.Id, option.Name, option.DisplayOrder })
+                .ToList());
+        await _db.SaveChangesAsync(cancellationToken);
+        return Ok(new { message = "Option order updated." });
     }
 
     [HttpPut("{groupId:guid}/options/{optionId:guid}")]

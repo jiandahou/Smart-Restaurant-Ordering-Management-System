@@ -4,6 +4,7 @@ using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Common;
 using DineFlow.Api.Contracts.Restaurant;
 using DineFlow.Api.Extensions;
+using DineFlow.Api.Options;
 using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
@@ -12,7 +13,11 @@ using DineFlow.Infrastructure.Restaurant;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using Stripe;
+using Stripe.Checkout;
 
 namespace DineFlow.Api.Controllers;
 
@@ -22,6 +27,9 @@ namespace DineFlow.Api.Controllers;
 public class RestaurantController : ControllerBase
 {
     private const int MaximumImageUrlLength = 2_048;
+
+    /// <summary>A timed pause is a rush-hour tool; anything longer should be an explicit pause.</summary>
+    private const int MaximumPauseMinutes = 12 * 60;
 
     private static readonly HashSet<string> IsoCurrencyCodes = CultureInfo
         .GetCultures(CultureTypes.SpecificCultures)
@@ -51,17 +59,26 @@ public class RestaurantController : ControllerBase
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly ReportLogWriter _reportLogWriter;
     private readonly RestaurantOperatingHoursService _restaurantOperatingHoursService;
+    private readonly IStripeClient _stripeClient;
+    private readonly StripeOptions _stripeOptions;
+    private readonly ILogger<RestaurantController> _logger;
 
     public RestaurantController(
         AppDbContext dbContext,
         UserManager<ApplicationUser> userManager,
         ReportLogWriter reportLogWriter,
-        RestaurantOperatingHoursService restaurantOperatingHoursService)
+        RestaurantOperatingHoursService restaurantOperatingHoursService,
+        IStripeClient stripeClient,
+        IOptions<StripeOptions> stripeOptions,
+        ILogger<RestaurantController> logger)
     {
         _dbContext = dbContext;
         _userManager = userManager;
         _reportLogWriter = reportLogWriter;
         _restaurantOperatingHoursService = restaurantOperatingHoursService;
+        _stripeClient = stripeClient;
+        _stripeOptions = stripeOptions.Value;
+        _logger = logger;
     }
 
     [HttpGet]
@@ -137,14 +154,56 @@ public class RestaurantController : ControllerBase
             Timezone = restaurant.Timezone,
             Currency = restaurant.Currency,
             PaymentPolicy = restaurant.PaymentPolicy.ToString(),
+            StripeConnectStatus = restaurant.StripeAccountId == null || restaurant.StripeAccountId == ""
+                ? "NotConnected"
+                : restaurant.StripeChargesEnabled && restaurant.StripePayoutsEnabled
+                    ? "Ready"
+                    : restaurant.StripeDetailsSubmitted ? "Restricted" : "Onboarding",
+            OnlinePaymentsEnabled = restaurant.StripeChargesEnabled &&
+                restaurant.StripeAccountId != null &&
+                restaurant.StripeAccountId != "",
+            OrderPlatformFeePercent = restaurant.OrderPlatformFeeBps / 100m,
+            OneTimePlatformFeeCents = restaurant.OneTimePlatformFeeCents,
+            OneTimePlatformFeeStatus = restaurant.OneTimePlatformFeeStatus.ToString(),
             IsActive = restaurant.IsActive,
             AcceptingOrders = restaurant.AcceptingOrders,
+            AcceptingOrdersPausedUntil = restaurant.AcceptingOrdersPausedUntil,
+            AutoAcceptOrders = restaurant.AutoAcceptOrders,
             OpeningHoursJson = restaurant.OpeningHoursJson,
             SpecialOpeningDaysJson = restaurant.SpecialOpeningDaysJson,
             CreatedAt = restaurant.CreatedAt,
             UpdatedAt = restaurant.UpdatedAt
         });
         var page = await responseQuery.ToPagedResponseAsync(request.Page, request.PageSize, cancellationToken);
+
+        // Availability can't be evaluated inside the EF projection, so fill it in once materialised.
+        var utcNow = DateTime.UtcNow;
+        foreach (var item in page.Items)
+        {
+            var availability = _restaurantOperatingHoursService.GetAvailability(
+                item.IsActive,
+                item.AcceptingOrders,
+                item.AcceptingOrdersPausedUntil,
+                item.Timezone,
+                item.OpeningHoursJson,
+                item.SpecialOpeningDaysJson,
+                utcNow);
+
+            item.Availability = new RestaurantAvailabilityResponse
+            {
+                IsOrderingAvailable = availability.IsOrderingAvailable,
+                IsWithinOpeningHours = availability.IsWithinOpeningHours,
+                AcceptingOrders = availability.AcceptingOrders,
+                Reason = availability.Reason,
+                Message = availability.Message,
+                NextTransitionLocal = availability.NextTransitionLocal,
+                NextOpeningLocal = availability.NextOpeningLocal,
+                LocalNow = RestaurantOperatingHoursService.GetLocalNow(
+                    new Restaurant { Timezone = item.Timezone },
+                    utcNow),
+                PausedUntilUtc = availability.PausedUntilUtc
+            };
+        }
 
         return Ok(page);
     }
@@ -191,6 +250,478 @@ public class RestaurantController : ControllerBase
         }
 
         return Ok(MapToResponse(restaurant));
+    }
+
+    [HttpGet("{id:guid}/payment-settings")]
+    public async Task<ActionResult<RestaurantPaymentSettingsResponse>> GetPaymentSettings(
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        if (!await CanAccessRestaurantAsync(id))
+        {
+            return Forbid();
+        }
+
+        var restaurant = await _dbContext.Restaurants
+            .AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+
+        return restaurant is null
+            ? NotFound(new { message = "Restaurant not found." })
+            : Ok(MapPaymentSettings(restaurant));
+    }
+
+    [Authorize(Policy = AuthorizationPolicies.PlatformOwnerOnly)]
+    [HttpPatch("{id:guid}/payment-settings")]
+    public async Task<ActionResult<RestaurantPaymentSettingsResponse>> UpdatePaymentSettings(
+        Guid id,
+        UpdateRestaurantPlatformFeesRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid)
+        {
+            return ValidationProblem(ModelState);
+        }
+
+        if (request.OneTimePlatformFeeCents is > 0 and < 50)
+        {
+            return BadRequest(new
+            {
+                message = "A non-zero one-time platform fee must be at least 50 minor currency units."
+            });
+        }
+
+        var restaurant = await _dbContext.Restaurants
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+
+        if (restaurant is null)
+        {
+            return NotFound(new { message = "Restaurant not found." });
+        }
+
+        if (restaurant.OneTimePlatformFeePaidAt.HasValue &&
+            restaurant.OneTimePlatformFeeCents != request.OneTimePlatformFeeCents)
+        {
+            return Conflict(new
+            {
+                message = "The one-time platform fee is immutable after it has been paid."
+            });
+        }
+
+        var before = new
+        {
+            restaurant.OrderPlatformFeeBps,
+            restaurant.OneTimePlatformFeeCents,
+            restaurant.OneTimePlatformFeeStatus
+        };
+        var nextBasisPoints = (int)decimal.Round(
+            request.OrderPlatformFeePercent * 100m,
+            0,
+            MidpointRounding.AwayFromZero);
+        var setupFeeChanged = restaurant.OneTimePlatformFeeCents != request.OneTimePlatformFeeCents;
+
+        restaurant.OrderPlatformFeeBps = nextBasisPoints;
+        restaurant.OneTimePlatformFeeCents = request.OneTimePlatformFeeCents;
+        if (!restaurant.OneTimePlatformFeePaidAt.HasValue && setupFeeChanged)
+        {
+            restaurant.OneTimePlatformFeeStatus = request.OneTimePlatformFeeCents == 0
+                ? PlatformSetupFeeStatus.NotRequired
+                : PlatformSetupFeeStatus.Pending;
+            restaurant.OneTimePlatformFeeCheckoutSessionId = null;
+            restaurant.OneTimePlatformFeePaymentIntentId = null;
+            restaurant.OneTimePlatformFeeCheckoutUrl = null;
+            restaurant.OneTimePlatformFeeIdempotencyKey = null;
+        }
+
+        restaurant.UpdatedAt = DateTime.UtcNow;
+        _reportLogWriter.AddAudit(
+            "Restaurant.PaymentSettingsUpdated",
+            "Restaurant",
+            restaurant.Id.ToString(),
+            restaurant.Id,
+            $"Updated Stripe platform fees for {restaurant.Name}.",
+            before,
+            new
+            {
+                restaurant.OrderPlatformFeeBps,
+                restaurant.OneTimePlatformFeeCents,
+                restaurant.OneTimePlatformFeeStatus
+            });
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(MapPaymentSettings(restaurant));
+    }
+
+    [HttpPost("{id:guid}/stripe/connect-link")]
+    public async Task<ActionResult<StripeActionLinkResponse>> CreateStripeConnectLink(
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        if (!await CanAccessRestaurantAsync(id))
+        {
+            return Forbid();
+        }
+
+        if (string.IsNullOrWhiteSpace(_stripeOptions.SecretKey))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                message = "Stripe is not configured."
+            });
+        }
+
+        var restaurant = await _dbContext.Restaurants
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+
+        if (restaurant is null)
+        {
+            return NotFound(new { message = "Restaurant not found." });
+        }
+
+        try
+        {
+            if (string.IsNullOrWhiteSpace(restaurant.StripeAccountId))
+            {
+                var contactEmail = await ResolveRestaurantOwnerEmailAsync(id, cancellationToken);
+                var accountOptions = new AccountCreateOptions
+                {
+                    Country = restaurant.CountryCode,
+                    DefaultCurrency = restaurant.Currency.ToLowerInvariant(),
+                    Email = contactEmail,
+                    BusinessProfile = StripeConnectPrefillBuilder.Build(
+                        restaurant,
+                        contactEmail),
+                    Controller = new AccountControllerOptions
+                    {
+                        Fees = new AccountControllerFeesOptions { Payer = "account" },
+                        Losses = new AccountControllerLossesOptions { Payments = "stripe" },
+                        RequirementCollection = "stripe",
+                        StripeDashboard = new AccountControllerStripeDashboardOptions { Type = "full" }
+                    },
+                    Metadata = new Dictionary<string, string>
+                    {
+                        ["restaurantId"] = restaurant.Id.ToString(),
+                        ["restaurantName"] = restaurant.Name
+                    }
+                };
+                var accountService = new AccountService(_stripeClient);
+                var account = await accountService.CreateAsync(
+                    accountOptions,
+                    new RequestOptions
+                    {
+                        IdempotencyKey = StripeConnectIdempotency.BuildAccountCreationKey(restaurant.Id, DateTime.UtcNow)
+                    },
+                    cancellationToken);
+
+                restaurant.StripeAccountId = account.Id;
+                restaurant.StripeConnectedAt = DateTime.UtcNow;
+                ApplyStripeAccountState(restaurant, account);
+                _reportLogWriter.AddAudit(
+                    "Restaurant.StripeAccountCreated",
+                    "Restaurant",
+                    restaurant.Id.ToString(),
+                    restaurant.Id,
+                    $"Created Stripe connected account for {restaurant.Name}.",
+                    after: new
+                    {
+                        restaurant.StripeAccountId,
+                        account.Controller?.Fees?.Payer,
+                        losses = account.Controller?.Losses?.Payments,
+                        dashboard = account.Controller?.StripeDashboard?.Type
+                    });
+                await _dbContext.SaveChangesAsync(cancellationToken);
+            }
+
+            var linkService = new AccountLinkService(_stripeClient);
+            var accountLink = await linkService.CreateAsync(
+                new AccountLinkCreateOptions
+                {
+                    Account = restaurant.StripeAccountId,
+                    RefreshUrl = AddRestaurantId(_stripeOptions.ConnectRefreshUrl, restaurant.Id),
+                    ReturnUrl = AddRestaurantId(_stripeOptions.ConnectReturnUrl, restaurant.Id),
+                    Type = "account_onboarding"
+                },
+                cancellationToken: cancellationToken);
+
+            return Ok(new StripeActionLinkResponse
+            {
+                Message = restaurant.StripeDetailsSubmitted
+                    ? "Stripe account update link created."
+                    : "Stripe onboarding link created.",
+                Url = accountLink.Url,
+                StripeAccountId = restaurant.StripeAccountId,
+                ExpiresAt = accountLink.ExpiresAt
+            });
+        }
+        catch (StripeException exception)
+        {
+            var providerMessage = exception.StripeError?.Message ?? exception.Message;
+            var connectSetupIncomplete = providerMessage.Contains(
+                "signed up for Connect",
+                StringComparison.OrdinalIgnoreCase);
+
+            _logger.LogWarning(
+                exception,
+                "Stripe rejected onboarding for restaurant {RestaurantId}. Error code: {StripeErrorCode}.",
+                restaurant.Id,
+                exception.StripeError?.Code);
+
+            return StatusCode(
+                connectSetupIncomplete
+                    ? StatusCodes.Status409Conflict
+                    : StatusCodes.Status502BadGateway,
+                new
+                {
+                    message = connectSetupIncomplete
+                        ? "Stripe Connect platform setup is incomplete. Finish the business information section in the Stripe Connect setup guide, then try again."
+                        : "Stripe could not start restaurant onboarding. Please try again.",
+                    code = connectSetupIncomplete
+                        ? "stripe_connect_setup_incomplete"
+                        : "stripe_onboarding_failed"
+                });
+        }
+    }
+
+    [HttpPost("{id:guid}/stripe/refresh")]
+    public async Task<ActionResult<RestaurantPaymentSettingsResponse>> RefreshStripeStatus(
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        if (!await CanAccessRestaurantAsync(id))
+        {
+            return Forbid();
+        }
+
+        if (string.IsNullOrWhiteSpace(_stripeOptions.SecretKey))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                message = "Stripe is not configured."
+            });
+        }
+
+        var restaurant = await _dbContext.Restaurants
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+
+        if (restaurant is null)
+        {
+            return NotFound(new { message = "Restaurant not found." });
+        }
+
+        if (string.IsNullOrWhiteSpace(restaurant.StripeAccountId))
+        {
+            return Conflict(new { message = "This restaurant has not connected Stripe." });
+        }
+
+        var accountService = new AccountService(_stripeClient);
+        var account = await accountService.GetAsync(
+            restaurant.StripeAccountId,
+            cancellationToken: cancellationToken);
+        ApplyStripeAccountState(restaurant, account);
+        restaurant.UpdatedAt = DateTime.UtcNow;
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(MapPaymentSettings(restaurant));
+    }
+
+    [HttpPost("{id:guid}/stripe/diagnostics")]
+    public async Task<ActionResult<StripeConnectDiagnosticResponse>> RunStripeDiagnostics(
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        if (!await CanAccessRestaurantAsync(id))
+        {
+            return Forbid();
+        }
+
+        if (!_stripeOptions.SecretKey.StartsWith("sk_test_", StringComparison.Ordinal))
+        {
+            return Conflict(new
+            {
+                message = "Stripe diagnostics are only available with a Stripe test-mode key."
+            });
+        }
+
+        var restaurant = await _dbContext.Restaurants
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+
+        if (restaurant is null)
+        {
+            return NotFound(new { message = "Restaurant not found." });
+        }
+
+        if (string.IsNullOrWhiteSpace(restaurant.StripeAccountId))
+        {
+            return Conflict(new { message = "Connect this restaurant to Stripe before running diagnostics." });
+        }
+
+        try
+        {
+            var accountService = new AccountService(_stripeClient);
+            var account = await accountService.GetAsync(
+                restaurant.StripeAccountId,
+                cancellationToken: cancellationToken);
+            ApplyStripeAccountState(restaurant, account);
+            restaurant.UpdatedAt = DateTime.UtcNow;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            var snapshot = StripeConnectAccountState.Read(restaurant.StripeRequirementsDueJson);
+            return Ok(new StripeConnectDiagnosticResponse
+            {
+                Mode = "Test",
+                CheckedAt = DateTime.UtcNow,
+                Settings = MapPaymentSettings(restaurant),
+                Checks = StripeConnectAccountState.BuildDiagnosticChecks(restaurant, snapshot)
+            });
+        }
+        catch (StripeException exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Stripe diagnostics failed for restaurant {RestaurantId} and account {StripeAccountId}.",
+                restaurant.Id,
+                restaurant.StripeAccountId);
+            return StatusCode(StatusCodes.Status502BadGateway, new
+            {
+                message = "Stripe could not retrieve this connected account.",
+                code = exception.StripeError?.Code ?? "stripe_account_unreachable"
+            });
+        }
+    }
+
+    [HttpPost("{id:guid}/platform-fee/checkout")]
+    public async Task<ActionResult<PlatformFeeCheckoutResponse>> CreatePlatformFeeCheckout(
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        if (!await CanAccessRestaurantAsync(id))
+        {
+            return Forbid();
+        }
+
+        if (string.IsNullOrWhiteSpace(_stripeOptions.SecretKey))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                message = "Stripe is not configured."
+            });
+        }
+
+        var restaurant = await _dbContext.Restaurants
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+
+        if (restaurant is null)
+        {
+            return NotFound(new { message = "Restaurant not found." });
+        }
+
+        if (restaurant.OneTimePlatformFeeCents == 0)
+        {
+            restaurant.OneTimePlatformFeeStatus = PlatformSetupFeeStatus.NotRequired;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            return Ok(new PlatformFeeCheckoutResponse
+            {
+                Message = "No one-time platform fee is configured.",
+                Required = false,
+                Paid = true
+            });
+        }
+
+        if (restaurant.OneTimePlatformFeePaidAt.HasValue)
+        {
+            return Ok(new PlatformFeeCheckoutResponse
+            {
+                Message = "The one-time platform fee has already been paid.",
+                Required = true,
+                Paid = true,
+                SessionId = restaurant.OneTimePlatformFeeCheckoutSessionId
+            });
+        }
+
+        if (restaurant.OneTimePlatformFeeStatus == PlatformSetupFeeStatus.Pending &&
+            !string.IsNullOrWhiteSpace(restaurant.OneTimePlatformFeeCheckoutSessionId) &&
+            !string.IsNullOrWhiteSpace(restaurant.OneTimePlatformFeeCheckoutUrl))
+        {
+            return Ok(new PlatformFeeCheckoutResponse
+            {
+                Message = "Existing platform fee checkout reused.",
+                Required = true,
+                Paid = false,
+                CheckoutUrl = restaurant.OneTimePlatformFeeCheckoutUrl,
+                SessionId = restaurant.OneTimePlatformFeeCheckoutSessionId
+            });
+        }
+
+        var feeConfigurationVersion = (restaurant.UpdatedAt ?? restaurant.CreatedAt).Ticks;
+        restaurant.OneTimePlatformFeeIdempotencyKey =
+            $"restaurant-platform-fee-{restaurant.Id:N}-{restaurant.OneTimePlatformFeeCents}-{feeConfigurationVersion}";
+        var metadata = new Dictionary<string, string>
+        {
+            ["mode"] = "restaurant_platform_setup_fee",
+            ["restaurantId"] = restaurant.Id.ToString(),
+            ["amountCents"] = restaurant.OneTimePlatformFeeCents.ToString(CultureInfo.InvariantCulture)
+        };
+        var sessionOptions = new SessionCreateOptions
+        {
+            Mode = "payment",
+            SuccessUrl = AppendSessionId(AddRestaurantId(_stripeOptions.PlatformFeeSuccessUrl, restaurant.Id)),
+            CancelUrl = AddRestaurantId(_stripeOptions.PlatformFeeCancelUrl, restaurant.Id),
+            CustomerEmail = await ResolveRestaurantOwnerEmailAsync(id, cancellationToken),
+            LineItems =
+            [
+                new SessionLineItemOptions
+                {
+                    Quantity = 1,
+                    PriceData = new SessionLineItemPriceDataOptions
+                    {
+                        Currency = restaurant.Currency.ToLowerInvariant(),
+                        UnitAmount = restaurant.OneTimePlatformFeeCents,
+                        ProductData = new SessionLineItemPriceDataProductDataOptions
+                        {
+                            Name = "DineFlow one-time platform activation"
+                        }
+                    }
+                }
+            ],
+            Metadata = metadata,
+            PaymentIntentData = new SessionPaymentIntentDataOptions
+            {
+                Metadata = metadata
+            }
+        };
+        var sessionService = new SessionService(_stripeClient);
+        var session = await sessionService.CreateAsync(
+            sessionOptions,
+            new RequestOptions { IdempotencyKey = restaurant.OneTimePlatformFeeIdempotencyKey },
+            cancellationToken);
+
+        restaurant.OneTimePlatformFeeStatus = PlatformSetupFeeStatus.Pending;
+        restaurant.OneTimePlatformFeeCheckoutSessionId = session.Id;
+        restaurant.OneTimePlatformFeePaymentIntentId = session.PaymentIntentId;
+        restaurant.OneTimePlatformFeeCheckoutUrl = session.Url;
+        restaurant.UpdatedAt = DateTime.UtcNow;
+        _reportLogWriter.AddAudit(
+            "Restaurant.PlatformFeeCheckoutCreated",
+            "Restaurant",
+            restaurant.Id.ToString(),
+            restaurant.Id,
+            $"Created one-time platform fee checkout for {restaurant.Name}.",
+            after: new
+            {
+                sessionId = session.Id,
+                restaurant.OneTimePlatformFeeCents,
+                restaurant.Currency
+            });
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(new PlatformFeeCheckoutResponse
+        {
+            Message = "Platform fee checkout created.",
+            Required = true,
+            Paid = false,
+            CheckoutUrl = session.Url,
+            SessionId = session.Id
+        });
     }
 
     [Authorize(Policy = AuthorizationPolicies.PlatformOwnerOnly)]
@@ -303,6 +834,12 @@ public class RestaurantController : ControllerBase
         restaurant.PaymentPolicy = Enum.Parse<RestaurantPaymentPolicy>(request.PaymentPolicy, true);
         restaurant.IsActive = request.IsActive;
         restaurant.AcceptingOrders = request.AcceptingOrders;
+        if (request.AcceptingOrders)
+        {
+            // Otherwise a stale expiry would linger and re-pause logic would read inconsistently.
+            restaurant.AcceptingOrdersPausedUntil = null;
+        }
+
         restaurant.OpeningHoursJson = openingHoursJson;
         restaurant.SpecialOpeningDaysJson = specialOpeningDaysJson;
         restaurant.UpdatedAt = DateTime.UtcNow;
@@ -341,9 +878,30 @@ public class RestaurantController : ControllerBase
             return NotFound(new { message = "Restaurant not found." });
         }
 
+        if (request.PauseMinutes is <= 0 or > MaximumPauseMinutes)
+        {
+            return BadRequest(new
+            {
+                message = $"pauseMinutes must be between 1 and {MaximumPauseMinutes}."
+            });
+        }
+
+        var now = DateTime.UtcNow;
         var beforeRestaurant = SnapshotRestaurant(restaurant);
+        var pausedUntil = ResolvePauseExpiry(restaurant, request, now);
+
+        if (!request.AcceptingOrders && request.PauseUntilNextOpening && pausedUntil is null)
+        {
+            return Conflict(new
+            {
+                message = "The schedule has no upcoming opening to reopen at. Choose a duration, or close until you reopen."
+            });
+        }
+
         restaurant.AcceptingOrders = request.AcceptingOrders;
-        restaurant.UpdatedAt = DateTime.UtcNow;
+        // A resume always clears the expiry; a pause only carries one when one was requested.
+        restaurant.AcceptingOrdersPausedUntil = pausedUntil;
+        restaurant.UpdatedAt = now;
 
         _reportLogWriter.AddAudit(
             request.AcceptingOrders ? "Restaurant.OrderingResumed" : "Restaurant.OrderingPaused",
@@ -352,14 +910,114 @@ public class RestaurantController : ControllerBase
             restaurant.Id,
             request.AcceptingOrders
                 ? $"Resumed ordering for {restaurant.Name}."
-                : $"Paused ordering for {restaurant.Name}.",
+                : restaurant.AcceptingOrdersPausedUntil.HasValue
+                    ? $"Paused ordering for {restaurant.Name} for {request.PauseMinutes} minutes."
+                    : $"Paused ordering for {restaurant.Name}.",
             beforeRestaurant,
             SnapshotRestaurant(restaurant));
         await _dbContext.SaveChangesAsync();
 
         return Ok(new
         {
-            message = request.AcceptingOrders ? "Restaurant is accepting orders." : "Restaurant ordering is paused.",
+            message = request.AcceptingOrders
+                ? "Restaurant is open for orders."
+                : !restaurant.AcceptingOrdersPausedUntil.HasValue
+                    ? "Restaurant is closed until you reopen it."
+                    : request.PauseUntilNextOpening
+                        ? "Restaurant is closed and reopens at the next opening."
+                        : $"Restaurant is closed for {request.PauseMinutes} minutes.",
+            restaurant = MapToResponse(restaurant)
+        });
+    }
+
+    [HttpPut("{id:guid}/opening-hours")]
+    public async Task<IActionResult> UpdateOpeningHours(
+        Guid id,
+        [FromBody] RestaurantOpeningHoursRequest request)
+    {
+        if (!await CanAccessRestaurantAsync(id))
+        {
+            return Forbid();
+        }
+
+        if (!_restaurantOperatingHoursService.TryNormalizeOpeningHoursJson(
+            request.OpeningHoursJson,
+            out var openingHoursJson,
+            out var openingHoursError))
+        {
+            return BadRequest(new { message = openingHoursError });
+        }
+
+        var restaurant = await _dbContext.Restaurants.FirstOrDefaultAsync(r => r.Id == id);
+
+        if (restaurant is null)
+        {
+            return NotFound(new { message = "Restaurant not found." });
+        }
+
+        var beforeRestaurant = SnapshotRestaurant(restaurant);
+        restaurant.OpeningHoursJson = openingHoursJson;
+        restaurant.UpdatedAt = DateTime.UtcNow;
+
+        _reportLogWriter.AddAudit(
+            "Restaurant.OpeningHoursUpdated",
+            "Restaurant",
+            restaurant.Id.ToString(),
+            restaurant.Id,
+            $"Updated opening hours for {restaurant.Name}.",
+            beforeRestaurant,
+            SnapshotRestaurant(restaurant));
+        await _dbContext.SaveChangesAsync();
+
+        return Ok(new
+        {
+            message = "Opening hours updated successfully.",
+            restaurant = MapToResponse(restaurant)
+        });
+    }
+
+    [HttpPut("{id:guid}/special-days")]
+    public async Task<IActionResult> UpdateSpecialOpeningDays(
+        Guid id,
+        [FromBody] RestaurantSpecialOpeningDaysRequest request)
+    {
+        if (!await CanAccessRestaurantAsync(id))
+        {
+            return Forbid();
+        }
+
+        if (!_restaurantOperatingHoursService.TryNormalizeSpecialOpeningDaysJson(
+            request.SpecialOpeningDaysJson,
+            out var specialOpeningDaysJson,
+            out var specialOpeningDaysError))
+        {
+            return BadRequest(new { message = specialOpeningDaysError });
+        }
+
+        var restaurant = await _dbContext.Restaurants.FirstOrDefaultAsync(r => r.Id == id);
+
+        if (restaurant is null)
+        {
+            return NotFound(new { message = "Restaurant not found." });
+        }
+
+        var beforeRestaurant = SnapshotRestaurant(restaurant);
+        restaurant.SpecialOpeningDaysJson = specialOpeningDaysJson;
+        restaurant.UpdatedAt = DateTime.UtcNow;
+
+        _reportLogWriter.AddAudit(
+            "Restaurant.SpecialOpeningDaysUpdated",
+            "Restaurant",
+            restaurant.Id.ToString(),
+            restaurant.Id,
+            $"Updated the special calendar for {restaurant.Name}.",
+            beforeRestaurant,
+            SnapshotRestaurant(restaurant));
+        await _dbContext.SaveChangesAsync();
+
+        return Ok(new
+        {
+            message = "Special calendar updated successfully.",
             restaurant = MapToResponse(restaurant)
         });
     }
@@ -481,7 +1139,7 @@ public class RestaurantController : ControllerBase
         return null;
     }
 
-    private static RestaurantResponse MapToResponse(Restaurant restaurant)
+    private RestaurantResponse MapToResponse(Restaurant restaurant)
     {
         return new RestaurantResponse
         {
@@ -494,12 +1152,59 @@ public class RestaurantController : ControllerBase
             Timezone = restaurant.Timezone,
             Currency = restaurant.Currency,
             PaymentPolicy = restaurant.PaymentPolicy.ToString(),
+            StripeConnectStatus = GetStripeConnectStatus(restaurant),
+            OnlinePaymentsEnabled = restaurant.StripeChargesEnabled &&
+                !string.IsNullOrWhiteSpace(restaurant.StripeAccountId),
+            OrderPlatformFeePercent = restaurant.OrderPlatformFeeBps / 100m,
+            OneTimePlatformFeeCents = restaurant.OneTimePlatformFeeCents,
+            OneTimePlatformFeeStatus = restaurant.OneTimePlatformFeeStatus.ToString(),
             IsActive = restaurant.IsActive,
             AcceptingOrders = restaurant.AcceptingOrders,
+            AcceptingOrdersPausedUntil = restaurant.AcceptingOrdersPausedUntil,
+            AutoAcceptOrders = restaurant.AutoAcceptOrders,
             OpeningHoursJson = restaurant.OpeningHoursJson,
             SpecialOpeningDaysJson = restaurant.SpecialOpeningDaysJson,
+            Availability = BuildAvailabilityResponse(restaurant),
             CreatedAt = restaurant.CreatedAt,
             UpdatedAt = restaurant.UpdatedAt
+        };
+    }
+
+    /// <summary>
+    /// The UTC instant a pause should lapse, or null for an indefinite pause (and always null when
+    /// resuming, so a stale expiry can't linger).
+    /// </summary>
+    private DateTime? ResolvePauseExpiry(Restaurant restaurant, RestaurantOrderingStatusRequest request, DateTime now)
+    {
+        if (request.AcceptingOrders)
+        {
+            return null;
+        }
+
+        if (request.PauseUntilNextOpening)
+        {
+            return _restaurantOperatingHoursService.GetNextOpeningUtc(restaurant, now);
+        }
+
+        return request.PauseMinutes is null ? null : now.AddMinutes(request.PauseMinutes.Value);
+    }
+
+    private RestaurantAvailabilityResponse BuildAvailabilityResponse(Restaurant restaurant)
+    {
+        var utcNow = DateTime.UtcNow;
+        var availability = _restaurantOperatingHoursService.GetAvailability(restaurant, utcNow);
+
+        return new RestaurantAvailabilityResponse
+        {
+            IsOrderingAvailable = availability.IsOrderingAvailable,
+            IsWithinOpeningHours = availability.IsWithinOpeningHours,
+            AcceptingOrders = availability.AcceptingOrders,
+            Reason = availability.Reason,
+            Message = availability.Message,
+            NextTransitionLocal = availability.NextTransitionLocal,
+            NextOpeningLocal = availability.NextOpeningLocal,
+            LocalNow = RestaurantOperatingHoursService.GetLocalNow(restaurant, utcNow),
+            PausedUntilUtc = availability.PausedUntilUtc
         };
     }
 
@@ -516,9 +1221,84 @@ public class RestaurantController : ControllerBase
         PaymentPolicy = restaurant.PaymentPolicy.ToString(),
         restaurant.IsActive,
         restaurant.AcceptingOrders,
+        restaurant.AutoAcceptOrders,
         restaurant.OpeningHoursJson,
         restaurant.SpecialOpeningDaysJson
     };
+
+    private RestaurantPaymentSettingsResponse MapPaymentSettings(Restaurant restaurant)
+    {
+        var snapshot = StripeConnectAccountState.Read(restaurant.StripeRequirementsDueJson);
+
+        return new RestaurantPaymentSettingsResponse
+        {
+            RestaurantId = restaurant.Id,
+            RestaurantName = restaurant.Name,
+            Currency = restaurant.Currency,
+            StripeAccountId = restaurant.StripeAccountId,
+            StripeConnectStatus = GetStripeConnectStatus(restaurant),
+            StripeDetailsSubmitted = restaurant.StripeDetailsSubmitted,
+            StripeChargesEnabled = restaurant.StripeChargesEnabled,
+            StripePayoutsEnabled = restaurant.StripePayoutsEnabled,
+            StripeRequirementsDue = StripeConnectAccountState.GetActionableRequirements(snapshot),
+            StripeRestrictions = StripeConnectAccountState.BuildRestrictions(
+                snapshot,
+                restaurant.StripeDetailsSubmitted,
+                restaurant.StripeChargesEnabled,
+                restaurant.StripePayoutsEnabled),
+            StripeCurrentDeadline = snapshot.CurrentDeadline,
+            StripeConnectedAt = restaurant.StripeConnectedAt,
+            StripeAccountUpdatedAt = restaurant.StripeAccountUpdatedAt,
+            OrderPlatformFeePercent = restaurant.OrderPlatformFeeBps / 100m,
+            OneTimePlatformFeeCents = restaurant.OneTimePlatformFeeCents,
+            OneTimePlatformFeeStatus = restaurant.OneTimePlatformFeeStatus.ToString(),
+            OneTimePlatformFeePaidAt = restaurant.OneTimePlatformFeePaidAt,
+            OnlinePaymentsEnabled = restaurant.StripeChargesEnabled &&
+                !string.IsNullOrWhiteSpace(restaurant.StripeAccountId)
+        };
+    }
+
+    private static string GetStripeConnectStatus(Restaurant restaurant)
+    {
+        if (string.IsNullOrWhiteSpace(restaurant.StripeAccountId))
+        {
+            return "NotConnected";
+        }
+
+        if (restaurant.StripeChargesEnabled && restaurant.StripePayoutsEnabled)
+        {
+            return "Ready";
+        }
+
+        return restaurant.StripeDetailsSubmitted ? "Restricted" : "OnboardingIncomplete";
+    }
+
+    private static void ApplyStripeAccountState(Restaurant restaurant, Account account) =>
+        StripeConnectAccountState.Apply(restaurant, account);
+
+    private async Task<string?> ResolveRestaurantOwnerEmailAsync(
+        Guid restaurantId,
+        CancellationToken cancellationToken)
+    {
+        var currentEmail = User.FindFirstValue(ClaimTypes.Email);
+        if (!string.IsNullOrWhiteSpace(currentEmail) &&
+            !User.IsInRole(ApplicationRoles.PlatformOwner))
+        {
+            return currentEmail;
+        }
+
+        return await _dbContext.Users
+            .Where(user => user.RestaurantId == restaurantId && user.Email != null)
+            .OrderBy(user => user.CreatedAt)
+            .Select(user => user.Email)
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
+    private static string AddRestaurantId(string url, Guid restaurantId) =>
+        QueryHelpers.AddQueryString(url, "restaurantId", restaurantId.ToString());
+
+    private static string AppendSessionId(string url) =>
+        QueryHelpers.AddQueryString(url, "session_id", "{CHECKOUT_SESSION_ID}");
 
     private static string NormalizeCountryCode(string? countryCode)
     {

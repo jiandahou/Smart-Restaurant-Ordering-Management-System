@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   BarChart3,
+  BadgeCheck,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -33,6 +34,7 @@ import { BrandLogo } from '../components/BrandLogo'
 import { DemoIdentitySwitcher } from '../components/DemoIdentitySwitcher'
 import { Avatar, AvatarFallback, AvatarImage } from '../components/ui/avatar'
 import { Button } from '../components/ui/button'
+import { Switch } from '../components/ui/switch'
 import {
   Tooltip,
   TooltipContent,
@@ -386,6 +388,26 @@ export function AppLayout() {
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
+                    <div className="flex h-9 items-center gap-1.5 rounded-md border border-input bg-background px-2">
+                      <BadgeCheck size={17} aria-hidden="true" />
+                      <Switch
+                        checked={printing.autoAcceptOrders}
+                        disabled={!printing.activeRestaurantId || printing.autoAcceptUpdating}
+                        aria-label="Automatically accept eligible new orders"
+                        onCheckedChange={(checked) => void printing.setAutoAcceptOrders(checked)}
+                      />
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    {printing.activeRestaurantId
+                      ? `Auto accept ${printing.autoAcceptOrders ? 'on' : 'off'}`
+                      : 'Select a restaurant to control automatic acceptance'}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
                     <Button
                       type="button"
                       variant="outline"
@@ -622,6 +644,27 @@ export function AppLayout() {
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
+                    <div className="flex h-10 items-center gap-2 rounded-md border border-input bg-background px-3">
+                      <BadgeCheck size={18} aria-hidden="true" />
+                      <span className="text-sm font-medium">Auto accept</span>
+                      <Switch
+                        checked={printing.autoAcceptOrders}
+                        disabled={!printing.activeRestaurantId || printing.autoAcceptUpdating}
+                        aria-label="Automatically accept eligible new orders"
+                        onCheckedChange={(checked) => void printing.setAutoAcceptOrders(checked)}
+                      />
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    {printing.activeRestaurantId
+                      ? 'Pay-at-counter orders are accepted immediately; online orders after payment.'
+                      : 'Select a restaurant to control automatic acceptance'}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
                     <Button
                       type="button"
                       variant="outline"
@@ -741,14 +784,19 @@ export function AppLayout() {
       {canUseStaffOrders ? (
         <PrinterSettingsDialog
           open={printing.settingsOpen}
-          settings={printing.settings}
+          kitchenSettings={printing.settings}
+          frontCounterSettings={printing.frontCounterSettings}
           printJobs={printing.printJobs}
           printJobsLoading={printing.printJobsLoading}
           onOpenChange={printing.setSettingsOpen}
-          onSettingsChange={printing.updateSettings}
+          onKitchenSettingsChange={printing.updateSettings}
+          onFrontCounterSettingsChange={printing.updateFrontCounterSettings}
           onRefreshPrintJobs={() => void printing.refreshPrintJobs(true)}
           onRetryPrintJob={(jobId) => void printing.retryQueuedPrint(jobId)}
-          onPrintTestTicket={() => void printing.printTestTicket(selectedPrintRestaurant?.name ?? 'DineFlow')}
+          onPrintTestTicket={(target) => void printing.printTestTicket(
+            target,
+            selectedPrintRestaurant?.name ?? 'DineFlow',
+          )}
           showPrintRestaurantSelector={printing.isPlatformOwner}
           printRestaurants={printing.printRestaurants}
           activePrintRestaurantId={printing.activeRestaurantId}

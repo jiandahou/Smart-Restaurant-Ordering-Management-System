@@ -9,5 +9,15 @@ public class UpdateMenuItemRequest
     public string? ImageUrl { get; set; }
     public bool IsAvailable { get; set; }
     public bool IsSoldOut { get; set; }
+    public bool IsVegetarian { get; set; }
+    public bool IsVegan { get; set; }
+    public bool IsGlutenFree { get; set; }
+    public bool IsHalal { get; set; }
+    public string? Allergens { get; set; }
+    public int SpiceLevel { get; set; }
+    public string? ServingSize { get; set; }
+    public int? Calories { get; set; }
+    public bool IsPopular { get; set; }
+    public bool IsRecommended { get; set; }
     public int DisplayOrder { get; set; }
 }

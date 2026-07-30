@@ -32,5 +32,11 @@ public class PaymentEventLog
 
     public string? ActorRoles { get; set; }
 
+    public string? ActorType { get; set; }
+
+    public string? Source { get; set; }
+
+    public string? CorrelationId { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

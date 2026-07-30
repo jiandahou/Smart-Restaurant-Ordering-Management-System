@@ -38,6 +38,26 @@ public sealed class PublicMenuItemResponse
 
     public bool IsSoldOut { get; init; }
 
+    public bool IsVegetarian { get; init; }
+
+    public bool IsVegan { get; init; }
+
+    public bool IsGlutenFree { get; init; }
+
+    public bool IsHalal { get; init; }
+
+    public string? Allergens { get; init; }
+
+    public int SpiceLevel { get; init; }
+
+    public string? ServingSize { get; init; }
+
+    public int? Calories { get; init; }
+
+    public bool IsPopular { get; init; }
+
+    public bool IsRecommended { get; init; }
+
     public int DisplayOrder { get; init; }
 
     public IReadOnlyList<MenuOptionGroupResponse> OptionGroups { get; init; } = [];

@@ -594,7 +594,13 @@ public class AuthController : ControllerBase
             "User",
             user.Id,
             user.RestaurantId,
-            "Access token refreshed via refresh token.");
+            "Access token refreshed via refresh token.",
+            actorOverride: ReportActor.User(
+                user.Id,
+                user.FullName ?? user.Email ?? "DineFlow user",
+                user.Email,
+                roles),
+            correlationId: user.Id);
         await _dbContext.SaveChangesAsync();
 
         return Ok(new
@@ -1545,6 +1551,10 @@ public class AuthController : ControllerBase
         string role,
         Guid? restaurantId)
     {
+        var sendPasswordSetupEmail =
+            role != ApplicationRoles.Customer &&
+            request is RegisterRestaurantUserRequest { SendPasswordSetupEmail: true };
+
         if (role != ApplicationRoles.Customer)
         {
             var permissionError = ValidateCanCreateRole(role);
@@ -1553,6 +1563,14 @@ public class AuthController : ControllerBase
             {
                 return permissionError;
             }
+        }
+
+        if (!sendPasswordSetupEmail && string.IsNullOrWhiteSpace(request.Password))
+        {
+            return BadRequest(new
+            {
+                message = "Password is required when a password setup email is not requested."
+            });
         }
 
         var existingUser = await _userManager.FindByEmailAsync(request.Email);
@@ -1607,7 +1625,9 @@ public class AuthController : ControllerBase
             CreatedAt = DateTime.UtcNow
         };
 
-        var result = await _userManager.CreateAsync(user, request.Password);
+        var result = sendPasswordSetupEmail
+            ? await _userManager.CreateAsync(user)
+            : await _userManager.CreateAsync(user, request.Password);
 
         if (!result.Succeeded)
         {
@@ -1620,10 +1640,21 @@ public class AuthController : ControllerBase
 
         if (!await _userManager.IsInRoleAsync(user, role))
         {
-            await _userManager.AddToRoleAsync(user, role);
+            var roleResult = await _userManager.AddToRoleAsync(user, role);
+
+            if (!roleResult.Succeeded)
+            {
+                await _userManager.DeleteAsync(user);
+                return BadRequest(new
+                {
+                    message = "Failed to assign the user role.",
+                    errors = roleResult.Errors
+                });
+            }
         }
 
         var confirmationEmailSent = user.EmailConfirmed;
+        var passwordSetupEmailSent = false;
 
         if (role == ApplicationRoles.Customer)
         {
@@ -1635,6 +1666,32 @@ public class AuthController : ControllerBase
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to send confirmation email to {Email}.", user.Email);
+            }
+        }
+        else if (sendPasswordSetupEmail)
+        {
+            try
+            {
+                await SendPasswordSetupEmailAsync(user, role);
+                passwordSetupEmailSent = true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to send password setup email to {Email}. Rolling back the new account.", user.Email);
+                var deleteResult = await _userManager.DeleteAsync(user);
+
+                if (!deleteResult.Succeeded)
+                {
+                    _logger.LogCritical(
+                        "Failed to roll back user {UserId} after the password setup email failed. Errors: {Errors}",
+                        user.Id,
+                        string.Join(", ", deleteResult.Errors.Select(error => error.Description)));
+                }
+
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+                {
+                    message = "User was not created because the password setup email could not be sent. Check the email configuration and try again."
+                });
             }
         }
 
@@ -1651,6 +1708,7 @@ public class AuthController : ControllerBase
                 user.RestaurantId,
                 user.EmailConfirmed,
                 ConfirmationEmailSent = confirmationEmailSent,
+                PasswordSetupEmailSent = passwordSetupEmailSent,
                 Role = role
             });
         await _dbContext.SaveChangesAsync();
@@ -1659,14 +1717,40 @@ public class AuthController : ControllerBase
         {
             message = role == ApplicationRoles.Customer
                 ? "Customer registered. Please confirm your email before signing in."
-                : $"{role} user registered successfully.",
+                : passwordSetupEmailSent
+                    ? $"{role} user created and a password setup email was sent to {user.Email}."
+                    : $"{role} user registered successfully.",
             userId = user.Id,
             email = user.Email,
             restaurantId = user.RestaurantId,
             emailConfirmed = user.EmailConfirmed,
             confirmationEmailSent,
+            passwordSetupEmailSent,
             role
         });
+    }
+
+    private async Task SendPasswordSetupEmailAsync(ApplicationUser user, string role)
+    {
+        if (string.IsNullOrWhiteSpace(user.Email))
+        {
+            throw new InvalidOperationException("User email is required to send a password setup link.");
+        }
+
+        var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+        var passwordSetupUrl = BuildPasswordResetUrl(user.Id, token);
+        var encodedUrl = HtmlEncoder.Default.Encode(passwordSetupUrl);
+
+        await _emailSender.SendAsync(
+            user.Email,
+            "Set up your DineFlow password",
+            $"""
+            <p>A DineFlow administrator created a {HtmlEncoder.Default.Encode(role)} account for you.</p>
+            <p>Choose your password using the secure link below. This link expires in one hour.</p>
+            <p><a href="{encodedUrl}">Set up password</a></p>
+            <p>If you were not expecting this invitation, you can ignore this email.</p>
+            """,
+            $"Set up your DineFlow password (link expires in one hour): {passwordSetupUrl}");
     }
 
     private async Task SendConfirmationEmailAsync(ApplicationUser user)
@@ -1775,6 +1859,7 @@ public class AuthController : ControllerBase
 
     private async Task<IActionResult> BuildAuthenticatedResponseAsync(ApplicationUser user, string message)
     {
+        user.LastLoginAt = DateTime.UtcNow;
         var roles = await _userManager.GetRolesAsync(user);
         var userPayload = await BuildUserPayloadAsync(user, roles);
         var token = _jwtTokenService.GenerateToken(
@@ -1795,7 +1880,13 @@ public class AuthController : ControllerBase
                 user.Email,
                 user.RestaurantId,
                 Roles = roles.OrderBy(role => role, StringComparer.OrdinalIgnoreCase).ToArray()
-            });
+            },
+            actorOverride: ReportActor.User(
+                user.Id,
+                user.FullName ?? user.Email ?? "DineFlow user",
+                user.Email,
+                roles),
+            correlationId: user.Id);
         await _dbContext.SaveChangesAsync();
 
         return Ok(new
