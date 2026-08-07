@@ -893,6 +893,7 @@ export function RestaurantPrintingProvider({ children }: { children: ReactNode }
       .catch(() => undefined)
       .then(async () => {
         const ticket: KitchenTicket = {
+          serviceCode: 'TEST-001',
           orderNumber: 'TEST-001',
           restaurantName: restaurantName === 'All restaurants' ? 'DineFlow' : restaurantName,
           orderScope: target === 'kitchen' ? 'Kitchen printer diagnostics' : 'Front counter diagnostics',

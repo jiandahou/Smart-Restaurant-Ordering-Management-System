@@ -12,7 +12,10 @@ import {
 } from '../ui/dialog'
 import { Input } from '../ui/input'
 import { Textarea } from '../ui/textarea'
+import { parseRefundAmountCents } from './refundAmount'
 import { canConfirmRefundApproval } from './refundApproval'
+
+export type RefundMode = 'full' | 'partial'
 
 function formatPaymentAmount(amountCents: number, currencyCode?: string | null) {
   return new Intl.NumberFormat('en-AU', {
@@ -25,9 +28,13 @@ export function ApproveRefundRequestDialog({
   request,
   environmentMode,
   note,
+  mode,
+  amount,
   confirmation,
   submitting,
   onNoteChange,
+  onModeChange,
+  onAmountChange,
   onConfirmationChange,
   onOpenChange,
   onConfirm,
@@ -35,15 +42,23 @@ export function ApproveRefundRequestDialog({
   request: AdminRefundRequest | null
   environmentMode: PaymentEnvironment['mode'] | null
   note: string
+  mode: RefundMode
+  amount: string
   confirmation: string
   submitting: boolean
   onNoteChange: (value: string) => void
+  onModeChange: (mode: RefundMode) => void
+  onAmountChange: (value: string) => void
   onConfirmationChange: (value: string) => void
   onOpenChange: (open: boolean) => void
   onConfirm: () => void
 }) {
   const isLive = environmentMode === 'Live'
-  const canConfirm = canConfirmRefundApproval(request, environmentMode, confirmation)
+  const ceilingAmountCents = request
+    ? Math.min(request.requestedAmountCents, request.refundableAmountCents)
+    : 0
+  const confirmAmountCents = mode === 'full' ? ceilingAmountCents : parseRefundAmountCents(amount)
+  const canConfirm = canConfirmRefundApproval(request, environmentMode, confirmation, confirmAmountCents)
 
   return (
     <Dialog open={request !== null} onOpenChange={onOpenChange}>
@@ -68,9 +83,63 @@ export function ApproveRefundRequestDialog({
             <div className="refund-approval-warning" role="alert">
               <AlertTriangle size={18} />
               <div>
-                <strong>{formatPaymentAmount(request.requestedAmountCents, request.currency)}</strong>
-                <span>will be returned to the original payment for {request.orderNumber}.</span>
+                <strong>Up to {formatPaymentAmount(request.requestedAmountCents, request.currency)}</strong>
+                <span>was requested for {request.orderNumber}.</span>
               </div>
+            </div>
+
+            {request.items.length > 0 && (
+              <dl className="refund-approval-item-list">
+                {request.items.map((item, index) => (
+                  <div key={`${item.menuItemNameSnapshot}-${index}`}>
+                    <dt>{item.menuItemNameSnapshot} × {item.quantity}</dt>
+                    <dd>{formatPaymentAmount(item.amountCents, request.currency)}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={mode === 'full' ? 'default' : 'outline'}
+                  aria-pressed={mode === 'full'}
+                  disabled={submitting}
+                  onClick={() => onModeChange('full')}
+                >
+                  Refund full amount
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={mode === 'partial' ? 'default' : 'outline'}
+                  aria-pressed={mode === 'partial'}
+                  disabled={submitting}
+                  onClick={() => onModeChange('partial')}
+                >
+                  Refund partial amount
+                </Button>
+              </div>
+              {mode === 'partial' ? (
+                <div className="space-y-1">
+                  <label className="text-sm font-semibold" htmlFor="refund-approval-amount">Refund amount</label>
+                  <Input
+                    id="refund-approval-amount"
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    inputMode="decimal"
+                    value={amount}
+                    onChange={(event) => onAmountChange(event.target.value)}
+                    disabled={submitting}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Up to {formatPaymentAmount(ceilingAmountCents, request.currency)} available to approve.
+                  </p>
+                </div>
+              ) : null}
             </div>
 
             <dl className="refund-approval-grid">

@@ -1,22 +1,45 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Clock3, ClipboardList, CreditCard, Loader2, ReceiptText, RefreshCw, RotateCcw, ShoppingBag, Undo2, Utensils } from 'lucide-react'
+import { ChevronDown, CircleX, Clock3, ClipboardList, CreditCard, Loader2, ReceiptText, RefreshCw, RotateCcw, ShoppingBag, Undo2, Utensils } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   createOrderCheckoutSession,
+  cancelCustomerOrder,
   getGuestOrders,
   getMyOrders,
   requestCustomerRefund,
   type CustomerOrder,
+  type CustomerOrderItem,
 } from '../api/auth'
+import { resolvePublicAssetUrl } from '../api/publicMenu'
 import { useAuth } from '../auth/AuthContext'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
 import { OrderProgressStepper } from '../components/orders/OrderProgressStepper'
 import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { PaymentStatusBadge } from '../components/orders/PaymentStatusBadge'
-import { reorderIntoTakeawayCart } from '../lib/reorder'
+import { canCustomerCancelOrder } from '../components/orders/customerOrderCancellation'
+import {
+  computeSelectedAmountCents,
+  isValidRefundSelection,
+  setItemAmountCents,
+  toggleItemSelection,
+  type RefundItemSelection,
+} from '../components/orders/refundItemSelection'
+import { buildRestaurantMenuPath } from '../lib/customerMenuNavigation'
+import { reorderIntoCart } from '../lib/reorder'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogMedia,
+  AlertDialogTitle,
+} from '../components/ui/alert-dialog'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import {
   Dialog,
@@ -26,8 +49,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../components/ui/dialog'
+import { Input } from '../components/ui/input'
 import { Textarea } from '../components/ui/textarea'
-import { getGuestOrderIds, rememberGuestOrder } from '../lib/guestOrders'
+import { getStoredGuestOrders, rememberGuestOrder } from '../lib/guestOrders'
 
 const orderTypeLabels = ['Dine in', 'Takeaway', 'Scheduled']
 const payablePaymentStatuses = new Set(['Unpaid', 'Pending', 'Failed', 'Expired'])
@@ -39,7 +63,7 @@ function getOrderScope(order: CustomerOrder) {
 }
 
 function getOrderMenuPath(order: CustomerOrder) {
-  return order.restaurantId ? `/r/${encodeURIComponent(order.restaurantId)}/menu` : null
+  return order.restaurantId ? buildRestaurantMenuPath(order.restaurantId, order.orderType) : null
 }
 
 function formatMoney(amount: number, currencyCode?: string | null) {
@@ -55,6 +79,36 @@ function formatDate(value: string) {
 
 function getItemCount(order: CustomerOrder) {
   return order.orderItems.reduce((count, item) => count + item.quantity, 0)
+}
+
+function getRefundableQuantity(item: CustomerOrderItem) {
+  return Math.max(0, item.quantity - item.refundedQuantity)
+}
+
+function getRefundRequestQuantity(item: CustomerOrderItem, amountCents: number) {
+  const unitPriceCents = Math.max(1, Math.round(item.unitPrice * 100))
+  return Math.min(
+    getRefundableQuantity(item),
+    Math.max(1, Math.ceil(amountCents / unitPriceCents)),
+  )
+}
+
+function buildFullRefundSelection(order: CustomerOrder): RefundItemSelection {
+  const selection = order.orderItems.reduce<RefundItemSelection>((current, item) => {
+    if (item.refundableAmountCents > 0) {
+      current[item.id] = item.refundableAmountCents
+    }
+    return current
+  }, {})
+
+  // Refunds that could not be tied to items still consume the money balance, so selecting every
+  // remaining line balance can exceed what is claimable. Rather than opening in an error state, start
+  // empty and let the customer choose within the cap the banner explains.
+  if (computeSelectedAmountCents(selection) > order.refundBalance.refundableAmountCents) {
+    return {}
+  }
+
+  return selection
 }
 
 function canContinuePayment(order: CustomerOrder) {
@@ -91,8 +145,12 @@ export function MyOrdersPage() {
   const [guestOrderCount, setGuestOrderCount] = useState(0)
   const [payingOrderId, setPayingOrderId] = useState<string | null>(null)
   const [reorderingOrderId, setReorderingOrderId] = useState<string | null>(null)
+  const [cancelOrder, setCancelOrder] = useState<CustomerOrder | null>(null)
+  const [cancelReason, setCancelReason] = useState('')
+  const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null)
   const [refundOrder, setRefundOrder] = useState<CustomerOrder | null>(null)
   const [refundReason, setRefundReason] = useState('')
+  const [refundSelection, setRefundSelection] = useState<RefundItemSelection>({})
   const [requestingRefundOrderId, setRequestingRefundOrderId] = useState<string | null>(null)
   const isGuestView = !token
 
@@ -118,9 +176,9 @@ export function MyOrdersPage() {
         setGuestOrderCount(0)
         setOrders(await getMyOrders())
       } else {
-        const guestOrderIds = getGuestOrderIds()
-        setGuestOrderCount(guestOrderIds.length)
-        setOrders(guestOrderIds.length > 0 ? await getGuestOrders(guestOrderIds) : [])
+        const storedGuestOrders = getStoredGuestOrders()
+        setGuestOrderCount(storedGuestOrders.length)
+        setOrders(storedGuestOrders.length > 0 ? await getGuestOrders(storedGuestOrders) : [])
       }
 
       if (showToast) toast.success('Orders refreshed')
@@ -148,10 +206,10 @@ export function MyOrdersPage() {
       if (token) {
         setOrders(await getMyOrders())
       } else {
-        const guestOrderIds = getGuestOrderIds()
-        setGuestOrderCount(guestOrderIds.length)
-        if (guestOrderIds.length > 0) {
-          setOrders(await getGuestOrders(guestOrderIds))
+        const storedGuestOrders = getStoredGuestOrders()
+        setGuestOrderCount(storedGuestOrders.length)
+        if (storedGuestOrders.length > 0) {
+          setOrders(await getGuestOrders(storedGuestOrders))
         }
       }
     } catch {
@@ -207,7 +265,7 @@ export function MyOrdersPage() {
     setReorderingOrderId(order.id)
 
     try {
-      const result = await reorderIntoTakeawayCart(order)
+      const result = await reorderIntoCart(order)
       toast.success(
         `Added ${result.addedCount} item${result.addedCount === 1 ? '' : 's'} to a new cart`,
         result.skippedCount > 0
@@ -216,7 +274,7 @@ export function MyOrdersPage() {
             }
           : undefined,
       )
-      navigate(`/r/${encodeURIComponent(result.restaurantId)}/menu`)
+      navigate(buildRestaurantMenuPath(result.restaurantId, result.orderType))
     } catch (error) {
       toast.error('Could not reorder', {
         description: error instanceof Error ? error.message : 'The reorder could not be completed.',
@@ -246,6 +304,36 @@ export function MyOrdersPage() {
     }
   }
 
+  const submitOrderCancellation = async () => {
+    if (!cancelOrder) {
+      return
+    }
+
+    setCancellingOrderId(cancelOrder.id)
+
+    try {
+      const cancelledOrder = await cancelCustomerOrder(cancelOrder.id, {
+        reason: cancelReason.trim() || undefined,
+        guestAccessToken: getStoredGuestOrders()
+          .find((entry) => entry.orderId === cancelOrder.id)?.guestAccessToken ?? undefined,
+      })
+      setOrders((current) => current.map((order) => (
+        order.id === cancelledOrder.id ? cancelledOrder : order
+      )))
+      toast.success('Order cancelled', {
+        description: `${cancelledOrder.orderNumber} will not be prepared.`,
+      })
+      setCancelOrder(null)
+      setCancelReason('')
+    } catch (error) {
+      toast.error('Could not cancel order', {
+        description: error instanceof Error ? error.message : 'The cancellation could not be completed.',
+      })
+    } finally {
+      setCancellingOrderId(null)
+    }
+  }
+
   const submitRefundRequest = async () => {
     if (!refundOrder) {
       return
@@ -256,6 +344,17 @@ export function MyOrdersPage() {
     try {
       const refundRequest = await requestCustomerRefund(refundOrder.id, {
         reason: refundReason.trim() || undefined,
+        items: Object.entries(refundSelection).map(([orderItemId, amountCents]) => {
+          const item = refundOrder.orderItems.find((candidate) => candidate.id === orderItemId)!
+          return {
+            orderItemId,
+            amountCents,
+            quantity: getRefundRequestQuantity(item, amountCents),
+          }
+        }),
+        // Guest orders have no session behind them, so the stored token is the credential.
+        guestAccessToken: getStoredGuestOrders()
+          .find((entry) => entry.orderId === refundOrder.id)?.guestAccessToken ?? undefined,
       })
       setOrders((current) => current.map((order) => (
         order.id === refundOrder.id
@@ -267,6 +366,7 @@ export function MyOrdersPage() {
       })
       setRefundOrder(null)
       setRefundReason('')
+      setRefundSelection({})
     } catch (error) {
       toast.error('Could not request refund', {
         description: error instanceof Error ? error.message : 'The refund request could not be submitted.',
@@ -275,6 +375,17 @@ export function MyOrdersPage() {
       setRequestingRefundOrderId(null)
     }
   }
+
+  // Earlier refunds shrink what is still claimable, so the picker has to be checked against the
+  // remaining balance rather than the order total.
+  const refundSelectedCents = refundOrder
+    ? computeSelectedAmountCents(refundSelection)
+    : 0
+  const refundableCents = refundOrder?.refundBalance.refundableAmountCents ?? 0
+  const alreadyRefundedCents = refundOrder?.refundBalance.alreadyRefundedAmountCents ?? 0
+  const unattributedRefundedCents = refundOrder?.refundBalance.unattributedRefundedAmountCents ?? 0
+  const exceedsRefundable = refundSelectedCents > refundableCents
+  const canSubmitRefundRequest = isValidRefundSelection(refundSelection) && !exceedsRefundable
 
   return (
     <main className="content-grid">
@@ -340,10 +451,21 @@ export function MyOrdersPage() {
                 const itemCount = getItemCount(order)
                 const showContinuePayment = canContinuePayment(order)
                 const showRequestRefund = canRequestRefund(order)
+                const showCancelOrder = canCustomerCancelOrder(order)
                 const canReorder = getOrderMenuPath(order) !== null && order.orderItems.length > 0
                 const isPaying = payingOrderId === order.id
                 const isRequestingRefund = requestingRefundOrderId === order.id
                 const isReordering = reorderingOrderId === order.id
+                const isCancelling = cancellingOrderId === order.id
+                const refundRequest = order.latestRefundRequest
+                // Staff can approve for less than was asked, so the settled amount is the one
+                // that actually left the account — never imply the requested figure was refunded.
+                const settledRefundCents = refundRequest?.refundStatus === 'Succeeded'
+                  ? refundRequest.refundedAmountCents
+                  : null
+                const isPartialRefund = settledRefundCents !== null
+                  && refundRequest !== null
+                  && settledRefundCents < refundRequest.requestedAmountCents
 
                 return (
                   <article key={order.id} className="my-order-card">
@@ -384,16 +506,83 @@ export function MyOrdersPage() {
 
                     {order.latestRefundRequest ? (
                       <div className={`my-order-refund-state my-order-refund-state-${order.latestRefundRequest.status.toLowerCase()}`}>
-                        <div>
-                          <strong>Refund request {order.latestRefundRequest.status.toLowerCase()}</strong>
-                          <span>
-                            {formatMoney(order.latestRefundRequest.requestedAmountCents / 100, order.latestRefundRequest.currency)}
-                            {' requested on '}
-                            {formatDate(order.latestRefundRequest.createdAt)}
-                          </span>
-                        </div>
+                        <details className="refund-state-details">
+                          <summary>
+                            <div className="refund-state-heading">
+                              <strong>Refund request {order.latestRefundRequest.status.toLowerCase()}</strong>
+                              <span>
+                                {settledRefundCents !== null ? (
+                                  <>
+                                    <b className="refund-state-settled">
+                                      {formatMoney(settledRefundCents / 100, order.latestRefundRequest.currency)}
+                                    </b>
+                                    {isPartialRefund
+                                      ? ` refunded of ${formatMoney(order.latestRefundRequest.requestedAmountCents / 100, order.latestRefundRequest.currency)} requested`
+                                      : ' refunded'}
+                                  </>
+                                ) : (
+                                  <>
+                                    {formatMoney(order.latestRefundRequest.requestedAmountCents / 100, order.latestRefundRequest.currency)}
+                                    {' requested on '}
+                                    {formatDate(order.latestRefundRequest.createdAt)}
+                                  </>
+                                )}
+                              </span>
+                            </div>
+                            <ChevronDown className="refund-state-chevron" size={18} aria-hidden="true" />
+                          </summary>
+                          <div className="refund-state-body">
+                            {isPartialRefund ? (
+                              <p className="refund-state-partial">
+                                The restaurant approved a partial refund:{' '}
+                                <strong>{formatMoney(settledRefundCents! / 100, order.latestRefundRequest.currency)}</strong>
+                                {' of the '}
+                                {formatMoney(order.latestRefundRequest.requestedAmountCents / 100, order.latestRefundRequest.currency)}
+                                {' you asked for.'}
+                              </p>
+                            ) : null}
+
+                            {order.latestRefundRequest.items.length > 0 ? (
+                              <div className="refund-state-section">
+                                <h4>Items you asked to refund</h4>
+                                <ul className="refund-state-items">
+                                  {order.latestRefundRequest.items.map((item, index) => (
+                                    <li key={`${item.menuItemNameSnapshot}-${index}`}>
+                                      <span>
+                                        {item.menuItemNameSnapshot}
+                                        {item.quantity > 1 ? ` × ${item.quantity}` : null}
+                                      </span>
+                                      <strong>
+                                        {formatMoney(item.amountCents / 100, order.latestRefundRequest!.currency)}
+                                      </strong>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ) : (
+                              <div className="refund-state-section">
+                                <h4>Items you asked to refund</h4>
+                                <p className="refund-state-empty">
+                                  This request was submitted for the whole order.
+                                </p>
+                              </div>
+                            )}
+
+                            <div className="refund-state-section">
+                              <h4>Your message</h4>
+                              {order.latestRefundRequest.reason ? (
+                                <p className="refund-state-note">{order.latestRefundRequest.reason}</p>
+                              ) : (
+                                <p className="refund-state-empty">You did not leave a message.</p>
+                              )}
+                            </div>
+                          </div>
+                        </details>
                         {order.latestRefundRequest.adminNote ? (
-                          <small>{order.latestRefundRequest.adminNote}</small>
+                          <div className="refund-state-reply">
+                            <h4>Restaurant reply</h4>
+                            <p>{order.latestRefundRequest.adminNote}</p>
+                          </div>
                         ) : null}
                       </div>
                     ) : null}
@@ -429,7 +618,7 @@ export function MyOrdersPage() {
                       <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
                     </div>
 
-                    {showContinuePayment || showRequestRefund || canReorder ? (
+                    {showContinuePayment || showRequestRefund || showCancelOrder || canReorder ? (
                       <div className="my-order-action-bar">
                         {showContinuePayment ? (
                           <Button
@@ -450,11 +639,27 @@ export function MyOrdersPage() {
                             disabled={isRequestingRefund}
                             onClick={() => {
                               setRefundReason('')
+                              setRefundSelection(buildFullRefundSelection(order))
                               setRefundOrder(order)
                             }}
                           >
                             {isRequestingRefund ? <Loader2 className="animate-spin" /> : <Undo2 />}
                             Request refund
+                          </Button>
+                        ) : null}
+                        {showCancelOrder ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            disabled={isCancelling}
+                            onClick={() => {
+                              setCancelReason('')
+                              setCancelOrder(order)
+                            }}
+                          >
+                            {isCancelling ? <Loader2 className="animate-spin" /> : <CircleX />}
+                            {isCancelling ? 'Cancelling...' : 'Cancel order'}
                           </Button>
                         ) : null}
                         {canReorder ? (
@@ -479,12 +684,60 @@ export function MyOrdersPage() {
         </CardContent>
       </Card>
 
+      <AlertDialog
+        open={cancelOrder !== null}
+        onOpenChange={(open) => {
+          if (!open && cancellingOrderId === null) {
+            setCancelOrder(null)
+            setCancelReason('')
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogMedia className="bg-destructive/10 text-destructive">
+              <CircleX />
+            </AlertDialogMedia>
+            <AlertDialogTitle>Cancel this order?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {cancelOrder
+                ? `${cancelOrder.orderNumber} is still pending and has not been paid. Cancelling releases its items and cannot be undone.`
+                : 'This pending order will be cancelled.'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <Textarea
+            value={cancelReason}
+            onChange={(event) => setCancelReason(event.target.value)}
+            placeholder="Optional reason for the restaurant"
+            aria-label="Cancellation reason"
+            rows={3}
+            maxLength={1000}
+            disabled={cancellingOrderId !== null}
+          />
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={cancellingOrderId !== null}>Keep order</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={cancellingOrderId !== null}
+              onClick={(event) => {
+                event.preventDefault()
+                void submitOrderCancellation()
+              }}
+            >
+              {cancellingOrderId !== null ? <Loader2 className="animate-spin" /> : <CircleX />}
+              {cancellingOrderId !== null ? 'Cancelling...' : 'Yes, cancel order'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <Dialog
         open={refundOrder !== null}
         onOpenChange={(open) => {
           if (!open && requestingRefundOrderId === null) {
             setRefundOrder(null)
             setRefundReason('')
+            setRefundSelection({})
           }
         }}
       >
@@ -493,10 +746,126 @@ export function MyOrdersPage() {
             <DialogTitle>Request a refund</DialogTitle>
             <DialogDescription>
               {refundOrder
-                ? `${refundOrder.orderNumber}: tell the restaurant why you need a refund.`
-                : 'Tell the restaurant why you need a refund.'}
+                ? `${refundOrder.orderNumber}: choose which items to refund and tell the restaurant why.`
+                : 'Choose which items to refund and tell the restaurant why.'}
             </DialogDescription>
           </DialogHeader>
+          {refundOrder ? (
+            <div className="refund-picker">
+              {alreadyRefundedCents > 0 ? (
+                <p className="refund-picker-balance">
+                  <strong>{formatMoney(alreadyRefundedCents / 100, refundOrder.currency)}</strong>
+                  {' has already been refunded on this order'}
+                  {unattributedRefundedCents > 0
+                    ? `, of which ${formatMoney(unattributedRefundedCents / 100, refundOrder.currency)} is not tied to specific items`
+                    : null}
+                  {'. At most '}
+                  <strong>{formatMoney(refundableCents / 100, refundOrder.currency)}</strong>
+                  {' can still be refunded.'}
+                </p>
+              ) : null}
+              <ul className="refund-picker-list">
+                {refundOrder.orderItems.map((item) => {
+                  const refundableAmountCents = item.refundableAmountCents
+                  const isFullyRefunded = refundableAmountCents === 0
+                  const isSelected = item.id in refundSelection
+                  const selectedAmountCents = refundSelection[item.id] ?? refundableAmountCents
+                  const imageUrl = resolvePublicAssetUrl(item.imageUrl)
+                  const name = item.itemNameSnapshot || 'Menu item'
+                  return (
+                    <li key={item.id} data-refunded={isFullyRefunded ? 'true' : 'false'}>
+                      <label
+                        className="refund-picker-item"
+                        data-selected={isSelected ? 'true' : 'false'}
+                      >
+                        <input
+                          type="checkbox"
+                          className="refund-picker-check"
+                          checked={isSelected}
+                          disabled={isFullyRefunded}
+                          onChange={() => setRefundSelection((current) => toggleItemSelection(current, item.id, refundableAmountCents))}
+                        />
+                        <span className="refund-picker-thumb" aria-hidden="true">
+                          {imageUrl ? (
+                            <img src={imageUrl} alt="" decoding="async" />
+                          ) : (
+                            <Utensils size={18} />
+                          )}
+                        </span>
+                        <span className="refund-picker-copy">
+                          <strong>{name}</strong>
+                          {item.selectedOptions.length > 0 ? (
+                            <OrderItemOptionBadges options={item.selectedOptions} currency={refundOrder.currency} />
+                          ) : null}
+                          <small>
+                            {formatMoney(item.unitPrice, refundOrder.currency)} each
+                            <span aria-hidden="true"> · </span>
+                            {item.quantity} in order
+                            {item.refundedAmountCents > 0 ? (
+                              <>
+                                <span aria-hidden="true"> · </span>
+                                <span className="refund-picker-refunded-note">
+                                  {isFullyRefunded
+                                    ? 'already refunded'
+                                    : `${formatMoney(item.refundedAmountCents / 100, refundOrder.currency)} already refunded`}
+                                </span>
+                              </>
+                            ) : null}
+                          </small>
+                        </span>
+                        {isFullyRefunded ? (
+                          <span className="refund-picker-refunded-badge">Refunded</span>
+                        ) : (
+                          <span className="refund-picker-amount">
+                            {formatMoney((isSelected ? selectedAmountCents : refundableAmountCents) / 100, refundOrder.currency)}
+                          </span>
+                        )}
+                      </label>
+                      {isSelected ? (
+                        <div className="refund-picker-item-amount-editor">
+                          <label htmlFor={`refund-item-amount-${item.id}`}>Refund amount</label>
+                          <div className="refund-picker-item-amount-control">
+                            <span>{refundOrder.currency.toUpperCase()}</span>
+                            <Input
+                              id={`refund-item-amount-${item.id}`}
+                              type="number"
+                              min={0.01}
+                              max={refundableAmountCents / 100}
+                              step={0.01}
+                              inputMode="decimal"
+                              aria-label={`Refund amount for ${name}`}
+                              value={selectedAmountCents > 0 ? selectedAmountCents / 100 : ''}
+                              onChange={(event) => setRefundSelection((current) => (
+                                setItemAmountCents(
+                                  current,
+                                  item.id,
+                                  Math.round(Number(event.target.value) * 100) || 0,
+                                  refundableAmountCents,
+                                )
+                              ))}
+                            />
+                            <span className="refund-picker-item-amount-max">
+                              of {formatMoney(refundableAmountCents / 100, refundOrder.currency)} available
+                            </span>
+                          </div>
+                        </div>
+                      ) : null}
+                    </li>
+                  )
+                })}
+              </ul>
+              <p className="refund-picker-total" data-over-limit={exceedsRefundable ? 'true' : 'false'}>
+                <span>Refund total</span>
+                <strong>{formatMoney(refundSelectedCents / 100, refundOrder.currency)}</strong>
+              </p>
+              {exceedsRefundable ? (
+                <p className="refund-picker-error" role="alert">
+                  That is more than the {formatMoney(refundableCents / 100, refundOrder.currency)} still
+                  available to refund. Deselect an item or lower an amount.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           <Textarea
             value={refundReason}
             onChange={(event) => setRefundReason(event.target.value)}
@@ -511,6 +880,7 @@ export function MyOrdersPage() {
               onClick={() => {
                 setRefundOrder(null)
                 setRefundReason('')
+                setRefundSelection({})
               }}
               disabled={requestingRefundOrderId !== null}
             >
@@ -519,7 +889,7 @@ export function MyOrdersPage() {
             <Button
               type="button"
               onClick={() => void submitRefundRequest()}
-              disabled={requestingRefundOrderId !== null}
+              disabled={requestingRefundOrderId !== null || !canSubmitRefundRequest}
             >
               {requestingRefundOrderId !== null ? <Loader2 className="animate-spin" /> : <Undo2 />}
               Send request

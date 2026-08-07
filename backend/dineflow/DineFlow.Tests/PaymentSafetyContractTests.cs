@@ -4,7 +4,9 @@ using DineFlow.Api.Contracts.Payments;
 using DineFlow.Api.Controllers;
 using DineFlow.Api.Services;
 using DineFlow.Infrastructure.Payments;
+using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.EntityFrameworkCore;
 using Xunit;
 
 namespace DineFlow.Tests;
@@ -44,6 +46,27 @@ public class PaymentSafetyContractTests
         Assert.Contains(parameters, parameter =>
             parameter.Name == "requestedAmountCents" &&
             parameter.ParameterType == typeof(long?));
+        Assert.Contains(parameters, parameter =>
+            parameter.Name == "refundRequestId" &&
+            parameter.ParameterType == typeof(Guid?));
+    }
+
+    [Fact]
+    public void StripeProviderRefundId_HasUniqueDatabaseIndex()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase($"payment-safety-{Guid.NewGuid():N}")
+            .Options;
+        using var dbContext = new AppDbContext(options);
+
+        var entity = dbContext.Model.FindEntityType(typeof(PaymentRefund));
+        var index = entity?.GetIndexes().SingleOrDefault(candidate =>
+            candidate.Properties.Count == 1 &&
+            candidate.Properties[0].Name == nameof(PaymentRefund.ProviderRefundId));
+
+        Assert.NotNull(index);
+        Assert.True(index!.IsUnique);
+        Assert.Equal("\"ProviderRefundId\" IS NOT NULL", index.GetFilter());
     }
 
     [Fact]

@@ -1,6 +1,7 @@
 import qz from 'qz-tray'
 import { getStoredToken, refreshAccessToken, type AdminOrder } from '@/api/auth'
 import { recordPrinterDiagnostic } from '@/lib/printerDiagnostics'
+import { formatServiceCode } from '@/lib/serviceCode'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 const printerBridgeBaseUrl = (
@@ -81,6 +82,8 @@ export type ThermalPrinterSettings = {
 }
 
 export type KitchenTicket = {
+  /** The called number (P2-007 / 007). Printed large — this is what the kitchen works from. */
+  serviceCode: string
   orderNumber: string
   restaurantName: string
   orderScope: string
@@ -177,6 +180,7 @@ export const defaultThermalPrinterSettings: ThermalPrinterSettings = {
 
 export function createKitchenTicket(order: AdminOrder, printedAt = new Date()): KitchenTicket {
   return {
+    serviceCode: formatServiceCode(order),
     orderNumber: order.orderNumber,
     restaurantName: order.restaurantName ?? 'Assigned restaurant',
     orderScope: getTicketOrderScope(order),
@@ -222,10 +226,15 @@ export function buildEscPosKitchenTicket(
     escposInit + (settings.beepOnPrint ? escposBeep : ''),
     // Header uses hardware centering: space-padding breaks on resized text.
     escposAlignCenter + escposBoldOn + 'KITCHEN TICKET' + escposBoldOff,
-    escposSizeDouble + ticket.orderNumber + escposSizeNormal,
+    escposSizeDouble + ticket.serviceCode + escposSizeNormal,
     ticket.restaurantName,
     escposReverseOn + escposBoldOn + ` ${ticket.orderScope.toUpperCase()} ` + escposBoldOff + escposReverseOff + escposAlignLeft,
     separator,
+    // Kept small for reconciliation against payments and refunds, which key off the order number.
+    // Skipped when the called number already fell back to it, so it never prints twice.
+    ...(ticket.serviceCode === ticket.orderNumber
+      ? []
+      : [twoColumn('ORDER', ticket.orderNumber, columns)]),
     twoColumn('STATUS', ticket.status, columns),
     twoColumn('CREATED', formatTicketDateTime(ticket.createdAt), columns),
     twoColumn('PRINTED', formatTicketDateTime(ticket.printedAt), columns),

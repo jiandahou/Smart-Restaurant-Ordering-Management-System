@@ -43,6 +43,8 @@ public class PaymentsController : ControllerBase
     private readonly OrderAutoAcceptanceService _orderAutoAcceptanceService;
     private readonly OrderRefundProcessor _orderRefundProcessor;
     private readonly StripeOrderCheckoutService _stripeOrderCheckoutService;
+    private readonly PaymentSyncService _paymentSyncService;
+    private readonly PaymentNotificationService _paymentNotificationService;
     private readonly ReportLogWriter _reportLogWriter;
     private readonly ILogger<PaymentsController> _logger;
 
@@ -55,6 +57,8 @@ public class PaymentsController : ControllerBase
         OrderAutoAcceptanceService orderAutoAcceptanceService,
         OrderRefundProcessor orderRefundProcessor,
         StripeOrderCheckoutService stripeOrderCheckoutService,
+        PaymentSyncService paymentSyncService,
+        PaymentNotificationService paymentNotificationService,
         ReportLogWriter reportLogWriter,
         ILogger<PaymentsController> logger)
     {
@@ -66,8 +70,107 @@ public class PaymentsController : ControllerBase
         _orderAutoAcceptanceService = orderAutoAcceptanceService;
         _orderRefundProcessor = orderRefundProcessor;
         _stripeOrderCheckoutService = stripeOrderCheckoutService;
+        _paymentSyncService = paymentSyncService;
+        _paymentNotificationService = paymentNotificationService;
         _reportLogWriter = reportLogWriter;
         _logger = logger;
+    }
+
+    /// Manual recovery path: pulls the authoritative state from Stripe for a payment stranded by a
+    /// dropped webhook, and fills in the settlement figures that only exist on the charge.
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    [HttpPost("{paymentId:guid}/sync")]
+    public async Task<ActionResult<AdminPaymentResponse>> SyncPayment(
+        Guid paymentId,
+        CancellationToken cancellationToken)
+    {
+        var payment = await _dbContext.Payments
+            .Include(item => item.Order)
+                .ThenInclude(order => order!.Restaurant)
+            .Include(item => item.Order)
+                .ThenInclude(order => order!.Customer)
+            .Include(item => item.Refunds)
+            .FirstOrDefaultAsync(item => item.Id == paymentId, cancellationToken);
+
+        if (payment is null)
+        {
+            return NotFound(new { message = "Payment not found." });
+        }
+
+        var currentRestaurantId = await GetCurrentRestaurantIdAsync();
+        if (!User.IsInRole(ApplicationRoles.PlatformOwner) &&
+            (currentRestaurantId is null || payment.Order?.RestaurantId != currentRestaurantId))
+        {
+            return Forbid();
+        }
+
+        var result = await _paymentSyncService.SyncAsync(
+            payment,
+            User.FindFirstValue(ClaimTypes.NameIdentifier),
+            cancellationToken);
+
+        if (!result.IsSuccess)
+        {
+            return StatusCode(result.StatusCode, new { message = result.Message });
+        }
+
+        return Ok(MapToAdminPaymentResponse(payment));
+    }
+
+    /// Re-sends the Stripe receipt to the payer. Staff-initiated, because Stripe only emails the
+    /// receipt automatically once, and only in live mode.
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    [HttpPost("{paymentId:guid}/receipt/resend")]
+    public async Task<IActionResult> ResendReceipt(Guid paymentId, CancellationToken cancellationToken)
+    {
+        var payment = await _dbContext.Payments
+            .Include(item => item.Order)
+                .ThenInclude(order => order!.Customer)
+            .FirstOrDefaultAsync(item => item.Id == paymentId, cancellationToken);
+
+        if (payment is null)
+        {
+            return NotFound(new { message = "Payment not found." });
+        }
+
+        var currentRestaurantId = await GetCurrentRestaurantIdAsync();
+        if (!User.IsInRole(ApplicationRoles.PlatformOwner) &&
+            (currentRestaurantId is null || payment.Order?.RestaurantId != currentRestaurantId))
+        {
+            return Forbid();
+        }
+
+        if (payment.Order is null)
+        {
+            return Conflict(new { message = "Payment is missing its order." });
+        }
+
+        if (string.IsNullOrWhiteSpace(payment.ProviderReceiptUrl))
+        {
+            return Conflict(new
+            {
+                message = "No Stripe receipt is available yet. Re-sync this payment from Stripe first."
+            });
+        }
+
+        var recipient = PaymentNotificationService.ResolveRecipient(payment.Order, payment);
+        if (string.IsNullOrWhiteSpace(recipient))
+        {
+            return Conflict(new { message = "This payment has no customer email to send a receipt to." });
+        }
+
+        await _paymentNotificationService.SendReceiptAsync(payment.Order, payment, cancellationToken);
+
+        _reportLogWriter.AddAudit(
+            "Payment.ReceiptResent",
+            "Payment",
+            payment.Id.ToString(),
+            payment.Order.RestaurantId,
+            $"Receipt for {payment.Order.OrderNumber} re-sent to the customer.",
+            after: new { paymentId = payment.Id, payment.OrderId, recipient });
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(new { message = $"Receipt sent to {recipient}." });
     }
 
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]
@@ -387,6 +490,11 @@ public class PaymentsController : ControllerBase
             return BadRequest(new { message = "Note cannot exceed 1000 characters." });
         }
 
+        if (!RefundAmountPolicy.IsValidOverrideAmount(request?.AmountCents))
+        {
+            return BadRequest(new { message = "Refund amount must be greater than zero." });
+        }
+
         var refundRequest = await LoadRefundRequestForReviewAsync(requestId, cancellationToken);
         if (refundRequest is null)
         {
@@ -398,7 +506,16 @@ public class PaymentsController : ControllerBase
             return Forbid();
         }
 
-        if (refundRequest.Status != PaymentRefundRequestStatus.Pending)
+        // A crash between claiming a request and creating its refund would otherwise strand it in
+        // Processing forever, so a stale claim that never produced a refund may be taken over.
+        var reclaimableAt = DateTime.UtcNow - RefundRequestClaimPolicy.StaleClaimAge;
+        var isReclaimableClaim = RefundRequestClaimPolicy.IsStaleClaim(
+            refundRequest.Status,
+            refundRequest.PaymentRefundId,
+            refundRequest.UpdatedAt,
+            reclaimableAt);
+
+        if (refundRequest.Status != PaymentRefundRequestStatus.Pending && !isReclaimableClaim)
         {
             return Conflict(new
             {
@@ -412,11 +529,24 @@ public class PaymentsController : ControllerBase
             return Conflict(new { message = "Refund request is missing its order." });
         }
 
+        var approvedAmountCents = request?.AmountCents ?? refundRequest.RequestedAmountCents;
+        if (!RefundAmountPolicy.IsWithinRequestedAmount(refundRequest.RequestedAmountCents, approvedAmountCents))
+        {
+            return BadRequest(new
+            {
+                message = $"Approved amount must be greater than zero and cannot exceed the requested amount ({refundRequest.RequestedAmountCents} cents)."
+            });
+        }
+
         var claimedAt = DateTime.UtcNow;
         var claimedRows = await _dbContext.PaymentRefundRequests
             .Where(item =>
                 item.Id == requestId &&
-                item.Status == PaymentRefundRequestStatus.Pending)
+                (item.Status == PaymentRefundRequestStatus.Pending ||
+                    (item.Status == PaymentRefundRequestStatus.Processing &&
+                        item.PaymentRefundId == null &&
+                        item.UpdatedAt != null &&
+                        item.UpdatedAt < reclaimableAt)))
             .ExecuteUpdateAsync(
                 setters => setters
                     .SetProperty(item => item.Status, PaymentRefundRequestStatus.Processing)
@@ -446,7 +576,8 @@ public class PaymentsController : ControllerBase
                 "refund-request-approval",
                 cancellationToken,
                 $"refund-request-{refundRequest.Id:N}",
-                refundRequest.RequestedAmountCents);
+                approvedAmountCents,
+                refundRequest.Id);
         }
         catch
         {
@@ -578,6 +709,16 @@ public class PaymentsController : ControllerBase
                 });
         }
         await _dbContext.SaveChangesAsync(cancellationToken);
+
+        if (refundRequest.Order is not null)
+        {
+            await _paymentNotificationService.SendRefundRejectedAsync(
+                refundRequest.Order,
+                refundRequest.Payment,
+                refundRequest.RequesterEmail,
+                note,
+                cancellationToken);
+        }
 
         return Ok(MapToAdminRefundRequestResponse(refundRequest));
     }
@@ -1091,6 +1232,7 @@ public class PaymentsController : ControllerBase
             .Include(request => request.Payment)
                 .ThenInclude(payment => payment!.Refunds)
             .Include(request => request.PaymentRefund)
+            .Include(request => request.Items)
             .AsQueryable();
 
         if (!User.IsInRole(ApplicationRoles.PlatformOwner))
@@ -1257,7 +1399,15 @@ public class PaymentsController : ControllerBase
             ReviewedByUserId = request.ReviewedByUserId,
             CreatedAt = request.CreatedAt,
             UpdatedAt = request.UpdatedAt,
-            ReviewedAt = request.ReviewedAt
+            ReviewedAt = request.ReviewedAt,
+            Items = request.Items
+                .Select(item => new AdminRefundRequestItemResponse
+                {
+                    MenuItemNameSnapshot = item.MenuItemNameSnapshot,
+                    Quantity = item.Quantity,
+                    AmountCents = item.AmountCents
+                })
+                .ToList()
         };
     }
 
@@ -1414,6 +1564,21 @@ public class PaymentsController : ControllerBase
             Currency = payment.Currency,
             ProviderCheckoutSessionId = payment.ProviderCheckoutSessionId,
             ProviderPaymentIntentId = payment.ProviderPaymentIntentId,
+            ProviderChargeId = payment.ProviderChargeId,
+            StripeAccountId = payment.StripeAccountId,
+            PlatformFeeAmountCents = payment.PlatformFeeAmountCents,
+            StripeFeeAmountCents = payment.StripeFeeAmountCents,
+            NetAmountCents = payment.NetAmountCents,
+            ProviderReceiptUrl = payment.ProviderReceiptUrl,
+            ReceiptEmail = payment.ReceiptEmail,
+            DisputeId = payment.DisputeId,
+            DisputeStatus = payment.DisputeStatus,
+            DisputeAmountCents = payment.DisputeAmountCents,
+            DisputeEvidenceDueBy = payment.DisputeEvidenceDueBy,
+            DisputeReason = payment.DisputeReason,
+            DisputedAt = payment.DisputedAt,
+            LastProviderEventCreatedAt = payment.LastProviderEventCreatedAt,
+            LastSyncedAt = payment.LastSyncedAt,
             FailureReason = payment.FailureReason,
             RefundCount = payment.Refunds.Count,
             RefundedAmountCents = GetSucceededRefundedAmount(payment),
@@ -1890,12 +2055,38 @@ public class PaymentsController : ControllerBase
             payment.Refunds.Add(localRefund);
         }
 
+        // Stripe does not guarantee webhook ordering, so a refund carries its own provider event
+        // clock: anything older than what we already applied is dropped.
+        var refundEventCreatedAt = stripeEvent.Created.ToUniversalTime();
+        if (localRefund.LastProviderEventCreatedAt.HasValue &&
+            localRefund.LastProviderEventCreatedAt.Value > refundEventCreatedAt)
+        {
+            _logger.LogInformation(
+                "Ignored out-of-order Stripe event {EventId} for refund {RefundId}.",
+                stripeEvent.Id,
+                localRefund.Id);
+            return;
+        }
+
+        var incomingRefundStatus = MapStripeRefundStatus(stripeRefund.Status);
+        if (!RefundStatePolicy.CanApplyProviderStatus(localRefund.Status, incomingRefundStatus))
+        {
+            _logger.LogInformation(
+                "Ignored Stripe event {EventId} transition for refund {RefundId}: {CurrentStatus} -> {IncomingStatus}.",
+                stripeEvent.Id,
+                localRefund.Id,
+                localRefund.Status,
+                incomingRefundStatus);
+            return;
+        }
+
         localRefund.ProviderRefundId = stripeRefund.Id;
         localRefund.ProviderPaymentIntentId = stripeRefund.PaymentIntentId ?? payment.ProviderPaymentIntentId;
         localRefund.AmountCents = stripeRefund.Amount;
         localRefund.Currency = NormalizeCurrency(stripeRefund.Currency ?? payment.Currency);
-        localRefund.Status = MapStripeRefundStatus(stripeRefund.Status);
+        localRefund.Status = incomingRefundStatus;
         localRefund.FailureReason = stripeRefund.FailureReason;
+        localRefund.LastProviderEventCreatedAt = refundEventCreatedAt;
         localRefund.UpdatedAt = now;
 
         if (string.IsNullOrWhiteSpace(localRefund.Reason))
@@ -1914,6 +2105,7 @@ public class PaymentsController : ControllerBase
         }
 
         ReconcilePaymentRefundStatus(payment, now);
+        await SynchronizeRefundRequestFromProviderAsync(localRefund, now, cancellationToken);
         _reportLogWriter.AddAudit(
             "PaymentRefund.WebhookUpdated",
             "PaymentRefund",
@@ -2097,6 +2289,31 @@ public class PaymentsController : ControllerBase
             return;
         }
 
+        // Same ordering rule the payment and refund handlers use: Stripe does not guarantee webhook
+        // order, so a stale dispute.updated must not reopen a dispute that has already closed.
+        var disputeEventCreatedAt = stripeEvent.Created.ToUniversalTime();
+        if (payment.LastDisputeEventCreatedAt.HasValue &&
+            payment.LastDisputeEventCreatedAt.Value > disputeEventCreatedAt)
+        {
+            _logger.LogInformation(
+                "Ignored out-of-order Stripe event {EventId} for dispute {DisputeId}.",
+                stripeEvent.Id,
+                dispute.Id);
+            return;
+        }
+
+        // Persist the dispute so operators can see it on the payment itself; the audit trail below
+        // keeps the full history but is not queryable from the payments UI.
+        payment.DisputeId = dispute.Id;
+        payment.DisputeStatus = dispute.Status;
+        payment.DisputeReason = dispute.Reason;
+        payment.DisputeAmountCents = dispute.Amount;
+        // Null once the dispute closes, which is exactly when the deadline should stop showing.
+        payment.DisputeEvidenceDueBy = dispute.EvidenceDetails?.DueBy?.ToUniversalTime();
+        payment.DisputedAt ??= dispute.Created == default ? DateTime.UtcNow : dispute.Created.ToUniversalTime();
+        payment.LastDisputeEventCreatedAt = disputeEventCreatedAt;
+        payment.UpdatedAt = DateTime.UtcNow;
+
         _reportLogWriter.AddAudit(
             "Payment.DisputeUpdated",
             "Payment",
@@ -2274,11 +2491,11 @@ public class PaymentsController : ControllerBase
         }
         else if (refundedAmountCents > 0)
         {
-            nextStatus = PaymentStatus.PartiallyRefunded;
-        }
-        else if (payment.Status is PaymentStatus.Refunded or PaymentStatus.PartiallyRefunded)
-        {
-            nextStatus = PaymentStatus.Paid;
+            // Never walk a fully refunded payment back down: with out-of-order webhooks the
+            // succeeded total can be observed low momentarily, and Refunded is terminal.
+            nextStatus = payment.Status == PaymentStatus.Refunded
+                ? PaymentStatus.Refunded
+                : PaymentStatus.PartiallyRefunded;
         }
 
         if (payment.Status != nextStatus)
@@ -2291,6 +2508,36 @@ public class PaymentsController : ControllerBase
         {
             payment.Order.PaymentStatus = nextStatus;
             payment.Order.UpdatedAt = now;
+        }
+    }
+
+    private async Task SynchronizeRefundRequestFromProviderAsync(
+        PaymentRefund refund,
+        DateTime updatedAt,
+        CancellationToken cancellationToken)
+    {
+        var refundRequests = await _dbContext.PaymentRefundRequests
+            .Where(request => request.PaymentRefundId == refund.Id)
+            .ToListAsync(cancellationToken);
+
+        foreach (var refundRequest in refundRequests)
+        {
+            if (refund.Status == PaymentRefundStatus.Succeeded)
+            {
+                refundRequest.Status = PaymentRefundRequestStatus.Approved;
+                refundRequest.ReviewedAt ??= updatedAt;
+            }
+            else if (refund.Status == PaymentRefundStatus.Failed)
+            {
+                refundRequest.Status = PaymentRefundRequestStatus.Pending;
+                refundRequest.PaymentRefundId = null;
+            }
+            else
+            {
+                refundRequest.Status = PaymentRefundRequestStatus.Processing;
+            }
+
+            refundRequest.UpdatedAt = updatedAt;
         }
     }
 
@@ -2320,6 +2567,7 @@ public class PaymentsController : ControllerBase
                 .ThenInclude(order => order!.Customer)
             .Include(request => request.Payment)
             .Include(request => request.PaymentRefund)
+            .Include(request => request.Items)
             .FirstOrDefaultAsync(request => request.Id == requestId, cancellationToken);
 
     private async Task<bool> CanAccessRefundRequestAsync(PaymentRefundRequest request)
@@ -2337,7 +2585,8 @@ public class PaymentsController : ControllerBase
         _dbContext.PaymentRefundRequests
             .Where(item =>
                 item.Id == requestId &&
-                item.Status == PaymentRefundRequestStatus.Processing)
+                item.Status == PaymentRefundRequestStatus.Processing &&
+                item.PaymentRefundId == null)
             .ExecuteUpdateAsync(
                 setters => setters
                     .SetProperty(item => item.Status, PaymentRefundRequestStatus.Pending)

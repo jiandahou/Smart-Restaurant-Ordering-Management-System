@@ -9,6 +9,7 @@ using DineFlow.Infrastructure.Persistence;
 using DineFlow.Infrastructure.Restaurant;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace DineFlow.Api.Controllers;
@@ -56,6 +57,11 @@ public class OrderController : ControllerBase
             .Include(order => order.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
             .Include(order => order.RefundRequests)
+                .ThenInclude(request => request.Items)
+            .Include(order => order.RefundRequests)
+                .ThenInclude(request => request.PaymentRefund)
+            .Include(order => order.Payments)
+                .ThenInclude(payment => payment.Refunds)
             .Include(order => order.Restaurant)
             .Include(order => order.Table)
             .ToListAsync(cancellationToken);
@@ -79,6 +85,11 @@ public class OrderController : ControllerBase
             .Include(order => order.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
             .Include(order => order.RefundRequests)
+                .ThenInclude(request => request.Items)
+            .Include(order => order.RefundRequests)
+                .ThenInclude(request => request.PaymentRefund)
+            .Include(order => order.Payments)
+                .ThenInclude(payment => payment.Refunds)
             .Include(order => order.Restaurant)
             .Include(order => order.Table)
             .Where(order => order.CustomerId == currentUserId)
@@ -86,39 +97,69 @@ public class OrderController : ControllerBase
             .ThenByDescending(order => order.Id)
             .ToListAsync(cancellationToken);
 
-        return Ok(orders.Select(MapToResponse).ToList());
+        var menuImageUrls = await LoadMenuImageUrlsAsync(orders, cancellationToken);
+
+        return Ok(orders.Select(order => MapToResponse(order, menuImageUrls)).ToList());
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.GuestOrderAccess)]
     [HttpPost("guest")]
     public async Task<IActionResult> GetGuestOrders(
         [FromBody] GuestOrderLookupRequest request,
         CancellationToken cancellationToken)
     {
-        if (request?.OrderIds is null || request.OrderIds.Count == 0)
+        // Accept both shapes so clients that stored bare ids before guest tokens existed keep working.
+        var requestedOrders = (request?.Orders ?? [])
+            .Where(entry => entry.OrderId != Guid.Empty)
+            .Select(entry => (entry.OrderId, entry.GuestAccessToken))
+            .Concat((request?.OrderIds ?? [])
+                .Where(orderId => orderId != Guid.Empty)
+                .Select(orderId => (OrderId: orderId, GuestAccessToken: (string?)null)))
+            .GroupBy(entry => entry.OrderId)
+            // Prefer the entry that carries a token when both shapes name the same order.
+            .Select(group => group.FirstOrDefault(entry => entry.GuestAccessToken is not null, group.First()))
+            .Take(MaximumGuestOrderLookupCount)
+            .ToList();
+
+        if (requestedOrders.Count == 0)
         {
             return Ok(Array.Empty<OrderResponse>());
         }
 
-        var orderIds = request.OrderIds
-            .Where(orderId => orderId != Guid.Empty)
-            .Distinct()
-            .Take(MaximumGuestOrderLookupCount)
-            .ToList();
+        var tokensByOrderId = requestedOrders.ToDictionary(
+            entry => entry.OrderId,
+            entry => entry.GuestAccessToken);
+        var orderIds = requestedOrders.Select(entry => entry.OrderId).ToList();
 
         var orders = await _dbContext.Orders
             .AsNoTracking()
             .Include(order => order.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
             .Include(order => order.RefundRequests)
+                .ThenInclude(request => request.Items)
+            .Include(order => order.RefundRequests)
+                .ThenInclude(request => request.PaymentRefund)
+            .Include(order => order.Payments)
+                .ThenInclude(payment => payment.Refunds)
             .Include(order => order.Restaurant)
             .Include(order => order.Table)
-            .Where(order => orderIds.Contains(order.Id))
+            // An order belonging to a signed-in customer must never be readable through the guest
+            // channel — that account has /mine, and this endpoint takes no credentials at all.
+            .Where(order => orderIds.Contains(order.Id) && order.CustomerId == null)
             .OrderByDescending(order => order.CreatedAt)
             .ThenByDescending(order => order.Id)
             .ToListAsync(cancellationToken);
 
-        return Ok(orders.Select(MapToResponse).ToList());
+        var authorizedOrders = orders
+            .Where(order => GuestAccessTokenService.IsAuthorized(
+                order.GuestAccessTokenHash,
+                tokensByOrderId.GetValueOrDefault(order.Id)))
+            .ToList();
+
+        var menuImageUrls = await LoadMenuImageUrlsAsync(authorizedOrders, cancellationToken);
+
+        return Ok(authorizedOrders.Select(order => MapToResponse(order, menuImageUrls)).ToList());
     }
 
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]
@@ -130,6 +171,9 @@ public class OrderController : ControllerBase
             .Include(item => item.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
             .Include(item => item.RefundRequests)
+                .ThenInclude(request => request.Items)
+            .Include(item => item.RefundRequests)
+                .ThenInclude(request => request.PaymentRefund)
             .Include(item => item.Restaurant)
             .Include(item => item.Table)
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
@@ -143,6 +187,143 @@ public class OrderController : ControllerBase
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.GuestOrderAccess)]
+    [HttpPost("{id:guid}/cancel")]
+    public async Task<ActionResult<OrderResponse>> CancelCustomerOrder(
+        Guid id,
+        [FromBody] CancelCustomerOrderRequest? request,
+        CancellationToken cancellationToken)
+    {
+        var reason = TrimOrNull(request?.Reason);
+        if (reason?.Length > 1_000)
+        {
+            return BadRequest(new { message = "Reason cannot exceed 1000 characters." });
+        }
+
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        var order = await _dbContext.Orders
+            .Include(item => item.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
+            .Include(item => item.Payments)
+                .ThenInclude(payment => payment.Refunds)
+            .Include(item => item.RefundRequests)
+                .ThenInclude(refundRequest => refundRequest.Items)
+            .Include(item => item.RefundRequests)
+                .ThenInclude(refundRequest => refundRequest.PaymentRefund)
+            .Include(item => item.Restaurant)
+            .Include(item => item.Table)
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+
+        if (order is null)
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
+        if (!string.IsNullOrWhiteSpace(order.CustomerId))
+        {
+            if (!string.Equals(order.CustomerId, currentUserId, StringComparison.Ordinal))
+            {
+                return Forbid();
+            }
+        }
+        else if (!GuestAccessTokenService.IsAuthorized(order.GuestAccessTokenHash, request?.GuestAccessToken))
+        {
+            return Forbid();
+        }
+
+        if (!CustomerOrderCancellationPolicy.CanCancel(order.Status, order.PaymentStatus))
+        {
+            return Conflict(new
+            {
+                message = order.Status != OrderStatus.Pending
+                    ? "Only pending orders can be cancelled by the customer."
+                    : "This order has an active or completed payment. Use the refund request instead.",
+                orderStatus = order.Status.ToString(),
+                paymentStatus = order.PaymentStatus.ToString()
+            });
+        }
+
+        if (order.Payments.Any(payment => payment.Status == PaymentStatus.Pending))
+        {
+            return Conflict(new
+            {
+                message = "A payment attempt is still active. Wait for it to expire before cancelling."
+            });
+        }
+
+        var now = DateTime.UtcNow;
+        var cancellationReason = reason ?? "Cancelled by customer.";
+        var previousStatus = order.Status;
+        var previousPaymentStatus = order.PaymentStatus;
+        order.Status = OrderStatus.Cancelled;
+        order.PaymentStatus = PaymentStatus.Cancelled;
+        order.UpdatedAt = now;
+
+        foreach (var payment in order.Payments.Where(payment =>
+                     payment.Status is PaymentStatus.Unpaid
+                         or PaymentStatus.Failed
+                         or PaymentStatus.Expired
+                         or PaymentStatus.Cancelled
+                         or PaymentStatus.NotRequired))
+        {
+            payment.Status = PaymentStatus.Cancelled;
+            payment.UpdatedAt = now;
+        }
+
+        await _menuItemStockService.ReleaseAsync(
+            BuildRequestedQuantities(order.OrderItems),
+            cancellationToken);
+
+        _dbContext.OrderStatusHistories.Add(new OrderStatusHistory
+        {
+            Id = Guid.NewGuid(),
+            OrderId = order.Id,
+            PreviousStatus = previousStatus,
+            NewStatus = OrderStatus.Cancelled,
+            Action = "CustomerCancel",
+            Reason = cancellationReason,
+            ChangedByUserId = currentUserId,
+            CreatedAt = now
+        });
+        _reportLogWriter.AddAudit(
+            "Order.CustomerCancelled",
+            "Order",
+            order.Id.ToString(),
+            order.RestaurantId,
+            $"Customer cancelled {order.OrderNumber}.",
+            before: new
+            {
+                status = previousStatus.ToString(),
+                paymentStatus = previousPaymentStatus.ToString()
+            },
+            after: new
+            {
+                status = OrderStatus.Cancelled.ToString(),
+                paymentStatus = PaymentStatus.Cancelled.ToString(),
+                reason = cancellationReason
+            });
+        _reportLogWriter.AddOrderEvent(
+            order,
+            "order.customer_cancelled",
+            $"Customer cancelled {order.OrderNumber}.",
+            new
+            {
+                previousStatus = previousStatus.ToString(),
+                status = OrderStatus.Cancelled.ToString(),
+                paymentStatus = PaymentStatus.Cancelled.ToString(),
+                reason = cancellationReason
+            });
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        await _orderRealtimeNotifier.OrderUpdatedAsync(order, cancellationToken);
+
+        return Ok(MapToResponse(order));
+    }
+
+    [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.GuestOrderAccess)]
     [HttpPost("{id:guid}/refund-requests")]
     public async Task<ActionResult<CustomerRefundRequestResponse>> CreateRefundRequest(
         Guid id,
@@ -172,7 +353,11 @@ public class OrderController : ControllerBase
             .Include(item => item.Payments)
                 .ThenInclude(payment => payment.Refunds)
             .Include(item => item.RefundRequests)
+                .ThenInclude(refundRequest => refundRequest.Items)
+            .Include(item => item.RefundRequests)
+                .ThenInclude(refundRequest => refundRequest.PaymentRefund)
             .Include(item => item.Customer)
+            .Include(item => item.OrderItems)
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
 
         if (order is null)
@@ -180,10 +365,83 @@ public class OrderController : ControllerBase
             return NotFound(new { message = "Order not found." });
         }
 
-        if (!string.IsNullOrWhiteSpace(order.CustomerId) &&
-            !string.Equals(order.CustomerId, currentUserId, StringComparison.Ordinal))
+        if (!string.IsNullOrWhiteSpace(order.CustomerId))
+        {
+            if (!string.Equals(order.CustomerId, currentUserId, StringComparison.Ordinal))
+            {
+                return Forbid();
+            }
+        }
+        // Nobody is signed in behind a guest order, so the token is the only thing proving the
+        // caller placed it. Without this the order id alone would authorise a refund request.
+        else if (!GuestAccessTokenService.IsAuthorized(order.GuestAccessTokenHash, request?.GuestAccessToken))
         {
             return Forbid();
+        }
+
+        var selectedItems = request?.Items ?? [];
+        if (!RefundRequestItemPolicy.HasAtLeastOneItem(selectedItems))
+        {
+            return BadRequest(new { message = "Select at least one item to refund." });
+        }
+
+        if (selectedItems.Select(item => item.OrderItemId).Distinct().Count() != selectedItems.Count)
+        {
+            return BadRequest(new { message = "Each order item can only be selected once." });
+        }
+
+        var orderItemsById = order.OrderItems.ToDictionary(item => item.Id);
+        var alreadyRefundedAmounts = BuildAttributedRefundAmounts(order);
+        foreach (var selectedItem in selectedItems)
+        {
+            if (!orderItemsById.TryGetValue(selectedItem.OrderItemId, out var orderItem))
+            {
+                return BadRequest(new { message = "One of the selected items does not belong to this order." });
+            }
+
+            var lineAmountCents = PricingCalculator.ToMinorCurrencyUnits(orderItem.UnitPrice * orderItem.Quantity);
+            var unitPriceCents = PricingCalculator.ToMinorCurrencyUnits(orderItem.UnitPrice);
+            var alreadyRefundedAmountCents = Math.Min(
+                lineAmountCents,
+                alreadyRefundedAmounts.GetValueOrDefault(orderItem.Id));
+            var remainingLineAmountCents = lineAmountCents - alreadyRefundedAmountCents;
+            var refundedQuantity = RefundRequestItemPolicy.GetRefundedQuantity(
+                alreadyRefundedAmountCents,
+                unitPriceCents,
+                orderItem.Quantity);
+            var remainingQuantity = orderItem.Quantity
+                - refundedQuantity;
+            if (remainingLineAmountCents <= 0 || remainingQuantity <= 0)
+            {
+                return BadRequest(new
+                {
+                    message = $"\"{orderItem.MenuItemNameSnapshot}\" has already been refunded."
+                });
+            }
+
+            if (!RefundRequestItemPolicy.IsValidQuantity(selectedItem.Quantity, remainingQuantity))
+            {
+                return BadRequest(new
+                {
+                    message = $"Quantity for \"{orderItem.MenuItemNameSnapshot}\" must be between 1 and {remainingQuantity}."
+                });
+            }
+
+            var requestedItemAmountCents = selectedItem.AmountCents
+                ?? PricingCalculator.ToMinorCurrencyUnits(orderItem.UnitPrice * selectedItem.Quantity);
+            var selectedQuantityAmountCents = PricingCalculator.ToMinorCurrencyUnits(
+                orderItem.UnitPrice * selectedItem.Quantity);
+            if (!RefundRequestItemPolicy.IsValidAmount(
+                    requestedItemAmountCents,
+                    selectedQuantityAmountCents,
+                    remainingLineAmountCents))
+            {
+                return BadRequest(new
+                {
+                    message = $"Refund amount for \"{orderItem.MenuItemNameSnapshot}\" must be between 1 and "
+                        + $"{Math.Min(selectedQuantityAmountCents, remainingLineAmountCents)} cents."
+                });
+            }
         }
 
         if (order.PaymentMethod != PaymentMethod.Online)
@@ -206,14 +464,7 @@ public class OrderController : ControllerBase
             return Conflict(new { message = "A refund request is already waiting for review." });
         }
 
-        var payment = order.Payments
-            .Where(item =>
-                item.Provider == PaymentProviders.Stripe &&
-                item.Status is PaymentStatus.Paid or PaymentStatus.PartiallyRefunded &&
-                !string.IsNullOrWhiteSpace(item.ProviderPaymentIntentId))
-            .OrderByDescending(item => item.PaidAt ?? item.CreatedAt)
-            .ThenByDescending(item => item.Id)
-            .FirstOrDefault();
+        var payment = FindRefundablePayment(order);
 
         if (payment is null)
         {
@@ -237,6 +488,28 @@ public class OrderController : ControllerBase
             return Conflict(new { message = "This payment has already been fully refunded." });
         }
 
+        var refundRequestItems = selectedItems
+            .Select(selectedItem =>
+            {
+                var orderItem = orderItemsById[selectedItem.OrderItemId];
+                return new PaymentRefundRequestItem
+                {
+                    Id = Guid.NewGuid(),
+                    OrderItemId = orderItem.Id,
+                    MenuItemNameSnapshot = orderItem.MenuItemNameSnapshot,
+                    Quantity = selectedItem.Quantity,
+                    AmountCents = selectedItem.AmountCents
+                        ?? PricingCalculator.ToMinorCurrencyUnits(orderItem.UnitPrice * selectedItem.Quantity)
+                };
+            })
+            .ToList();
+
+        var requestedAmountCents = refundRequestItems.Sum(item => item.AmountCents);
+        if (requestedAmountCents <= 0 || requestedAmountCents > refundableAmountCents)
+        {
+            return Conflict(new { message = "The selected items are no longer available to refund." });
+        }
+
         var now = DateTime.UtcNow;
         var refundRequest = new PaymentRefundRequest
         {
@@ -245,13 +518,14 @@ public class OrderController : ControllerBase
             PaymentId = payment.Id,
             RestaurantId = order.RestaurantId,
             Status = PaymentRefundRequestStatus.Pending,
-            RequestedAmountCents = refundableAmountCents,
+            RequestedAmountCents = requestedAmountCents,
             Currency = payment.Currency,
             Reason = reason,
             RequestedByUserId = currentUserId,
             RequesterName = requesterName ?? order.Customer?.FullName,
             RequesterEmail = requesterEmail ?? order.Customer?.Email,
-            CreatedAt = now
+            CreatedAt = now,
+            Items = refundRequestItems
         };
 
         _dbContext.PaymentRefundRequests.Add(refundRequest);
@@ -769,7 +1043,19 @@ public class OrderController : ControllerBase
         return new OrderItemBuildResult(orderItems, validationErrors);
     }
 
-    private static OrderResponse MapToResponse(Order order) => new()
+    private static OrderResponse MapToResponse(Order order) => MapToResponse(order, null);
+
+    private static OrderResponse MapToResponse(
+        Order order,
+        IReadOnlyDictionary<Guid, string?>? menuImageUrls) => MapToResponse(
+            order,
+            menuImageUrls,
+            BuildAttributedRefundAmounts(order));
+
+    private static OrderResponse MapToResponse(
+        Order order,
+        IReadOnlyDictionary<Guid, string?>? menuImageUrls,
+        IReadOnlyDictionary<Guid, long> refundedAmounts) => new()
     {
         Id = order.Id,
         RestaurantId = order.RestaurantId,
@@ -790,6 +1076,7 @@ public class OrderController : ControllerBase
         ScheduledTime = order.ScheduledTime,
         CreatedAt = order.CreatedAt,
         UpdatedAt = order.UpdatedAt,
+        RefundBalance = BuildRefundBalance(order),
         LatestRefundRequest = order.RefundRequests
             .OrderByDescending(item => item.CreatedAt)
             .ThenByDescending(item => item.Id)
@@ -806,7 +1093,23 @@ public class OrderController : ControllerBase
                 MenuItemNameSnapshot = item.MenuItemNameSnapshot,
                 ItemNameSnapshot = item.MenuItemNameSnapshot,
                 BasePriceSnapshot = item.BasePriceSnapshot,
+                ImageUrl = item.MenuItemId is Guid menuItemId
+                    && menuImageUrls is not null
+                    && menuImageUrls.TryGetValue(menuItemId, out var imageUrl)
+                        ? imageUrl
+                        : null,
                 Quantity = item.Quantity,
+                RefundedQuantity = RefundRequestItemPolicy.GetRefundedQuantity(
+                    refundedAmounts.GetValueOrDefault(item.Id),
+                    PricingCalculator.ToMinorCurrencyUnits(item.UnitPrice),
+                    item.Quantity),
+                RefundedAmountCents = Math.Min(
+                    PricingCalculator.ToMinorCurrencyUnits(item.UnitPrice * item.Quantity),
+                    refundedAmounts.GetValueOrDefault(item.Id)),
+                RefundableAmountCents = Math.Max(
+                    0,
+                    PricingCalculator.ToMinorCurrencyUnits(item.UnitPrice * item.Quantity)
+                        - refundedAmounts.GetValueOrDefault(item.Id)),
                 UnitPrice = item.UnitPrice,
                 ItemInstructions = item.ItemInstructions,
                 Note = item.ItemInstructions,
@@ -837,13 +1140,124 @@ public class OrderController : ControllerBase
             OrderId = request.OrderId,
             Status = request.Status.ToString(),
             RequestedAmountCents = request.RequestedAmountCents,
+            RefundedAmountCents = request.PaymentRefund?.AmountCents,
+            RefundStatus = request.PaymentRefund?.Status.ToString(),
             Currency = request.Currency,
             Reason = request.Reason,
             AdminNote = request.AdminNote,
             CreatedAt = request.CreatedAt,
             UpdatedAt = request.UpdatedAt,
-            ReviewedAt = request.ReviewedAt
+            ReviewedAt = request.ReviewedAt,
+            Items = request.Items
+                .Select(item => new CustomerRefundRequestItemResponse
+                {
+                    MenuItemNameSnapshot = item.MenuItemNameSnapshot,
+                    Quantity = item.Quantity,
+                    AmountCents = item.AmountCents
+                })
+                .ToList()
         };
+
+    // Menu images are not snapshotted on OrderItem, so resolve them from the live menu for
+    // presentation only. Deleted menu items simply fall back to no image.
+    private async Task<Dictionary<Guid, string?>> LoadMenuImageUrlsAsync(
+        IEnumerable<Order> orders,
+        CancellationToken cancellationToken)
+    {
+        var menuItemIds = orders
+            .SelectMany(order => order.OrderItems)
+            .Select(item => item.MenuItemId)
+            .OfType<Guid>()
+            .Distinct()
+            .ToList();
+
+        if (menuItemIds.Count == 0)
+        {
+            return [];
+        }
+
+        return await _dbContext.MenuItems
+            .AsNoTracking()
+            .Where(item => menuItemIds.Contains(item.Id))
+            .Select(item => new { item.Id, item.ImageUrl })
+            .ToDictionaryAsync(item => item.Id, item => item.ImageUrl, cancellationToken);
+    }
+
+    // Single source of truth for "which payment can this order be refunded against", shared by
+    // the refund-request endpoint and the balance shown to the customer, so they never disagree.
+    private static Payment? FindRefundablePayment(Order order) =>
+        order.Payments
+            .Where(item =>
+                item.Provider == PaymentProviders.Stripe &&
+                item.Status is PaymentStatus.Paid or PaymentStatus.PartiallyRefunded &&
+                !string.IsNullOrWhiteSpace(item.ProviderPaymentIntentId))
+            .OrderByDescending(item => item.PaidAt ?? item.CreatedAt)
+            .ThenByDescending(item => item.Id)
+            .FirstOrDefault();
+
+    // Exact itemised requests are attributable as entered. A staff-adjusted refund is also
+    // unambiguous when the request contains only one item, so apply the actual approved amount to
+    // that line. We deliberately do not guess how to split an adjusted total across several items.
+    private static Dictionary<Guid, long> BuildAttributedRefundAmounts(Order order)
+    {
+        var amounts = new Dictionary<Guid, long>();
+
+        foreach (var allocation in EnumerateAttributedRefundAllocations(order))
+        {
+            amounts[allocation.OrderItemId] = amounts.GetValueOrDefault(allocation.OrderItemId)
+                + allocation.AmountCents;
+        }
+
+        return amounts;
+    }
+
+    private static IEnumerable<(Guid OrderItemId, long AmountCents)> EnumerateAttributedRefundAllocations(
+        Order order)
+    {
+        var seenRefundIds = new HashSet<Guid>();
+
+        foreach (var request in order.RefundRequests)
+        {
+            var refund = request.PaymentRefund;
+            if (refund is null
+                || refund.Status != PaymentRefundStatus.Succeeded
+                || request.Items.Count == 0
+                || !seenRefundIds.Add(refund.Id))
+            {
+                continue;
+            }
+
+            var allocations = RefundRequestItemPolicy.AttributeSucceededRefund(
+                refund.AmountCents,
+                request.Items
+                    .Select(item => (item.OrderItemId, item.AmountCents))
+                    .ToList());
+            foreach (var allocation in allocations)
+            {
+                yield return allocation;
+            }
+        }
+    }
+
+    private static OrderRefundBalance BuildRefundBalance(Order order)
+    {
+        var payment = FindRefundablePayment(order);
+        if (payment is null)
+        {
+            return new OrderRefundBalance();
+        }
+
+        var refunded = GetSucceededRefundedAmount(payment);
+        var attributed = EnumerateAttributedRefundAllocations(order)
+            .Sum(allocation => allocation.AmountCents);
+
+        return new OrderRefundBalance
+        {
+            AlreadyRefundedAmountCents = refunded,
+            RefundableAmountCents = Math.Max(0, payment.AmountCents - refunded),
+            UnattributedRefundedAmountCents = Math.Max(0, refunded - attributed)
+        };
+    }
 
     private static long GetSucceededRefundedAmount(Payment payment) =>
         payment.Refunds

@@ -40,6 +40,64 @@ public sealed class StripeOrderCheckoutService
         _logger = logger;
     }
 
+    private enum CheckoutSessionReuse
+    {
+        Reusable,
+        Unusable,
+        AlreadyCompleted,
+        Indeterminate
+    }
+
+    /// Only an "open", unexpired session can still take payment. Anything else must not be handed
+    /// back to the customer as a live checkout URL.
+    private async Task<CheckoutSessionReuse> InspectCheckoutSessionAsync(
+        string sessionId,
+        string stripeAccountId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var session = await new SessionService(_stripeClient).GetAsync(
+                sessionId,
+                requestOptions: new RequestOptions { StripeAccount = stripeAccountId },
+                cancellationToken: cancellationToken);
+
+            if (string.Equals(session.Status, "complete", StringComparison.OrdinalIgnoreCase))
+            {
+                return CheckoutSessionReuse.AlreadyCompleted;
+            }
+
+            if (!string.Equals(session.Status, "open", StringComparison.OrdinalIgnoreCase))
+            {
+                return CheckoutSessionReuse.Unusable;
+            }
+
+            return session.ExpiresAt != default && session.ExpiresAt <= DateTime.UtcNow
+                ? CheckoutSessionReuse.Unusable
+                : CheckoutSessionReuse.Reusable;
+        }
+        catch (StripeException ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Could not verify checkout session {SessionId}; preserving it because its state is indeterminate.",
+                sessionId);
+            return CheckoutSessionReuse.Indeterminate;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Unexpected failure while verifying checkout session {SessionId}; preserving it because its state is indeterminate.",
+                sessionId);
+            return CheckoutSessionReuse.Indeterminate;
+        }
+    }
+
     public async Task<StripeCheckoutStartResult> StartAsync(
         Guid orderId,
         string? customerEmail,
@@ -119,8 +177,53 @@ public sealed class StripeOrderCheckoutService
             !string.IsNullOrWhiteSpace(payment.ProviderCheckoutSessionId) &&
             !string.IsNullOrWhiteSpace(payment.CheckoutUrl))
         {
-            await transaction.CommitAsync(cancellationToken);
-            return StripeCheckoutStartResult.Success(MapResponse(order, payment, "Existing checkout session reused."));
+            // A locally-Pending payment says nothing about whether Stripe still accepts the
+            // session — they expire (24h by default). Ask Stripe before handing the URL back.
+            var reuse = await InspectCheckoutSessionAsync(
+                payment.ProviderCheckoutSessionId!,
+                restaurant.StripeAccountId!,
+                cancellationToken);
+
+            if (reuse == CheckoutSessionReuse.Reusable)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return StripeCheckoutStartResult.Success(MapResponse(order, payment, "Existing checkout session reused."));
+            }
+
+            if (reuse == CheckoutSessionReuse.AlreadyCompleted)
+            {
+                // Stripe already took payment and we simply have not processed the webhook yet.
+                // Minting a second session here is how customers get charged twice.
+                await transaction.CommitAsync(cancellationToken);
+                return StripeCheckoutStartResult.Failure(
+                    StatusCodes.Status409Conflict,
+                    "This order has already been paid. Refresh to see the updated payment status.");
+            }
+
+            if (reuse == CheckoutSessionReuse.Indeterminate)
+            {
+                // The old URL may still be live or may even have completed. Preserve both the
+                // session and its idempotency key; replacing either while Stripe is unreachable
+                // can create a second payable Checkout Session.
+                await transaction.CommitAsync(cancellationToken);
+                return StripeCheckoutStartResult.Failure(
+                    StatusCodes.Status502BadGateway,
+                    "The existing checkout session could not be confirmed with Stripe.",
+                    "The original payment link was preserved. Please wait and try again; no new checkout session was created.");
+            }
+
+            _logger.LogInformation(
+                "Replacing unusable checkout session {SessionId} for payment {PaymentId}.",
+                payment.ProviderCheckoutSessionId,
+                payment.Id);
+
+            // Drop the dead session and rotate the idempotency key, otherwise Stripe would just
+            // replay the expired session instead of creating a new one.
+            payment.ProviderCheckoutSessionId = null;
+            payment.CheckoutUrl = null;
+            payment.IdempotencyKey = $"order-checkout-{payment.Id:N}-{Guid.NewGuid():N}";
+            payment.UpdatedAt = DateTime.UtcNow;
+            await _dbContext.SaveChangesAsync(cancellationToken);
         }
 
         var amountCents = PricingCalculator.ToMinorCurrencyUnits(order.TotalAmount);

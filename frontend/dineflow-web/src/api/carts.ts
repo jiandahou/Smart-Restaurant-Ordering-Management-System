@@ -92,6 +92,11 @@ export type JoinCartResponse = {
 export type CheckoutCartResponse = {
   message: string
   order: SubmittedOrder
+  /**
+   * Returned once, only for orders placed without signing in. The server keeps just a hash, so if
+   * the client loses this the order can never be looked up again.
+   */
+  guestAccessToken?: string | null
 }
 
 export type AddCartItemRequest = {

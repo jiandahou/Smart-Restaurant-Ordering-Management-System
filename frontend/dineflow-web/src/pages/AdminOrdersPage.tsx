@@ -41,7 +41,8 @@ import {
 import { useAuth } from '../auth/AuthContext'
 import { OrderStatusBadge, getOrderStatusLabel, orderStatusOptions } from '../components/orders/OrderStatusBadge'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
-import { OrderRefundDialog } from '../components/orders/OrderRefundDialog'
+import { OrderRefundDialog, type RefundMode } from '../components/orders/OrderRefundDialog'
+import { parseRefundAmountCents } from '../components/orders/refundAmount'
 import { OrderStatusHistoryList } from '../components/orders/OrderStatusHistoryList'
 import { OrderTransitionReasonField } from '../components/orders/OrderTransitionReasonField'
 import { PaymentRefundHistory } from '../components/orders/PaymentRefundHistory'
@@ -294,6 +295,8 @@ export function AdminOrdersPage() {
   const [transitionReason, setTransitionReason] = useState('')
   const [pendingRefundOrder, setPendingRefundOrder] = useState<AdminOrder | null>(null)
   const [refundReason, setRefundReason] = useState('')
+  const [refundMode, setRefundMode] = useState<RefundMode>('full')
+  const [refundAmount, setRefundAmount] = useState('')
   const [statusHistoryByOrderId, setStatusHistoryByOrderId] = useState<Record<string, AdminOrderStatusHistory[]>>({})
   const [statusHistoryLoadingId, setStatusHistoryLoadingId] = useState<string | null>(null)
   const [search, setSearch] = useState(urlSearch)
@@ -522,6 +525,7 @@ export function AdminOrdersPage() {
     try {
       const updatedOrder = await refundAdminOrder(pendingRefundOrder.id, {
         reason: refundReason.trim() || undefined,
+        amountCents: refundMode === 'full' ? undefined : (parseRefundAmountCents(refundAmount) ?? undefined),
       })
       setOrders((current) => current.map((item) => item.id === updatedOrder.id ? updatedOrder : item))
       toast.success('Refund created', {
@@ -529,6 +533,8 @@ export function AdminOrdersPage() {
       })
       setPendingRefundOrder(null)
       setRefundReason('')
+      setRefundMode('full')
+      setRefundAmount('')
       await loadOrders()
     } catch (error) {
       toast.error('Could not refund order', {
@@ -716,6 +722,8 @@ export function AdminOrdersPage() {
             onClick={(event) => {
               event.stopPropagation()
               setRefundReason('')
+              setRefundMode('full')
+              setRefundAmount((((order.latestPayment?.refundableAmountCents ?? 0)) / 100).toFixed(2))
               setPendingRefundOrder(order)
             }}
           >
@@ -1508,12 +1516,18 @@ export function AdminOrdersPage() {
       <OrderRefundDialog
         order={pendingRefundOrder}
         reason={refundReason}
+        mode={refundMode}
+        amount={refundAmount}
         submitting={refundingOrderId !== null}
         onReasonChange={setRefundReason}
+        onModeChange={setRefundMode}
+        onAmountChange={setRefundAmount}
         onOpenChange={(open) => {
           if (!open && refundingOrderId === null) {
             setPendingRefundOrder(null)
             setRefundReason('')
+            setRefundMode('full')
+            setRefundAmount('')
           }
         }}
         onConfirm={() => void submitRefund()}

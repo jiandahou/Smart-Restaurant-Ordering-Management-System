@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { rememberGuestOrder } from '@/lib/guestOrders'
+import { buildRestaurantMenuPath } from '@/lib/customerMenuNavigation'
 
 export type CheckoutNavigationState = {
   order: SubmittedOrder
@@ -51,7 +52,8 @@ export function CheckoutPage() {
     paymentPolicy,
     onlinePaymentsEnabled,
   } = routerState
-  const returnPath = routerState.returnPath ?? (order.restaurantId ? `/r/${encodeURIComponent(order.restaurantId)}/menu` : '/')
+  const returnPath = routerState.returnPath
+    ?? (order.restaurantId ? buildRestaurantMenuPath(order.restaurantId, order.orderType) : '/')
   const isDineIn = order.orderType === 0
   const displayedTableNumber = order.tableNumber ?? tableNumber
   const orderScope = displayedTableNumber

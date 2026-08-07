@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   AlertCircle,
   ArrowRight,
@@ -114,6 +114,10 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { rememberGuestOrder } from '@/lib/guestOrders'
+import {
+  buildRestaurantMenuPath,
+  parseCustomerMenuOrderType,
+} from '@/lib/customerMenuNavigation'
 import { cn } from '@/lib/utils'
 
 type StoredCartSession = {
@@ -413,6 +417,8 @@ function appendNotePreset(note: string, preset: string, maxLength: number) {
 export function CustomerMenuPage() {
   const { restaurantId, qrToken } = useParams()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const requestedOrderType = parseCustomerMenuOrderType(searchParams.get('orderType'))
   const { user, logout } = useAuth()
   const [state, setState] = useState<CustomerMenuState>({ status: 'loading' })
   const [retryKey, setRetryKey] = useState(0)
@@ -523,16 +529,20 @@ export function CustomerMenuPage() {
           return
         }
 
-        if (restaurantId) {
+        if (restaurantId && (!requestedOrderType || !context.availableOrderTypes.includes(requestedOrderType))) {
           setState({ status: 'choosing', context, menu })
           return
         }
 
-        const cartSession = await loadOrJoinCart(context, `table:${qrToken}`, 'DineIn')
+        const orderType = restaurantId ? requestedOrderType! : 'DineIn'
+        const storageKeySuffix = restaurantId
+          ? `restaurant:${context.restaurant.id}:${orderType.toLowerCase()}`
+          : `table:${qrToken}`
+        const cartSession = await loadOrJoinCart(context, storageKeySuffix, orderType)
 
         setState({
           status: 'ready',
-          context,
+          context: { ...context, orderType },
           menu,
           cart: cartSession.cart,
           participantToken: cartSession.participantToken,
@@ -557,7 +567,7 @@ export function CustomerMenuPage() {
     return () => {
       cancelled = true
     }
-  }, [restaurantId, qrToken, retryKey])
+  }, [restaurantId, qrToken, requestedOrderType, retryKey])
 
   useEffect(() => {
     latestCartRef.current = state.status === 'ready' ? state.cart : null
@@ -1176,10 +1186,11 @@ export function CustomerMenuPage() {
     setCheckingOut(true)
     try {
       const result = await checkoutCart(cart.id, participantToken)
-      rememberGuestOrder(result.order.id)
+      // Only chance to capture the token; it is never returned again.
+      rememberGuestOrder(result.order.id, result.guestAccessToken ?? null)
       const returnPath = qrToken
         ? `/table/${encodeURIComponent(qrToken)}`
-        : `/r/${encodeURIComponent(context.restaurant.id)}/menu`
+        : buildRestaurantMenuPath(context.restaurant.id, cart.orderType)
 
       navigate('/checkout', {
         state: {

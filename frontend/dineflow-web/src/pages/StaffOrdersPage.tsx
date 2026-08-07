@@ -82,6 +82,7 @@ import {
   type ThermalPrinterMode,
   type ThermalPrinterSettings,
 } from '@/lib/thermalPrinter'
+import { formatServiceCode } from '@/lib/serviceCode'
 import { cn } from '@/lib/utils'
 
 type Queue = 'active' | 'new' | 'kitchen' | 'ready' | 'late' | 'payment' | 'carried' | 'closed'
@@ -835,8 +836,8 @@ export function StaffOrdersPage() {
                           >
                             <div className="staff-kitchen-card-header">
                               <div className="staff-kitchen-card-title">
-                                <span className="staff-kitchen-order-number">{order.orderNumber}</span>
-                                <strong id={`staff-kitchen-order-${order.id}`}>{order.tableNumber ? `Table ${order.tableNumber}` : getOrderTypeLabel(order.orderType)}</strong>
+                                <span className="staff-kitchen-order-number">{getOrderTypeLabel(order.orderType)}</span>
+                                <strong id={`staff-kitchen-order-${order.id}`}>{formatServiceCode(order)}</strong>
                               </div>
                               <div className="staff-kitchen-card-tools">
                                 <span className={cn('staff-kitchen-timer', signal.isLate && 'is-late')}>
@@ -856,7 +857,6 @@ export function StaffOrdersPage() {
                               <OrderStatusBadge status={order.status} />
                               <PaymentStatusBadge status={order.paymentStatus} />
                               {counterPaymentNeeded ? <Badge variant="outline" className="staff-order-counter-badge">Counter due</Badge> : null}
-                              {order.orderType !== 'DineIn' && order.pickupNumber ? <Badge className="staff-order-pickup-badge">Pickup {order.pickupCode || `#${order.pickupNumber}`}</Badge> : null}
                               {order.customerName ? <Badge variant="outline"><UserRound className="size-3" />{order.customerName}</Badge> : null}
                               {order.scheduledTime ? <Badge variant="outline"><CalendarClock className="size-3" />{formatDateTime(order.scheduledTime)}</Badge> : null}
                             </div>
@@ -995,7 +995,7 @@ export function StaffOrdersPage() {
                         </div>
                         <div className="flex items-start justify-between gap-3">
                           <div>
-                            <h2 id={`staff-order-${order.id}`} className="font-heading text-base font-medium">{order.orderNumber}</h2>
+                            <h2 id={`staff-order-${order.id}`} className="font-heading text-base font-medium">{formatServiceCode(order)}</h2>
                             <CardDescription className="mt-1 flex items-center gap-1.5">
                               {order.orderType === 'DineIn' ? <Utensils size={14} /> : <ShoppingBag size={14} />}
                               {getOrderScope(order)}
@@ -1020,11 +1020,6 @@ export function StaffOrdersPage() {
                           {counterPaymentNeeded ? (
                             <Badge variant="outline" className="staff-order-counter-badge">
                               Counter payment due
-                            </Badge>
-                          ) : null}
-                          {order.orderType !== 'DineIn' && order.pickupNumber ? (
-                            <Badge className="staff-order-pickup-badge">
-                              Pickup {order.pickupCode || `#${order.pickupNumber}`}
                             </Badge>
                           ) : null}
                           {order.customerName ? (
@@ -2689,7 +2684,7 @@ function OrderPrintTicket({ order, paperWidth, printedAt }: { order: AdminOrder;
     <section className={cn('staff-order-print-ticket', paperWidth === '58mm' && 'is-58mm')} aria-label="Kitchen print ticket">
       <header className="staff-order-print-header">
         <span>Kitchen ticket</span>
-        <h1>{order.orderNumber}</h1>
+        <h1>{formatServiceCode(order)}</h1>
         <p>{order.restaurantName ?? 'Assigned restaurant'}</p>
       </header>
 

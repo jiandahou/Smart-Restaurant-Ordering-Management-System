@@ -16,6 +16,7 @@ import {
   Printer,
   ShieldCheck,
   ShoppingBag,
+  SquareTerminal,
   Store,
   Sun,
   UsersRound,
@@ -203,6 +204,7 @@ export function AppLayout() {
   const isAdminArea = location.pathname.startsWith('/admin')
   const isStaffOrdersArea = location.pathname.startsWith('/staff/')
   const isBackendPulseActive = backendStatus === 'checking' || backendStatus === 'ok'
+  const showStripeForwardButton = import.meta.env.DEV && isSignedIn
   const visibleAdminLinks = adminLinks.filter((link) => canUseAdminTools || ['/admin', '/admin/orders'].includes(link.to))
   const selectedPrintRestaurant = printing.printRestaurants.find(
     (restaurant) => restaurant.id === printing.activeRestaurantId,
@@ -260,6 +262,10 @@ export function AppLayout() {
       setBackendStatus('fail')
       toast.error('Backend health check failed')
     }
+  }
+
+  const openStripeForward = () => {
+    window.location.assign('dineflow-dev://stripe-forward')
   }
 
   return (
@@ -452,6 +458,26 @@ export function AppLayout() {
                 </Tooltip>
               </TooltipProvider>
             </>
+          ) : null}
+
+          {showStripeForwardButton ? (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="mobile-topbar-icon"
+                    aria-label="Open Stripe webhook forwarding terminal"
+                    onClick={openStripeForward}
+                  >
+                    <SquareTerminal size={18} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Open Stripe forward terminal (dev only)</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           ) : null}
 
           <TooltipProvider>
@@ -708,6 +734,24 @@ export function AppLayout() {
                 </Tooltip>
               </TooltipProvider>
             </>
+          ) : null}
+          {showStripeForwardButton ? (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    aria-label="Open Stripe webhook forwarding terminal"
+                    onClick={openStripeForward}
+                  >
+                    <SquareTerminal size={18} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Open Stripe forward terminal (dev only)</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           ) : null}
           <TooltipProvider>
             <Tooltip>

@@ -435,6 +435,11 @@ public class AdminOrdersController : ControllerBase
             return BadRequest(new { message = "Reason cannot exceed 1000 characters." });
         }
 
+        if (!RefundAmountPolicy.IsValidOverrideAmount(request?.AmountCents))
+        {
+            return BadRequest(new { message = "Refund amount must be greater than zero." });
+        }
+
         var currentRestaurantId = await GetCurrentRestaurantIdAsync();
         if (!User.IsInRole(ApplicationRoles.PlatformOwner) && currentRestaurantId is null)
         {
@@ -469,7 +474,8 @@ public class AdminOrdersController : ControllerBase
             User.FindFirstValue(ClaimTypes.NameIdentifier),
             reason,
             "admin-direct",
-            cancellationToken);
+            cancellationToken,
+            requestedAmountCents: request?.AmountCents);
         if (!result.IsSuccess)
         {
             return StatusCode(result.StatusCode, new
@@ -822,6 +828,20 @@ public class AdminOrdersController : ControllerBase
                     Currency = latestPayment.Currency,
                     ProviderCheckoutSessionId = latestPayment.ProviderCheckoutSessionId,
                     ProviderPaymentIntentId = latestPayment.ProviderPaymentIntentId,
+                    ProviderChargeId = latestPayment.ProviderChargeId,
+                    PlatformFeeAmountCents = latestPayment.PlatformFeeAmountCents,
+                    StripeFeeAmountCents = latestPayment.StripeFeeAmountCents,
+                    NetAmountCents = latestPayment.NetAmountCents,
+                    ProviderReceiptUrl = latestPayment.ProviderReceiptUrl,
+                    ReceiptEmail = latestPayment.ReceiptEmail,
+                    DisputeId = latestPayment.DisputeId,
+                    DisputeStatus = latestPayment.DisputeStatus,
+                    DisputeAmountCents = latestPayment.DisputeAmountCents,
+                    DisputeEvidenceDueBy = latestPayment.DisputeEvidenceDueBy,
+                    DisputeReason = latestPayment.DisputeReason,
+                    DisputedAt = latestPayment.DisputedAt,
+                    LastProviderEventCreatedAt = latestPayment.LastProviderEventCreatedAt,
+                    LastSyncedAt = latestPayment.LastSyncedAt,
                     FailureReason = latestPayment.FailureReason,
                     RefundCount = latestPayment.Refunds.Count,
                     RefundedAmountCents = latestRefundedAmountCents,

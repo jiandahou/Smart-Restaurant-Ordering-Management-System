@@ -33,6 +33,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<Payment> Payments => Set<Payment>();
     public DbSet<PaymentRefund> PaymentRefunds => Set<PaymentRefund>();
     public DbSet<PaymentRefundRequest> PaymentRefundRequests => Set<PaymentRefundRequest>();
+    public DbSet<PaymentRefundRequestItem> PaymentRefundRequestItems => Set<PaymentRefundRequestItem>();
     public DbSet<StripeWebhookEvent> StripeWebhookEvents => Set<StripeWebhookEvent>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<OrderEventLog> OrderEventLogs => Set<OrderEventLog>();
@@ -402,6 +403,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(order => order.CustomerId)
                 .HasMaxLength(450);
 
+            // Hex-encoded SHA-256.
+            entity.Property(order => order.GuestAccessTokenHash)
+                .HasMaxLength(64);
+
             entity.Property(order => order.OrderNumber)
                 .HasMaxLength(40)
                 .IsRequired();
@@ -552,12 +557,22 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(payment => payment.Provider).HasMaxLength(64).IsRequired();
             entity.Property(payment => payment.ProviderCheckoutSessionId).HasMaxLength(255);
             entity.Property(payment => payment.ProviderPaymentIntentId).HasMaxLength(255);
+            entity.Property(payment => payment.ProviderChargeId).HasMaxLength(255);
+            entity.Property(payment => payment.ProviderReceiptUrl).HasMaxLength(2_048);
+            entity.Property(payment => payment.ReceiptEmail).HasMaxLength(256);
+            entity.Property(payment => payment.DisputeStatus).HasMaxLength(64);
+            entity.Property(payment => payment.DisputeId).HasMaxLength(255);
+            entity.Property(payment => payment.DisputeReason).HasMaxLength(120);
+            entity.HasIndex(payment => payment.ProviderChargeId);
             entity.Property(payment => payment.StripeAccountId).HasMaxLength(255);
             entity.Property(payment => payment.CheckoutUrl).HasMaxLength(2_048);
             entity.Property(payment => payment.IdempotencyKey).HasMaxLength(255);
             entity.Property(payment => payment.Currency).HasMaxLength(8).IsRequired();
             entity.Property(payment => payment.FailureReason).HasMaxLength(1_000);
             entity.Property(payment => payment.RecordedByUserId).HasMaxLength(450);
+            entity.Property(payment => payment.TenderType).HasMaxLength(32);
+            entity.Property(payment => payment.VoidedByUserId).HasMaxLength(450);
+            entity.Property(payment => payment.VoidReason).HasMaxLength(1_000);
             entity.HasIndex(payment => payment.OrderId);
             entity.HasIndex(payment => payment.ProviderCheckoutSessionId);
             entity.HasIndex(payment => payment.ProviderPaymentIntentId);
@@ -584,8 +599,17 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(refund => refund.RequestedByUserId).HasMaxLength(450);
             entity.HasIndex(refund => refund.PaymentId);
             entity.HasIndex(refund => refund.OrderId);
-            entity.HasIndex(refund => refund.ProviderRefundId);
+            entity.HasIndex(refund => refund.ProviderRefundId)
+                .IsUnique()
+                .HasFilter("\"ProviderRefundId\" IS NOT NULL");
             entity.HasIndex(refund => refund.ProviderPaymentIntentId);
+            // Hard guarantee that two concurrent refund attempts can never both open a refund
+            // against the same payment — the loser of the race hits this and is rejected.
+            // Declared as a second, separately named index so the plain PaymentId lookup index above
+            // is kept rather than replaced.
+            entity.HasIndex([nameof(PaymentRefund.PaymentId)], "UX_PaymentRefunds_OnePendingPerPayment")
+                .IsUnique()
+                .HasFilter("\"Status\" = 0");
             entity.ToTable(table => table.HasCheckConstraint(
                 "CK_PaymentRefunds_AmountCents",
                 "\"AmountCents\" > 0"));
@@ -614,9 +638,25 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .WithMany()
                 .HasForeignKey(request => request.PaymentRefundId)
                 .OnDelete(DeleteBehavior.SetNull);
+            entity.HasMany(request => request.Items)
+                .WithOne(item => item.PaymentRefundRequest)
+                .HasForeignKey(item => item.PaymentRefundRequestId)
+                .OnDelete(DeleteBehavior.Cascade);
             entity.ToTable(table => table.HasCheckConstraint(
                 "CK_PaymentRefundRequests_RequestedAmountCents",
                 "\"RequestedAmountCents\" > 0"));
+        });
+
+        builder.Entity<PaymentRefundRequestItem>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.MenuItemNameSnapshot).HasMaxLength(240).IsRequired();
+            entity.HasIndex(item => item.PaymentRefundRequestId);
+            entity.HasIndex(item => item.OrderItemId);
+            entity.ToTable(table => table.HasCheckConstraint(
+                "CK_PaymentRefundRequestItems_Quantity", "\"Quantity\" > 0"));
+            entity.ToTable(table => table.HasCheckConstraint(
+                "CK_PaymentRefundRequestItems_AmountCents", "\"AmountCents\" > 0"));
         });
 
         builder.Entity<AuditLog>(entity =>

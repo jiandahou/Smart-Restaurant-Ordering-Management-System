@@ -16,6 +16,12 @@ public class Order
 
     public string? CustomerId { get; set; }
 
+    /// SHA-256 of the guest access token. Guest orders have no account behind them, so this is the
+    /// only credential proving the caller placed the order — the order id is a plain identifier
+    /// that appears in logs, printed tickets and support tickets, and must never act as a secret.
+    /// Null on orders that predate this, and on orders owned by a signed-in customer.
+    public string? GuestAccessTokenHash { get; set; }
+
     public string OrderNumber { get; set; } = string.Empty;
 
     public DateOnly? PickupDate { get; set; }

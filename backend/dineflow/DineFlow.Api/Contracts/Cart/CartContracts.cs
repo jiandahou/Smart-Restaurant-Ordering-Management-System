@@ -50,6 +50,10 @@ public sealed class CheckoutCartResponse
     public required string Message { get; init; }
 
     public required OrderResponse Order { get; init; }
+
+    /// Returned exactly once, only for orders placed without signing in. The client must keep it
+    /// to look the order up again — the server only ever stores its hash.
+    public string? GuestAccessToken { get; init; }
 }
 
 public sealed class SelectOrderPaymentMethodRequest

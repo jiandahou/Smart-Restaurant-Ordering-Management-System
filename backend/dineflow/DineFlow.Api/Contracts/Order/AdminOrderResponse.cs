@@ -111,6 +111,36 @@ public sealed class AdminOrderPaymentResponse
 
     public string? ProviderPaymentIntentId { get; set; }
 
+    public string? ProviderChargeId { get; set; }
+
+    public string? StripeAccountId { get; set; }
+
+    public long PlatformFeeAmountCents { get; set; }
+
+    public long? StripeFeeAmountCents { get; set; }
+
+    public long? NetAmountCents { get; set; }
+
+    public string? ProviderReceiptUrl { get; set; }
+
+    public string? ReceiptEmail { get; set; }
+
+    public string? DisputeId { get; set; }
+
+    public string? DisputeStatus { get; set; }
+
+    public long? DisputeAmountCents { get; set; }
+
+    public DateTime? DisputeEvidenceDueBy { get; set; }
+
+    public string? DisputeReason { get; set; }
+
+    public DateTime? DisputedAt { get; set; }
+
+    public DateTime? LastProviderEventCreatedAt { get; set; }
+
+    public DateTime? LastSyncedAt { get; set; }
+
     public string? FailureReason { get; set; }
 
     public int RefundCount { get; set; }

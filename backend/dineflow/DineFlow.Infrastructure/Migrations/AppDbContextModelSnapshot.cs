@@ -645,6 +645,10 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<string>("CustomerNote")
                         .HasColumnType("text");
 
+                    b.Property<string>("GuestAccessTokenHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<string>("OrderNumber")
                         .IsRequired()
                         .HasMaxLength(40)
@@ -870,6 +874,12 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<long>("AmountCents")
                         .HasColumnType("bigint");
 
+                    b.Property<long?>("AmountReceivedCents")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("ChangeDueCents")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("CheckoutUrl")
                         .HasMaxLength(2048)
                         .HasColumnType("character varying(2048)");
@@ -882,6 +892,27 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasMaxLength(8)
                         .HasColumnType("character varying(8)");
 
+                    b.Property<long?>("DisputeAmountCents")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("DisputeEvidenceDueBy")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DisputeId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("DisputeReason")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<string>("DisputeStatus")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime?>("DisputedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<DateTime?>("FailedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -893,8 +924,17 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
+                    b.Property<DateTime?>("LastDisputeEventCreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<DateTime?>("LastProviderEventCreatedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("LastSyncedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long?>("NetAmountCents")
+                        .HasColumnType("bigint");
 
                     b.Property<Guid>("OrderId")
                         .HasColumnType("uuid");
@@ -910,6 +950,10 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
 
+                    b.Property<string>("ProviderChargeId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
                     b.Property<string>("ProviderCheckoutSessionId")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
@@ -917,6 +961,14 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<string>("ProviderPaymentIntentId")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
+
+                    b.Property<string>("ProviderReceiptUrl")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("ReceiptEmail")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
 
                     b.Property<string>("RecordedByUserId")
                         .HasMaxLength(450)
@@ -929,8 +981,26 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
+                    b.Property<long?>("StripeFeeAmountCents")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("TenderType")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("VoidReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime?>("VoidedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("VoidedByUserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("character varying(450)");
 
                     b.HasKey("Id");
 
@@ -938,6 +1008,8 @@ namespace DineFlow.Infrastructure.Migrations
                         .IsUnique();
 
                     b.HasIndex("OrderId");
+
+                    b.HasIndex("ProviderChargeId");
 
                     b.HasIndex("ProviderCheckoutSessionId");
 
@@ -969,6 +1041,9 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<string>("FailureReason")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime?>("LastProviderEventCreatedAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<Guid>("OrderId")
                         .HasColumnType("uuid");
@@ -1014,7 +1089,13 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.HasIndex("ProviderPaymentIntentId");
 
-                    b.HasIndex("ProviderRefundId");
+                    b.HasIndex("ProviderRefundId")
+                        .IsUnique()
+                        .HasFilter("\"ProviderRefundId\" IS NOT NULL");
+
+                    b.HasIndex(new[] { "PaymentId" }, "UX_PaymentRefunds_OnePendingPerPayment")
+                        .IsUnique()
+                        .HasFilter("\"Status\" = 0");
 
                     b.ToTable("PaymentRefunds", t =>
                         {
@@ -1099,6 +1180,43 @@ namespace DineFlow.Infrastructure.Migrations
                     b.ToTable("PaymentRefundRequests", t =>
                         {
                             t.HasCheckConstraint("CK_PaymentRefundRequests_RequestedAmountCents", "\"RequestedAmountCents\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("DineFlow.Infrastructure.Payments.PaymentRefundRequestItem", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("AmountCents")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("MenuItemNameSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(240)
+                        .HasColumnType("character varying(240)");
+
+                    b.Property<Guid>("OrderItemId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PaymentRefundRequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrderItemId");
+
+                    b.HasIndex("PaymentRefundRequestId");
+
+                    b.ToTable("PaymentRefundRequestItems", t =>
+                        {
+                            t.HasCheckConstraint("CK_PaymentRefundRequestItems_AmountCents", "\"AmountCents\" > 0");
+
+                            t.HasCheckConstraint("CK_PaymentRefundRequestItems_Quantity", "\"Quantity\" > 0");
                         });
                 });
 
@@ -2181,6 +2299,17 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Navigation("PaymentRefund");
                 });
 
+            modelBuilder.Entity("DineFlow.Infrastructure.Payments.PaymentRefundRequestItem", b =>
+                {
+                    b.HasOne("DineFlow.Infrastructure.Payments.PaymentRefundRequest", "PaymentRefundRequest")
+                        .WithMany("Items")
+                        .HasForeignKey("PaymentRefundRequestId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("PaymentRefundRequest");
+                });
+
             modelBuilder.Entity("DineFlow.Infrastructure.Printing.PrintJob", b =>
                 {
                     b.HasOne("DineFlow.Infrastructure.Orders.Order", "Order")
@@ -2312,6 +2441,11 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Navigation("RefundRequests");
 
                     b.Navigation("Refunds");
+                });
+
+            modelBuilder.Entity("DineFlow.Infrastructure.Payments.PaymentRefundRequest", b =>
+                {
+                    b.Navigation("Items");
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Printing.PrintStation", b =>

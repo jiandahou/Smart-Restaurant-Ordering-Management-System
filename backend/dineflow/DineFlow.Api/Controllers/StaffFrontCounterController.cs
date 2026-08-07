@@ -23,6 +23,7 @@ public sealed class StaffFrontCounterController(
     AppDbContext dbContext,
     UserManager<ApplicationUser> userManager,
     OrderRealtimeNotifier orderRealtimeNotifier,
+    CounterPaymentReversalService counterPaymentReversalService,
     ReportLogWriter reportLogWriter) : ControllerBase
 {
     private static readonly OrderStatus[] ActiveOrderStatuses =
@@ -269,6 +270,109 @@ public sealed class StaffFrontCounterController(
 
         return Ok(MapTableSessionDetail(session));
     }
+
+    /// Voids a counter payment that should never have been taken, putting the order back to unpaid.
+    [HttpPost("payments/{paymentId:guid}/void")]
+    public async Task<ActionResult<FrontCounterSettleOrderResponse>> VoidCounterPayment(
+        Guid paymentId,
+        [FromBody] CounterReversalRequest? request,
+        [FromQuery] Guid? restaurantId,
+        CancellationToken cancellationToken)
+    {
+        var scope = await ResolveRestaurantIdAsync(restaurantId, cancellationToken);
+        if (scope.Error is not null)
+        {
+            return scope.Error;
+        }
+
+        var payment = await LoadTrackedCounterPaymentAsync(paymentId, scope.RestaurantId!.Value, cancellationToken);
+        if (payment?.Order is null)
+        {
+            return NotFound(new { message = "Counter payment not found." });
+        }
+
+        var result = await counterPaymentReversalService.VoidAsync(
+            payment,
+            payment.Order,
+            User.FindFirstValue(ClaimTypes.NameIdentifier),
+            request?.Reason,
+            cancellationToken);
+
+        if (!result.IsSuccess)
+        {
+            return StatusCode(result.StatusCode, new { message = result.Message });
+        }
+
+        return Ok(new FrontCounterSettleOrderResponse
+        {
+            Order = AdminOrdersController.MapToAdminResponse(payment.Order)
+        });
+    }
+
+    /// Records money already handed back at the counter. The system cannot verify this happened,
+    /// so a reason is mandatory and the actor is recorded.
+    [HttpPost("payments/{paymentId:guid}/offline-refund")]
+    public async Task<ActionResult<FrontCounterSettleOrderResponse>> RefundCounterPayment(
+        Guid paymentId,
+        [FromBody] CounterOfflineRefundRequest? request,
+        [FromQuery] Guid? restaurantId,
+        CancellationToken cancellationToken)
+    {
+        var scope = await ResolveRestaurantIdAsync(restaurantId, cancellationToken);
+        if (scope.Error is not null)
+        {
+            return scope.Error;
+        }
+
+        var payment = await LoadTrackedCounterPaymentAsync(paymentId, scope.RestaurantId!.Value, cancellationToken);
+        if (payment?.Order is null)
+        {
+            return NotFound(new { message = "Counter payment not found." });
+        }
+
+        // Defaulting to the whole remaining balance keeps the common "refund the lot" case simple.
+        var refundedSoFar = payment.Refunds
+            .Where(refund => refund.Status == PaymentRefundStatus.Succeeded)
+            .Sum(refund => refund.AmountCents);
+        var amountCents = request?.AmountCents ?? payment.AmountCents - refundedSoFar;
+
+        var result = await counterPaymentReversalService.RefundAsync(
+            payment,
+            payment.Order,
+            amountCents,
+            User.FindFirstValue(ClaimTypes.NameIdentifier),
+            request?.Reason,
+            cancellationToken);
+
+        if (!result.IsSuccess)
+        {
+            return StatusCode(result.StatusCode, new { message = result.Message });
+        }
+
+        return Ok(new FrontCounterSettleOrderResponse
+        {
+            Order = AdminOrdersController.MapToAdminResponse(payment.Order)
+        });
+    }
+
+    private Task<Payment?> LoadTrackedCounterPaymentAsync(
+        Guid paymentId,
+        Guid restaurantId,
+        CancellationToken cancellationToken) =>
+        dbContext.Payments
+            .Include(payment => payment.Refunds)
+            .Include(payment => payment.Order)
+                .ThenInclude(order => order!.OrderItems)
+                    .ThenInclude(item => item.SelectedOptions)
+            .Include(payment => payment.Order)
+                .ThenInclude(order => order!.Restaurant)
+            .Include(payment => payment.Order)
+                .ThenInclude(order => order!.Customer)
+            .Include(payment => payment.Order)
+                .ThenInclude(order => order!.Table)
+            .FirstOrDefaultAsync(
+                payment => payment.Id == paymentId && payment.Order!.RestaurantId == restaurantId,
+                cancellationToken);
 
     [HttpPost("orders/{orderId:guid}/settle-complete")]
     public async Task<ActionResult<FrontCounterSettleOrderResponse>> SettleCompleteOrder(
@@ -642,7 +746,20 @@ public sealed class StaffFrontCounterController(
             CreatedAt = now,
             UpdatedAt = now,
             PaidAt = now,
-            RecordedByUserId = User.FindFirstValue(ClaimTypes.NameIdentifier)
+            RecordedByUserId = User.FindFirstValue(ClaimTypes.NameIdentifier),
+            // Persisted rather than left in audit JSON so cash movements stay reconcilable.
+            TenderType = provider switch
+            {
+                PaymentProviders.CounterCash => "Cash",
+                PaymentProviders.CounterCard => "Card",
+                _ => null
+            },
+            AmountReceivedCents = provider == PaymentProviders.CounterCash
+                ? PricingCalculator.ToMinorCurrencyUnits(amountReceived)
+                : null,
+            ChangeDueCents = provider == PaymentProviders.CounterCash
+                ? PricingCalculator.ToMinorCurrencyUnits(changeDue)
+                : null
         };
         dbContext.Payments.Add(counterPayment);
 

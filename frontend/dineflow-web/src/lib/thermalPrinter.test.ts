@@ -20,6 +20,7 @@ import {
 } from './thermalPrinter'
 
 const sampleTicket: KitchenTicket = {
+  serviceCode: '007',
   orderNumber: 'T-001',
   restaurantName: 'Test Kitchen',
   orderScope: 'Takeaway',
@@ -194,10 +195,25 @@ describe('buildEscPosKitchenTicket', () => {
     expect(buildEscPosKitchenTicket(sampleTicket, { ...baseSettings, beepOnPrint: true })).toContain(escposBeep)
   })
 
-  it('prints the order number double-sized and the scope as a reverse banner', () => {
+  it('prints the called service code double-sized and the scope as a reverse banner', () => {
     const ticket = buildEscPosKitchenTicket(sampleTicket, baseSettings)
-    expect(ticket).toContain(`\x1d!\x11${sampleTicket.orderNumber}\x1d!\x00`)
+    expect(ticket).toContain(`\x1d!\x11${sampleTicket.serviceCode}\x1d!\x00`)
     expect(ticket).toContain(`\x1dB\x01\x1bE\x01 ${sampleTicket.orderScope.toUpperCase()} `)
+  })
+
+  it('keeps the order number in small print so tickets stay reconcilable', () => {
+    const ticket = buildEscPosKitchenTicket(sampleTicket, baseSettings)
+    expect(ticket).toContain('ORDER')
+    expect(ticket).toContain(sampleTicket.orderNumber)
+    // ...but not blown up as the number the kitchen works from.
+    expect(ticket).not.toContain(`\x1d!\x11${sampleTicket.orderNumber}\x1d!\x00`)
+  })
+
+  it('does not print the order number twice when the code fell back to it', () => {
+    const legacy = { ...sampleTicket, serviceCode: sampleTicket.orderNumber }
+    const ticket = buildEscPosKitchenTicket(legacy, baseSettings)
+    expect(ticket).toContain(`\x1d!\x11${legacy.orderNumber}\x1d!\x00`)
+    expect(ticket).not.toContain('ORDER')
   })
 
   it('keeps every control byte in the ASCII range so UTF-8 encoding is byte-safe', () => {

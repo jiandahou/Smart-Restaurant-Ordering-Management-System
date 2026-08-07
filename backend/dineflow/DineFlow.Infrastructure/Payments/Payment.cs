@@ -22,6 +22,50 @@ public class Payment
 
     public long PlatformFeeAmountCents { get; set; }
 
+    /// The charge behind the payment intent. Needed for Stripe dashboard deep links and for
+    /// resolving the balance transaction that carries Stripe's own processing fee.
+    public string? ProviderChargeId { get; set; }
+
+    /// Stripe's processing fee, read from the charge's balance transaction. Null until synced —
+    /// it does not exist until the charge settles.
+    public long? StripeFeeAmountCents { get; set; }
+
+    /// What actually lands in the connected account: amount minus Stripe's fee minus our platform
+    /// fee. Stored as reported by Stripe rather than recomputed, so it always reconciles.
+    public long? NetAmountCents { get; set; }
+
+    /// Stripe's hosted receipt page for the charge. Populated on sync.
+    public string? ProviderReceiptUrl { get; set; }
+
+    /// Where Stripe sent the receipt. Guest checkouts never store an email on the order, so this
+    /// is often the only address we can reach the payer on.
+    public string? ReceiptEmail { get; set; }
+
+    /// Latest dispute state seen for this payment, e.g. "needs_response" / "won" / "lost".
+    public string? DisputeStatus { get; set; }
+
+    public string? DisputeReason { get; set; }
+
+    public DateTime? DisputedAt { get; set; }
+
+    /// Stripe's dispute id, needed to link straight to the dispute rather than the payment.
+    public string? DisputeId { get; set; }
+
+    /// Disputes can be raised for less than the full payment.
+    public long? DisputeAmountCents { get; set; }
+
+    /// Miss this deadline and Stripe closes the dispute against the restaurant automatically, so
+    /// it is the single most operationally urgent thing about a dispute.
+    public DateTime? DisputeEvidenceDueBy { get; set; }
+
+    /// Disputes get their own provider event clock: webhook ordering is not guaranteed and a stale
+    /// dispute.updated must not reopen one that has already closed.
+    public DateTime? LastDisputeEventCreatedAt { get; set; }
+
+    /// When an operator (or the system) last pulled the truth from Stripe, as opposed to
+    /// LastProviderEventCreatedAt which tracks the newest webhook applied.
+    public DateTime? LastSyncedAt { get; set; }
+
     public DateTime? LastProviderEventCreatedAt { get; set; }
 
     public long AmountCents { get; set; }
@@ -41,6 +85,23 @@ public class Payment
     public DateTime? FailedAt { get; set; }
 
     public string? RecordedByUserId { get; set; }
+
+    /// How the counter took the money — "Cash", "Card", or null for online/unspecified. Previously
+    /// this only existed inside audit-log JSON, so cash movements could not be reconciled at all.
+    public string? TenderType { get; set; }
+
+    /// Cash handed over and change given back. Null for card and online payments.
+    public long? AmountReceivedCents { get; set; }
+
+    public long? ChangeDueCents { get; set; }
+
+    /// Set when a counter payment is reversed outright because it should never have been taken,
+    /// as opposed to a refund, which returns money on a payment that was legitimately collected.
+    public DateTime? VoidedAt { get; set; }
+
+    public string? VoidedByUserId { get; set; }
+
+    public string? VoidReason { get; set; }
 
     public ICollection<PaymentRefund> Refunds { get; set; } = [];
 
@@ -68,6 +129,10 @@ public class PaymentRefund
     public string Currency { get; set; } = "aud";
 
     public PaymentRefundStatus Status { get; set; } = PaymentRefundStatus.Pending;
+
+    /// Stripe does not guarantee webhook ordering, so we track the provider event time this row
+    /// was last reconciled from and ignore anything older.
+    public DateTime? LastProviderEventCreatedAt { get; set; }
 
     public string? Reason { get; set; }
 
@@ -127,6 +192,25 @@ public class PaymentRefundRequest
     public Payment? Payment { get; set; }
 
     public PaymentRefund? PaymentRefund { get; set; }
+
+    public ICollection<PaymentRefundRequestItem> Items { get; set; } = [];
+}
+
+public class PaymentRefundRequestItem
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public Guid PaymentRefundRequestId { get; set; }
+
+    public Guid OrderItemId { get; set; }
+
+    public string MenuItemNameSnapshot { get; set; } = string.Empty;
+
+    public int Quantity { get; set; }
+
+    public long AmountCents { get; set; }
+
+    public PaymentRefundRequest? PaymentRefundRequest { get; set; }
 }
 
 public enum PaymentStatus

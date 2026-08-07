@@ -17,6 +17,8 @@ using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
@@ -75,6 +77,26 @@ builder.Services.AddScoped<MenuItemStockService>();
 builder.Services.AddScoped<OrderAutoAcceptanceService>();
 builder.Services.AddScoped<OrderRefundProcessor>();
 builder.Services.AddScoped<StripeOrderCheckoutService>();
+builder.Services.AddScoped<PaymentSyncService>();
+builder.Services.AddScoped<PaymentNotificationService>();
+builder.Services.AddScoped<CounterPaymentReversalService>();
+
+// Defence in depth for the unauthenticated guest endpoints: even with tokens required, an
+// attacker holding a leaked order id should not get unlimited attempts, and the lookup accepts a
+// batch of ids per call.
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy(RateLimitPolicies.GuestOrderAccess, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+});
 builder.Services.AddScoped<ReportLogWriter>();
 builder.Services.AddScoped<AdminActivityReportService>();
 builder.Services.AddScoped<TableSessionService>();
@@ -419,6 +441,7 @@ app.UseStaticFiles(new StaticFileOptions
 });
 
 app.UseCors(FrontendCorsPolicy);
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 

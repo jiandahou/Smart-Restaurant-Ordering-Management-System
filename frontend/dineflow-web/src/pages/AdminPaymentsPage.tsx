@@ -35,6 +35,8 @@ import {
   getRestaurants,
   rejectAdminRefundRequest,
   refundAdminOrder,
+  syncAdminPayment,
+  resendAdminPaymentReceipt,
   type AdminOrder,
   type AdminOrderSummary,
   type AdminRefund,
@@ -47,9 +49,11 @@ import {
 import { useAuth } from '../auth/AuthContext'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
 import { ApproveRefundRequestDialog } from '../components/orders/ApproveRefundRequestDialog'
-import { OrderRefundDialog } from '../components/orders/OrderRefundDialog'
+import { OrderRefundDialog, type RefundMode } from '../components/orders/OrderRefundDialog'
+import { parseRefundAmountCents } from '../components/orders/refundAmount'
 import { OrderStatusBadge, getOrderStatusLabel, orderStatusOptions } from '../components/orders/OrderStatusBadge'
 import { PaymentRefundHistory } from '../components/orders/PaymentRefundHistory'
+import { PaymentSettlementPanel } from '../components/orders/PaymentSettlementPanel'
 import { PaymentStatusBadge, getPaymentStatusLabel, paymentStatusOptions } from '../components/orders/PaymentStatusBadge'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
@@ -74,7 +78,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Textarea } from '../components/ui/textarea'
 import { HorizontalTableScroll } from '../components/HorizontalTableScroll'
-import { isOrderPayable } from '../lib/orderStats'
+import { isOrderPayable, payablePaymentStatuses as payablePaymentStatusList } from '../lib/orderStats'
 import { canRefundOrder } from '../lib/paymentRefunds'
 
 type SortKey =
@@ -98,7 +102,9 @@ const orderTypeOptions = ['DineIn', 'Takeaway', 'Scheduled']
  * clause — combining that preset with any status outside this list yields a query that can never
  * match, which silently emptied the list.
  */
-const payablePaymentStatuses: readonly string[] = ['Pending', 'Unpaid', 'Failed', 'Cancelled', 'Expired']
+// Single source of truth, shared with isOrderPayable — these had drifted apart, which is how
+// refunded orders ended up being offered a Checkout button.
+const payablePaymentStatuses: readonly string[] = payablePaymentStatusList
 const refundStatusOptions = ['Pending', 'Succeeded', 'Failed'] as const
 const refundRequestStatusOptions = ['Pending', 'Processing', 'Approved', 'Rejected', 'Cancelled'] as const
 const refundStatusClasses: Partial<Record<typeof refundStatusOptions[number], string>> = {
@@ -318,12 +324,18 @@ export function AdminPaymentsPage() {
   const [exporting, setExporting] = useState(false)
   const [submittingOrderId, setSubmittingOrderId] = useState<string | null>(null)
   const [refundingOrderId, setRefundingOrderId] = useState<string | null>(null)
+  const [syncingPaymentId, setSyncingPaymentId] = useState<string | null>(null)
+  const [resendingReceiptPaymentId, setResendingReceiptPaymentId] = useState<string | null>(null)
   const [reviewingRefundRequestId, setReviewingRefundRequestId] = useState<string | null>(null)
   const [pendingRefundOrder, setPendingRefundOrder] = useState<AdminOrder | null>(null)
   const [approvingRefundRequest, setApprovingRefundRequest] = useState<AdminRefundRequest | null>(null)
   const [rejectingRefundRequest, setRejectingRefundRequest] = useState<AdminRefundRequest | null>(null)
   const [refundReason, setRefundReason] = useState('')
+  const [refundMode, setRefundMode] = useState<RefundMode>('full')
+  const [refundAmount, setRefundAmount] = useState('')
   const [refundApprovalNote, setRefundApprovalNote] = useState('')
+  const [refundApprovalMode, setRefundApprovalMode] = useState<RefundMode>('full')
+  const [refundApprovalAmount, setRefundApprovalAmount] = useState('')
   const [refundApprovalConfirmation, setRefundApprovalConfirmation] = useState('')
   const [refundRequestRejectNote, setRefundRequestRejectNote] = useState('')
   const [search, setSearch] = useState(initialUrlState.search)
@@ -867,6 +879,50 @@ export function AdminPaymentsPage() {
     }
   }
 
+  const syncPayment = async (order: AdminOrder) => {
+    const payment = order.latestPayment
+    if (!payment) {
+      return
+    }
+
+    setSyncingPaymentId(payment.id)
+    try {
+      const synced = await syncAdminPayment(payment.id)
+      setOrders((current) => current.map((item) => (
+        item.id === order.id ? { ...item, latestPayment: synced, paymentStatus: synced.status } : item
+      )))
+      toast.success('Synced from Stripe', {
+        description: `${order.orderNumber} is now ${synced.status}.`,
+      })
+      await loadOrders()
+    } catch (error) {
+      toast.error('Could not sync from Stripe', {
+        description: error instanceof Error ? error.message : 'Stripe could not be reached.',
+      })
+    } finally {
+      setSyncingPaymentId(null)
+    }
+  }
+
+  const resendReceipt = async (order: AdminOrder) => {
+    const payment = order.latestPayment
+    if (!payment) {
+      return
+    }
+
+    setResendingReceiptPaymentId(payment.id)
+    try {
+      const result = await resendAdminPaymentReceipt(payment.id)
+      toast.success('Receipt sent', { description: result.message })
+    } catch (error) {
+      toast.error('Could not send receipt', {
+        description: error instanceof Error ? error.message : 'The receipt could not be sent.',
+      })
+    } finally {
+      setResendingReceiptPaymentId(null)
+    }
+  }
+
   const submitRefund = async () => {
     if (!pendingRefundOrder) {
       return
@@ -877,6 +933,7 @@ export function AdminPaymentsPage() {
     try {
       const updatedOrder = await refundAdminOrder(pendingRefundOrder.id, {
         reason: refundReason.trim() || undefined,
+        amountCents: refundMode === 'full' ? undefined : (parseRefundAmountCents(refundAmount) ?? undefined),
       })
       setOrders((current) => current.map((item) => item.id === updatedOrder.id ? updatedOrder : item))
       await loadOrders()
@@ -885,6 +942,8 @@ export function AdminPaymentsPage() {
       })
       setPendingRefundOrder(null)
       setRefundReason('')
+      setRefundMode('full')
+      setRefundAmount('')
     } catch (error) {
       toast.error('Could not refund payment', {
         description: error instanceof Error ? error.message : 'Stripe refund failed',
@@ -900,6 +959,7 @@ export function AdminPaymentsPage() {
     try {
       await approveAdminRefundRequest(refundRequest.id, {
         note: refundApprovalNote.trim() || undefined,
+        amountCents: refundApprovalMode === 'full' ? undefined : (parseRefundAmountCents(refundApprovalAmount) ?? undefined),
       })
       await Promise.all([loadRefundRequests(), loadOrders()])
       toast.success('Refund request approved', {
@@ -907,6 +967,8 @@ export function AdminPaymentsPage() {
       })
       setApprovingRefundRequest(null)
       setRefundApprovalNote('')
+      setRefundApprovalMode('full')
+      setRefundApprovalAmount('')
       setRefundApprovalConfirmation('')
     } catch (error) {
       toast.error('Could not approve refund request', {
@@ -979,6 +1041,8 @@ export function AdminPaymentsPage() {
           onClick={(event) => {
             event.stopPropagation()
             setRefundReason('')
+            setRefundMode('full')
+            setRefundAmount(((order.latestPayment?.refundableAmountCents ?? 0) / 100).toFixed(2))
             setPendingRefundOrder(order)
           }}
           disabled={loading || submittingOrderId !== null || refundingOrderId !== null}
@@ -1066,6 +1130,15 @@ export function AdminPaymentsPage() {
           <span>Created</span>
           <strong>{formatDate(order.createdAt)}</strong>
         </div>
+        <PaymentSettlementPanel
+          payment={order.latestPayment}
+          fallbackCurrency={order.currency}
+          isLiveMode={paymentEnvironment?.mode === 'Live'}
+          syncing={syncingPaymentId === order.latestPayment?.id}
+          resendingReceipt={resendingReceiptPaymentId === order.latestPayment?.id}
+          onSync={() => void syncPayment(order)}
+          onResendReceipt={() => void resendReceipt(order)}
+        />
         <PaymentRefundHistory payment={order.latestPayment} fallbackCurrency={order.currency} />
       </section>
     </div>
@@ -1086,6 +1159,8 @@ export function AdminPaymentsPage() {
           size="sm"
           onClick={() => {
             setRefundApprovalNote('')
+            setRefundApprovalMode('full')
+            setRefundApprovalAmount((Math.min(refundRequest.requestedAmountCents, refundRequest.refundableAmountCents) / 100).toFixed(2))
             setRefundApprovalConfirmation('')
             setApprovingRefundRequest(refundRequest)
           }}
@@ -2212,14 +2287,20 @@ export function AdminPaymentsPage() {
         request={approvingRefundRequest}
         environmentMode={paymentEnvironment?.mode ?? null}
         note={refundApprovalNote}
+        mode={refundApprovalMode}
+        amount={refundApprovalAmount}
         confirmation={refundApprovalConfirmation}
         submitting={reviewingRefundRequestId !== null}
         onNoteChange={setRefundApprovalNote}
+        onModeChange={setRefundApprovalMode}
+        onAmountChange={setRefundApprovalAmount}
         onConfirmationChange={setRefundApprovalConfirmation}
         onOpenChange={(open) => {
           if (!open && reviewingRefundRequestId === null) {
             setApprovingRefundRequest(null)
             setRefundApprovalNote('')
+            setRefundApprovalMode('full')
+            setRefundApprovalAmount('')
             setRefundApprovalConfirmation('')
           }
         }}
@@ -2283,12 +2364,18 @@ export function AdminPaymentsPage() {
       <OrderRefundDialog
         order={pendingRefundOrder}
         reason={refundReason}
+        mode={refundMode}
+        amount={refundAmount}
         submitting={refundingOrderId !== null}
         onReasonChange={setRefundReason}
+        onModeChange={setRefundMode}
+        onAmountChange={setRefundAmount}
         onOpenChange={(open) => {
           if (!open && refundingOrderId === null) {
             setPendingRefundOrder(null)
             setRefundReason('')
+            setRefundMode('full')
+            setRefundAmount('')
           }
         }}
         onConfirm={() => void submitRefund()}

@@ -49,4 +49,15 @@ public sealed class AdminRefundRequestResponse
     public DateTime? UpdatedAt { get; set; }
 
     public DateTime? ReviewedAt { get; set; }
+
+    public List<AdminRefundRequestItemResponse> Items { get; set; } = [];
+}
+
+public sealed class AdminRefundRequestItemResponse
+{
+    public string MenuItemNameSnapshot { get; set; } = string.Empty;
+
+    public int Quantity { get; set; }
+
+    public long AmountCents { get; set; }
 }

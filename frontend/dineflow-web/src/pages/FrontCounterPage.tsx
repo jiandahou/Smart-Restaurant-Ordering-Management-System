@@ -16,6 +16,7 @@ import {
   Search,
   ShieldAlert,
   ShoppingBag,
+  Undo2,
   Table2,
   Utensils,
   UserRound,
@@ -29,6 +30,8 @@ import {
   getFrontCounterTakeaway,
   getRestaurants,
   recordFrontCounterPayment,
+  voidCounterPayment,
+  refundCounterPayment,
   settleCompleteFrontCounterTableSession,
   type AdminOrder,
   type FrontCounterTender,
@@ -53,12 +56,14 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { createOrderRealtimeClient, type OrderRealtimeUpdate } from '@/realtime/orderConnection'
 import { useRestaurantPrinting } from '@/printing/RestaurantPrintingContext'
 import type { KitchenTicket } from '@/lib/thermalPrinter'
+import { formatServiceCode } from '@/lib/serviceCode'
 import {
   getFrontCounterActionLabel,
   getFrontCounterAmountDue,
@@ -149,7 +154,31 @@ function formatDateTime(value: string | null) {
 }
 
 function getOrderDisplayCode(order: AdminOrder) {
-  return order.pickupCode || order.orderNumber
+  return formatServiceCode(order)
+}
+
+const counterProviders = new Set(['Counter', 'CounterCash', 'CounterCard'])
+
+/**
+ * Mirrors CounterPaymentPolicy on the backend. A clean counter payment can be voided outright;
+ * once anything has been refunded against it the only honest action left is another refund.
+ */
+function getCounterReversalMode(order: AdminOrder): 'void' | 'refund' | null {
+  const payment = order.latestPayment
+  if (!payment || !counterProviders.has(payment.provider)) {
+    return null
+  }
+
+  if (payment.status === 'Paid' && payment.refundCount === 0) {
+    return 'void'
+  }
+
+  if ((payment.status === 'Paid' || payment.status === 'PartiallyRefunded')
+    && payment.refundableAmountCents > 0) {
+    return 'refund'
+  }
+
+  return null
 }
 
 function shiftIsoDate(isoDate: string, days: number) {
@@ -317,6 +346,10 @@ export function FrontCounterPage() {
   const [receiptPrintTarget, setReceiptPrintTarget] = useState<ReceiptPrintTarget | null>(null)
   const [lastReceiptTarget, setLastReceiptTarget] = useState<ReceiptPrintTarget | null>(null)
   const [pendingSettlement, setPendingSettlement] = useState<PendingSettlement | null>(null)
+  const [pendingReversal, setPendingReversal] = useState<
+    { order: AdminOrder; mode: 'void' | 'refund' } | null
+  >(null)
+  const [reversalReason, setReversalReason] = useState('')
   const [tender, setTender] = useState<FrontCounterTender>('Card')
   const [cashReceived, setCashReceived] = useState('')
   const refreshRef = useRef<() => Promise<void>>(() => Promise.resolve())
@@ -600,6 +633,48 @@ export function FrontCounterPage() {
     setCashReceived('')
     setPendingSettlement({ kind: 'order', order, action })
   }, [])
+
+  const requestCounterReversal = useCallback((order: AdminOrder) => {
+    const mode = getCounterReversalMode(order)
+    if (!mode) {
+      return
+    }
+
+    setReversalReason('')
+    setPendingReversal({ order, mode })
+  }, [])
+
+  const confirmCounterReversal = useCallback(async () => {
+    if (!pendingReversal) return
+
+    const { order, mode } = pendingReversal
+    const payment = order.latestPayment
+    if (!payment) return
+
+    setBusyOrderId(order.id)
+    try {
+      const reason = reversalReason.trim()
+      if (mode === 'void') {
+        await voidCounterPayment(payment.id, { reason }, restaurantParams)
+        toast.success('Payment voided', {
+          description: `${getOrderDisplayCode(order)} is payable again.`,
+        })
+      } else {
+        await refundCounterPayment(payment.id, { reason }, restaurantParams)
+        toast.success('Offline refund recorded', {
+          description: `${formatMoney(payment.refundableAmountCents / 100, order.currency)} for ${getOrderDisplayCode(order)}.`,
+        })
+      }
+      setPendingReversal(null)
+      await loadFrontCounter()
+    } catch (reversalError) {
+      toast.error('Counter reversal failed', {
+        description: reversalError instanceof Error ? reversalError.message : 'The request failed.',
+      })
+    } finally {
+      setBusyOrderId(null)
+    }
+  }, [loadFrontCounter, pendingReversal, restaurantParams, reversalReason])
 
   const requestTableSettlement = useCallback((table: FrontCounterTableDetail) => {
     if (!table.activeSessionId) {
@@ -1005,6 +1080,7 @@ export function FrontCounterPage() {
                         busy={busyOrderId === order.id}
                         onSettle={() => requestOrderSettlement(order)}
                         onOpenTable={() => openTableForOrder(order)}
+                        onReverse={() => requestCounterReversal(order)}
                         onPrint={() => queueReceiptPrint({
                           kind: 'order',
                           order,
@@ -1236,6 +1312,81 @@ export function FrontCounterPage() {
         </TabsContent>
       </Tabs>
 
+      <Dialog
+        open={pendingReversal !== null}
+        onOpenChange={(open) => {
+          if (!open && busyOrderId === null) {
+            setPendingReversal(null)
+            setReversalReason('')
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {pendingReversal?.mode === 'void' ? 'Void counter payment' : 'Record offline refund'}
+            </DialogTitle>
+            <DialogDescription>
+              {pendingReversal?.mode === 'void'
+                ? `${pendingReversal ? getOrderDisplayCode(pendingReversal.order) : ''} will go back to unpaid so it can be collected again. Use this only when the payment was taken in error.`
+                : `Record money you have already handed back for ${pendingReversal ? getOrderDisplayCode(pendingReversal.order) : ''}. This does not move any money by itself.`}
+            </DialogDescription>
+          </DialogHeader>
+
+          {pendingReversal?.mode === 'refund' && pendingReversal.order.latestPayment ? (
+            <p className="front-counter-reversal-amount">
+              Refunding{' '}
+              <strong>
+                {formatMoney(
+                  pendingReversal.order.latestPayment.refundableAmountCents / 100,
+                  pendingReversal.order.currency,
+                )}
+              </strong>
+            </p>
+          ) : null}
+
+          <div className="space-y-2">
+            <Label htmlFor="counter-reversal-reason">Reason (required)</Label>
+            <Textarea
+              id="counter-reversal-reason"
+              rows={3}
+              value={reversalReason}
+              onChange={(event) => setReversalReason(event.target.value)}
+              placeholder="Why is this being reversed?"
+              maxLength={1000}
+              disabled={busyOrderId !== null}
+            />
+            <p className="text-xs text-muted-foreground">
+              This is recorded against your account. The system cannot verify an offline reversal,
+              so the reason is the audit trail.
+            </p>
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busyOrderId !== null}
+              onClick={() => {
+                setPendingReversal(null)
+                setReversalReason('')
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={busyOrderId !== null || reversalReason.trim() === ''}
+              onClick={() => void confirmCounterReversal()}
+            >
+              {busyOrderId !== null ? <Loader2 size={16} className="animate-spin" /> : <Undo2 size={16} />}
+              {pendingReversal?.mode === 'void' ? 'Void payment' : 'Record refund'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={pendingSettlement !== null} onOpenChange={(open) => {
         if (!open && busyOrderId === null && busySessionId === null) {
           setPendingSettlement(null)
@@ -1414,6 +1565,7 @@ function FrontCounterOrderCard({
   busy,
   onSettle,
   onOpenTable,
+  onReverse,
   onPrint,
 }: {
   order: AdminOrder
@@ -1421,8 +1573,10 @@ function FrontCounterOrderCard({
   busy: boolean
   onSettle: () => void
   onOpenTable: () => void
+  onReverse: () => void
   onPrint: () => void
 }) {
+  const counterReversal = getCounterReversalMode(order)
   const blockReason = getFrontCounterBlockReason(order)
   const action = getFrontCounterOrderAction(order)
   const isDineIn = order.orderType === 'DineIn'
@@ -1545,6 +1699,18 @@ function FrontCounterOrderCard({
               Open table
             </Button>
           )}
+          {counterReversal ? (
+            <Button
+              type="button"
+              variant="outline"
+              className="front-counter-reverse-button"
+              disabled={busy}
+              onClick={onReverse}
+            >
+              <Undo2 size={16} />
+              {counterReversal === 'void' ? 'Void payment' : 'Refund'}
+            </Button>
+          ) : null}
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -1870,9 +2036,8 @@ function buildReceipt(target: ReceiptPrintTarget, printedAt: Date) {
       || order.paymentStatus === 'Paid'
       || order.paymentStatus === 'PartiallyRefunded'
       || order.paymentStatus === 'NotRequired'
-    const code = order.orderType === 'DineIn' && order.tableNumber
-      ? `Table ${order.tableNumber}`
-      : getOrderDisplayCode(order)
+    // Dine-in used to print just "Table P2", which left the receipt with no called number at all.
+    const code = getOrderDisplayCode(order)
 
     return {
       title: order.orderType === 'Takeaway' ? 'Pickup receipt' : 'Counter receipt',
@@ -1949,7 +2114,9 @@ function createFrontCounterThermalTicket(
   const createdAt = createdAtValue ? new Date(createdAtValue) : printedAt
 
   return {
-    orderNumber: receipt.code,
+    serviceCode: receipt.code,
+    // Table bills span several orders, so there is no single order number to reconcile against.
+    orderNumber: target.kind === 'order' ? target.order.orderNumber : receipt.code,
     restaurantName: receipt.restaurantName,
     orderScope: receipt.title,
     status,

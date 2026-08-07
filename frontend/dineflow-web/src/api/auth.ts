@@ -657,6 +657,23 @@ export type AdminOrderPayment = {
   currency: string
   providerCheckoutSessionId: string | null
   providerPaymentIntentId: string | null
+  providerChargeId: string | null
+  stripeAccountId: string | null
+  platformFeeAmountCents: number
+  /** Null until the payment is synced — Stripe's fee only exists once the charge settles. */
+  stripeFeeAmountCents: number | null
+  netAmountCents: number | null
+  providerReceiptUrl: string | null
+  receiptEmail: string | null
+  disputeId: string | null
+  disputeStatus: string | null
+  disputeAmountCents: number | null
+  /** Miss this and Stripe closes the dispute against the restaurant automatically. */
+  disputeEvidenceDueBy: string | null
+  disputeReason: string | null
+  disputedAt: string | null
+  lastProviderEventCreatedAt: string | null
+  lastSyncedAt: string | null
   failureReason: string | null
   refundCount: number
   refundedAmountCents: number
@@ -826,7 +843,11 @@ export type CustomerOrderItem = {
   orderId: string
   menuItemId: string | null
   itemNameSnapshot: string
+  imageUrl: string | null
   quantity: number
+  refundedQuantity: number
+  refundedAmountCents: number
+  refundableAmountCents: number
   unitPrice: number
   totalPrice: number
   note: string | null
@@ -865,7 +886,14 @@ export type CustomerOrder = {
   createdAt: string
   updatedAt: string | null
   latestRefundRequest: CustomerRefundRequest | null
+  refundBalance: OrderRefundBalance
   orderItems: CustomerOrderItem[]
+}
+
+export type OrderRefundBalance = {
+  alreadyRefundedAmountCents: number
+  refundableAmountCents: number
+  unattributedRefundedAmountCents: number
 }
 
 export type CustomerRefundRequestStatus = 'Pending' | 'Processing' | 'Approved' | 'Rejected' | 'Cancelled'
@@ -875,12 +903,21 @@ export type CustomerRefundRequest = {
   orderId: string
   status: CustomerRefundRequestStatus
   requestedAmountCents: number
+  refundedAmountCents: number | null
+  refundStatus: 'Pending' | 'Succeeded' | 'Failed' | null
   currency: string
   reason: string | null
   adminNote: string | null
   createdAt: string
   updatedAt: string | null
   reviewedAt: string | null
+  items: CustomerRefundRequestItem[]
+}
+
+export type CustomerRefundRequestItem = {
+  menuItemNameSnapshot: string
+  quantity: number
+  amountCents: number
 }
 
 export type PagedResponse<T> = {
@@ -1136,6 +1173,13 @@ export type AdminRefundRequest = {
   createdAt: string
   updatedAt: string | null
   reviewedAt: string | null
+  items: AdminRefundRequestItem[]
+}
+
+export type AdminRefundRequestItem = {
+  menuItemNameSnapshot: string
+  quantity: number
+  amountCents: number
 }
 
 export type AdminOrderSummary = {
@@ -1188,16 +1232,33 @@ export type CreateCheckoutSessionResponse = {
 
 export type RefundOrderRequest = {
   reason?: string
+  amountCents?: number
 }
 
 export type CreateCustomerRefundRequest = {
   reason?: string
   customerName?: string
   customerEmail?: string
+  items: CreateRefundRequestItemInput[]
+  /** Required for orders placed without signing in. */
+  guestAccessToken?: string
+}
+
+export type CreateRefundRequestItemInput = {
+  orderItemId: string
+  quantity: number
+  amountCents: number
+}
+
+export type CancelCustomerOrderRequest = {
+  reason?: string
+  /** Required for orders placed without signing in. */
+  guestAccessToken?: string
 }
 
 export type ReviewRefundRequestRequest = {
   note?: string
+  amountCents?: number
 }
 
 type PublicKeyCredentialDescriptorJson = Omit<PublicKeyCredentialDescriptor, 'id'> & {
@@ -2194,6 +2255,30 @@ export function recordFrontCounterPayment(
   )
 }
 
+/** Cancels a counter payment taken in error; the order goes back to unpaid so it can be re-collected. */
+export function voidCounterPayment(
+  paymentId: string,
+  payload: { reason: string },
+  params: { restaurantId?: string } = {},
+) {
+  return request<FrontCounterSettleOrderResponse>(
+    `/api/staff/front-counter/payments/${paymentId}/void${toQueryString(params)}`,
+    { method: 'POST', body: JSON.stringify(payload) },
+  )
+}
+
+/** Records money already handed back at the counter. Omit amountCents to refund the remainder. */
+export function refundCounterPayment(
+  paymentId: string,
+  payload: { reason: string; amountCents?: number },
+  params: { restaurantId?: string } = {},
+) {
+  return request<FrontCounterSettleOrderResponse>(
+    `/api/staff/front-counter/payments/${paymentId}/offline-refund${toQueryString(params)}`,
+    { method: 'POST', body: JSON.stringify(payload) },
+  )
+}
+
 export function completeFrontCounterOrder(orderId: string, params: { restaurantId?: string } = {}) {
   return request<FrontCounterSettleOrderResponse>(
     `/api/staff/front-counter/orders/${orderId}/complete${toQueryString(params)}`,
@@ -2217,6 +2302,16 @@ export function settleCompleteFrontCounterTableSession(
   )
 }
 
+/** Pulls authoritative state from Stripe — recovery for payments stranded by a dropped webhook. */
+export function syncAdminPayment(paymentId: string) {
+  return request<AdminPayment>(`/api/payments/${paymentId}/sync`, { method: 'POST' })
+}
+
+/** Staff-initiated: Stripe only emails the receipt once, and only in live mode. */
+export function resendAdminPaymentReceipt(paymentId: string) {
+  return request<{ message: string }>(`/api/payments/${paymentId}/receipt/resend`, { method: 'POST' })
+}
+
 export function refundAdminOrder(orderId: string, payload: RefundOrderRequest = {}) {
   return request<AdminOrder>(`/api/admin/orders/${orderId}/refund`, {
     method: 'POST',
@@ -2224,8 +2319,15 @@ export function refundAdminOrder(orderId: string, payload: RefundOrderRequest = 
   })
 }
 
-export function requestCustomerRefund(orderId: string, payload: CreateCustomerRefundRequest = {}) {
+export function requestCustomerRefund(orderId: string, payload: CreateCustomerRefundRequest = { items: [] }) {
   return request<CustomerRefundRequest>(`/api/order/${orderId}/refund-requests`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function cancelCustomerOrder(orderId: string, payload: CancelCustomerOrderRequest = {}) {
+  return request<CustomerOrder>(`/api/order/${orderId}/cancel`, {
     method: 'POST',
     body: JSON.stringify(payload),
   })
@@ -2246,10 +2348,11 @@ export function getMyOrders() {
   return request<CustomerOrder[]>('/api/order/mine')
 }
 
-export function getGuestOrders(orderIds: string[]) {
+/** Each order must be paired with the token issued at checkout; the id alone is not a credential. */
+export function getGuestOrders(orders: { orderId: string; guestAccessToken: string | null }[]) {
   return request<CustomerOrder[]>('/api/order/guest', {
     method: 'POST',
-    body: JSON.stringify({ orderIds }),
+    body: JSON.stringify({ orders }),
   })
 }
 

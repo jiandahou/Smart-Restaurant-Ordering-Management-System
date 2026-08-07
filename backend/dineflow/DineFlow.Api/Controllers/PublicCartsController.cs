@@ -684,13 +684,22 @@ public class PublicCartsController(
             .ToDictionaryAsync(item => item.Id, cancellationToken);
 
         var now = DateTime.UtcNow;
+        var orderCustomerId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? access.Participant?.CustomerId;
+
+        // Only orders with nobody signed in behind them need a bearer secret; for everyone else the
+        // account itself is the credential.
+        var guestAccess = string.IsNullOrWhiteSpace(orderCustomerId)
+            ? GuestAccessTokenService.Issue()
+            : default((string Token, string Hash)?);
+
         var order = new Order
         {
             Id = Guid.NewGuid(),
             RestaurantId = cart.RestaurantId,
             TableId = cart.TableId,
             TableSessionId = tableSession?.Id,
-            CustomerId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? access.Participant?.CustomerId,
+            CustomerId = orderCustomerId,
+            GuestAccessTokenHash = guestAccess?.Hash,
             OrderNumber = await GenerateOrderNumberAsync(cancellationToken),
             OrderType = cart.OrderType,
             Status = OrderStatus.Pending,
@@ -838,7 +847,9 @@ public class PublicCartsController(
         return Ok(new CheckoutCartResponse
         {
             Message = "Order submitted.",
-            Order = orderResponse
+            Order = orderResponse,
+            // The one and only time the plaintext leaves the server.
+            GuestAccessToken = guestAccess?.Token
         });
     }
 
@@ -1529,9 +1540,14 @@ public class PublicCartsController(
             return $"/table/{Uri.EscapeDataString(order.Table.QrToken)}";
         }
 
-        return order.RestaurantId.HasValue
-            ? $"/r/{Uri.EscapeDataString(order.RestaurantId.Value.ToString())}/menu"
-            : "/";
+        if (!order.RestaurantId.HasValue)
+        {
+            return "/";
+        }
+
+        var menuPath = $"/r/{Uri.EscapeDataString(order.RestaurantId.Value.ToString())}/menu";
+        var orderType = order.OrderType == OrderType.DineIn ? "DineIn" : "Takeaway";
+        return QueryHelpers.AddQueryString(menuPath, "orderType", orderType);
     }
 
     private static string AddReturnTo(string url, string returnPath)

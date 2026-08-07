@@ -145,6 +145,18 @@ public sealed class FrontCounterSettleOrderResponse
     public AdminOrderResponse Order { get; set; } = new();
 }
 
+public class CounterReversalRequest
+{
+    /// Mandatory. The system cannot verify an offline reversal, so the reason is the control.
+    public string? Reason { get; set; }
+}
+
+public sealed class CounterOfflineRefundRequest : CounterReversalRequest
+{
+    /// Null refunds the whole remaining balance.
+    public long? AmountCents { get; set; }
+}
+
 public sealed class FrontCounterRecordPaymentRequest
 {
     public string Tender { get; set; } = "Card";

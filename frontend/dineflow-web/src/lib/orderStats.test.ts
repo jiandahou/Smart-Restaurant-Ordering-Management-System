@@ -49,4 +49,18 @@ describe('payment eligibility', () => {
     expect(isOrderPayable(createOrder({ paymentStatus: 'Paid' }))).toBe(false)
     expect(isOrderPayable(createOrder({ status: 'Cancelled' }))).toBe(false)
   })
+
+  it('never offers checkout on money that already moved', () => {
+    // These used to slip through the old deny-list and rendered a Checkout button the backend
+    // then refused.
+    expect(isOrderPayable(createOrder({ paymentStatus: 'Refunded' }))).toBe(false)
+    expect(isOrderPayable(createOrder({ paymentStatus: 'PartiallyRefunded' }))).toBe(false)
+    expect(isOrderPayable(createOrder({ paymentStatus: 'NotRequired' }))).toBe(false)
+  })
+
+  it('allows the recoverable online payment states', () => {
+    for (const paymentStatus of ['Pending', 'Unpaid', 'Failed', 'Cancelled', 'Expired'] as const) {
+      expect(isOrderPayable(createOrder({ paymentStatus }))).toBe(true)
+    }
+  })
 })
