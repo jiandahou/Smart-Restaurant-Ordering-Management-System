@@ -16,6 +16,21 @@ public class Restaurant
 
     public string Phone { get; set; } = string.Empty;
 
+    public string LegalBusinessName { get; set; } = string.Empty;
+
+    public string? Abn { get; set; }
+
+    public bool GstRegistered { get; set; }
+
+    public bool PricesIncludeGst { get; set; } = true;
+
+    public string BusinessContactEmail { get; set; } = string.Empty;
+
+    public string RefundContactEmail { get; set; } = string.Empty;
+
+    /// <summary>Customer-facing disclosure only. DineFlow does not currently calculate surcharges.</summary>
+    public string? CustomerSurchargeNotice { get; set; }
+
     public string? ImageUrl { get; set; }
 
     public string CountryCode { get; set; } = "AU";

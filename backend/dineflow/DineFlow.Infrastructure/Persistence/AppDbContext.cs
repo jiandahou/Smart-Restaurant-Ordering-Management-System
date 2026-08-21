@@ -9,6 +9,7 @@ using DineFlow.Infrastructure.Printing;
 using DineFlow.Infrastructure.Reporting;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using DineFlow.Infrastructure.Messaging;
 
 namespace DineFlow.Infrastructure.Persistence;
 
@@ -17,6 +18,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<Cart> Carts => Set<Cart>();
     public DbSet<CartItem> CartItems => Set<CartItem>();
     public DbSet<CartParticipant> CartParticipants => Set<CartParticipant>();
+    public DbSet<CartMutation> CartMutations => Set<CartMutation>();
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
     public DbSet<OrderItemOption> OrderItemOptions => Set<OrderItemOption>();
@@ -26,21 +28,25 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<MenuItem> MenuItems => Set<MenuItem>();
     public DbSet<MenuItemOptionGroup> MenuItemOptionGroups => Set<MenuItemOptionGroup>();
     public DbSet<MenuItemOption> MenuItemOptions => Set<MenuItemOption>();
+    public DbSet<OutboxEmail> OutboxEmails => Set<OutboxEmail>();
     public DbSet<RestaurantTable> RestaurantTables => Set<RestaurantTable>();
     public DbSet<TableSession> TableSessions => Set<TableSession>();
     public DbSet<RestaurantEntity> Restaurants => Set<RestaurantEntity>();
 
     public DbSet<Payment> Payments => Set<Payment>();
     public DbSet<PaymentRefund> PaymentRefunds => Set<PaymentRefund>();
+    public DbSet<PaymentRefundItem> PaymentRefundItems => Set<PaymentRefundItem>();
     public DbSet<PaymentRefundRequest> PaymentRefundRequests => Set<PaymentRefundRequest>();
     public DbSet<PaymentRefundRequestItem> PaymentRefundRequestItems => Set<PaymentRefundRequestItem>();
     public DbSet<StripeWebhookEvent> StripeWebhookEvents => Set<StripeWebhookEvent>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<OrderEventLog> OrderEventLogs => Set<OrderEventLog>();
     public DbSet<PaymentEventLog> PaymentEventLogs => Set<PaymentEventLog>();
+    public DbSet<LegalHold> LegalHolds => Set<LegalHold>();
     public DbSet<UserPasskey> UserPasskeys => Set<UserPasskey>();
     public DbSet<UserMfaSettings> UserMfaSettings => Set<UserMfaSettings>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
+    public DbSet<PrivacyRequest> PrivacyRequests => Set<PrivacyRequest>();
     public DbSet<PrintJob> PrintJobs => Set<PrintJob>();
     public DbSet<PrintStation> PrintStations => Set<PrintStation>();
 
@@ -61,6 +67,22 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
+
+        builder.Entity<OutboxEmail>(entity =>
+        {
+            entity.Property(email => email.IdempotencyKey).HasMaxLength(200).IsRequired();
+            entity.Property(email => email.Category).HasMaxLength(64).IsRequired();
+            entity.Property(email => email.Recipient).HasMaxLength(320).IsRequired();
+            entity.Property(email => email.Subject).HasMaxLength(300).IsRequired();
+            entity.Property(email => email.LastError).HasMaxLength(2000);
+
+            // The whole point of the key: a redelivered webhook or a double-clicked button decides
+            // the same email twice, and the customer should get it once.
+            entity.HasIndex(email => email.IdempotencyKey).IsUnique();
+
+            // How the worker finds its next batch.
+            entity.HasIndex(email => new { email.Status, email.NextAttemptAt });
+        });
 
         builder.Entity<UserPasskey>(entity =>
         {
@@ -94,6 +116,19 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .WithMany()
                 .HasForeignKey(refreshToken => refreshToken.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<PrivacyRequest>(entity =>
+        {
+            entity.HasKey(request => request.Id);
+            entity.Property(request => request.UserId).HasMaxLength(450).IsRequired();
+            entity.Property(request => request.RequestType).HasMaxLength(32).IsRequired();
+            entity.Property(request => request.Details).HasMaxLength(4_000).IsRequired();
+            entity.Property(request => request.Status).HasMaxLength(32).IsRequired();
+            entity.HasIndex(request => new { request.UserId, request.CreatedAt });
+            entity.HasIndex(request => new { request.Status, request.CreatedAt });
+            entity.HasOne(request => request.User).WithMany().HasForeignKey(request => request.UserId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         builder.Entity<PrintStation>(entity =>
@@ -149,6 +184,11 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
 
         builder.Entity<RestaurantEntity>(entity =>
         {
+            entity.Property(restaurant => restaurant.LegalBusinessName).HasMaxLength(160);
+            entity.Property(restaurant => restaurant.Abn).HasMaxLength(11);
+            entity.Property(restaurant => restaurant.BusinessContactEmail).HasMaxLength(256);
+            entity.Property(restaurant => restaurant.RefundContactEmail).HasMaxLength(256);
+            entity.Property(restaurant => restaurant.CustomerSurchargeNotice).HasMaxLength(300);
             entity.Property(restaurant => restaurant.ImageUrl)
                 .HasMaxLength(2048);
 
@@ -231,6 +271,15 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasKey(item => item.Id);
             entity.HasIndex(item => item.RestaurantId);
             entity.HasIndex(item => item.CategoryId);
+            entity.Property(item => item.Allergens).HasMaxLength(500);
+            entity.Property(item => item.MayContainAllergens).HasMaxLength(500);
+            entity.Property(item => item.CrossContactStatement).HasMaxLength(1_000);
+
+            // Unconstrained "numeric" stores whatever it is given, so a price of 9.999 was kept
+            // exactly while OrderItems.UnitPrice next to it rounded the same figure to 10.00. Every
+            // other money column in the schema is already numeric(10,2); this one is now too, so a
+            // price cannot be stored in a shape that cannot be charged.
+            entity.Property(item => item.Price).HasColumnType("numeric(10,2)");
 
             // The dashboard widget reads only the watched items for one restaurant.
             entity.HasIndex(item => new { item.RestaurantId, item.IsWatched })
@@ -273,6 +322,22 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .IsRequired();
             entity.Property(option => option.PriceAdjustment)
                 .HasColumnType("numeric(10,2)");
+
+            // Same limits as the dish's own fields, so a declaration cannot be truncated on one
+            // and not the other.
+            entity.Property(option => option.Allergens).HasMaxLength(500);
+            entity.Property(option => option.MayContainAllergens).HasMaxLength(500);
+            entity.Property(option => option.CrossContactStatement).HasMaxLength(1_000);
+
+            entity.ToTable(table =>
+            {
+                // The enum is stored as a plain integer, so nothing but this stops a value that no
+                // pricing rule knows what to do with. 0 Add, 1 Remove, 2 Replace.
+                table.HasCheckConstraint(
+                    "CK_MenuItemOptions_AdjustmentType",
+                    "\"AdjustmentType\" IN (0, 1, 2)");
+            });
+
             entity.HasIndex(option => option.GroupId);
             entity.HasIndex(option => option.MenuItemId);
             entity.HasIndex(option => option.RestaurantId);
@@ -344,6 +409,29 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
+        builder.Entity<CartMutation>(entity =>
+        {
+            entity.HasKey(mutation => mutation.Id);
+
+            entity.Property(mutation => mutation.IdempotencyKey)
+                .HasMaxLength(200)
+                .IsRequired();
+
+            // The whole mechanism. Claiming this row is what tells a retry from a first attempt,
+            // so it has to be the database that decides, not a read followed by a write.
+            entity.HasIndex(mutation => new { mutation.CartId, mutation.IdempotencyKey })
+                .IsUnique()
+                .HasDatabaseName("IX_CartMutations_CartId_IdempotencyKey");
+
+            // Lets a sweeper clear keys belonging to carts that are long gone.
+            entity.HasIndex(mutation => mutation.CreatedAt);
+
+            entity.HasOne(mutation => mutation.Cart)
+                .WithMany()
+                .HasForeignKey(mutation => mutation.CartId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         builder.Entity<CartItem>(entity =>
         {
             entity.HasKey(item => item.Id);
@@ -402,6 +490,23 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
 
             entity.Property(order => order.CustomerId)
                 .HasMaxLength(450);
+
+            // The total is summed from line prices that are already numeric(10,2). Leaving this one
+            // unconstrained let it record 29.997 for three lines the same table stored as 10.00
+            // each, and reports summed the unpayable figure rather than the money that moved.
+            entity.Property(order => order.TotalAmount).HasColumnType("numeric(10,2)");
+
+            // One order per cart, enforced where it cannot be raced. Filtered because orders placed
+            // at the counter have no cart, and every one of those would otherwise collide on null.
+            entity.HasIndex(order => order.CartId)
+                .IsUnique()
+                .HasFilter("\"CartId\" IS NOT NULL")
+                .HasDatabaseName("IX_Orders_CartId_Unique");
+            entity.Property(order => order.AcceptedCustomerTermsVersion).HasMaxLength(32);
+            entity.Property(order => order.AcknowledgedPrivacyPolicyVersion).HasMaxLength(32);
+            entity.Property(order => order.AcknowledgedAllergenNoticeVersion).HasMaxLength(32);
+            entity.Property(order => order.LegalAcceptanceIpAddress).HasMaxLength(64);
+            entity.Property(order => order.LegalAcceptanceUserAgent).HasMaxLength(512);
 
             // Hex-encoded SHA-256.
             entity.Property(order => order.GuestAccessTokenHash)
@@ -519,6 +624,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasKey(item => item.Id);
             entity.Property(item => item.MenuItemNameSnapshot).HasMaxLength(240).IsRequired();
             entity.Property(item => item.BasePriceSnapshot).HasColumnType("numeric(10,2)");
+            entity.Property(item => item.AllergensSnapshot).HasMaxLength(500);
+            entity.Property(item => item.MayContainAllergensSnapshot).HasMaxLength(500);
+            entity.Property(item => item.CrossContactStatementSnapshot).HasMaxLength(1_000);
             entity.Property(item => item.UnitPrice).HasColumnType("numeric(10,2)");
             entity.HasIndex(item => item.OrderId);
             entity.HasMany(item => item.SelectedOptions)
@@ -533,6 +641,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(opt => opt.GroupNameSnapshot).HasMaxLength(120).IsRequired();
             entity.Property(opt => opt.OptionNameSnapshot).HasMaxLength(120).IsRequired();
             entity.Property(opt => opt.PriceAdjustmentSnapshot).HasColumnType("numeric(10,2)");
+            entity.Property(opt => opt.AllergensSnapshot).HasMaxLength(500);
+            entity.Property(opt => opt.MayContainAllergensSnapshot).HasMaxLength(500);
+            entity.Property(opt => opt.CrossContactStatementSnapshot).HasMaxLength(1_000);
             entity.HasIndex(opt => opt.OrderItemId);
         });
 
@@ -613,6 +724,23 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.ToTable(table => table.HasCheckConstraint(
                 "CK_PaymentRefunds_AmountCents",
                 "\"AmountCents\" > 0"));
+            entity.HasMany(refund => refund.Items)
+                .WithOne(item => item.PaymentRefund)
+                .HasForeignKey(item => item.PaymentRefundId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<PaymentRefundItem>(entity =>
+        {
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.MenuItemNameSnapshot).HasMaxLength(240).IsRequired();
+            entity.HasIndex(item => item.PaymentRefundId);
+            entity.HasIndex(item => item.OrderItemId);
+            entity.HasIndex(item => new { item.PaymentRefundId, item.OrderItemId }).IsUnique();
+            entity.ToTable(table => table.HasCheckConstraint(
+                "CK_PaymentRefundItems_Quantity", "\"Quantity\" > 0"));
+            entity.ToTable(table => table.HasCheckConstraint(
+                "CK_PaymentRefundItems_AmountCents", "\"AmountCents\" > 0"));
         });
 
         builder.Entity<PaymentRefundRequest>(entity =>

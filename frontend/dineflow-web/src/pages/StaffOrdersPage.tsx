@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertCircle, Bluetooth, Cable, CalendarClock, CheckCircle2, ChefHat, CircleHelp, Clock3, Copy, CreditCard, Download, ListChecks, Loader2, Printer, RefreshCw, Search, ShieldAlert, ShieldCheck, ShieldOff, ShoppingBag, Trash2, Usb, UserRound, Utensils, X } from 'lucide-react'
+import { AlertCircle, Bluetooth, Cable, CalendarClock, CheckCircle2, ChefHat, CircleHelp, Clock3, Copy, CreditCard, Download, ListChecks, Loader2, Printer, RefreshCw, Search, ShieldAlert, ShieldCheck, ShieldOff, ShoppingBag, Trash2, Usb, UserRound, Utensils, X, Undo2 } from 'lucide-react'
 import { motion } from 'motion/react'
 import { toast } from 'sonner'
 import {
@@ -12,11 +12,17 @@ import {
   type OrderTransitionAction,
   type Restaurant,
 } from '@/api/auth'
-import type { PrintJobList } from '@/api/printing'
+import type { PrintJob, PrintJobList } from '@/api/printing'
 import { useAuth } from '@/auth/AuthContext'
 import { OrderStatusBadge } from '@/components/orders/OrderStatusBadge'
+import { compareByAcceptanceUrgency } from '@/lib/orderAcceptance'
+import { useOverdueAcceptanceAlert } from '@/components/orders/useOverdueAcceptanceAlert'
+import { AcceptanceWaitBadge } from '@/components/orders/AcceptanceWaitBadge'
 import { OrderTransitionReasonField } from '@/components/orders/OrderTransitionReasonField'
 import { PaymentStatusBadge } from '@/components/orders/PaymentStatusBadge'
+import { RefundRequestReviewDialog } from '@/components/orders/RefundRequestReviewDialog'
+import { useRefundRequestReview } from '@/components/orders/useRefundRequestReview'
+import { describeRefundedItem } from '@/lib/refundedItemDisplay'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card'
@@ -34,13 +40,23 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { getBackgroundBrowserGuidance } from '@/lib/backgroundBrowser'
+import { publishOperationalSuccess } from '@/lib/operationalNotifications'
 import { downloadPrinterDiagnostics, recordPrinterDiagnostic } from '@/lib/printerDiagnostics'
+import {
+  lastPrinterConnectionCheck,
+  loadPrinterConnectionChecks,
+  printerRouteKey,
+  recordPrinterConnectionCheck,
+  type PrinterCheckOutcome,
+  type PrinterTransport,
+} from '@/lib/printerConnectionChecks'
 import {
   canStaffProcessOrder,
   getStaffDestructiveActions,
   getStaffPaymentMessage,
   getStaffPaymentState,
   getStaffPrimaryAction,
+  getStaffRecoveryAction,
   hasSafetyNote,
   isCarriedOverOrder,
   isSafetyNoteText,
@@ -82,8 +98,11 @@ import {
   type ThermalPrinterMode,
   type ThermalPrinterSettings,
 } from '@/lib/thermalPrinter'
+import { PrinterReadinessPanel } from '@/components/printing/PrinterReadinessPanel'
+import type { PrinterReadiness } from '@/lib/thermalPrinter'
 import { formatServiceCode } from '@/lib/serviceCode'
 import { cn } from '@/lib/utils'
+import { canSettleAtCounter } from '@/lib/orderStats'
 
 type Queue = 'active' | 'new' | 'kitchen' | 'ready' | 'late' | 'payment' | 'carried' | 'closed'
 type StaffOrdersViewMode = 'orders' | 'kitchen'
@@ -138,6 +157,10 @@ const queueLabels: Record<Queue, string> = {
   carried: 'Carried over',
   closed: 'Closed',
 }
+
+const emptyQueueCounts = Object.fromEntries(
+  (Object.keys(queueLabels) as Queue[]).map((value) => [value, 0]),
+) as Record<Queue, number>
 
 const kitchenLaneLabels: Record<KitchenLane, string> = {
   new: 'New',
@@ -271,38 +294,15 @@ function getOrderSignal(order: AdminOrder, now: Date): {
   return { label: 'Review order', tone: 'neutral', isLate }
 }
 
-function orderMatchesQueue(order: AdminOrder, queue: Queue, now: Date) {
-  if (!queueStatuses[queue].has(order.status)) {
-    return false
-  }
-
-  if (queue === 'closed') {
-    return true
-  }
-
-  const paymentHold = isStaffPaymentHold(order)
-  const carriedOver = isCarriedOverOrder(order, now)
-
-  if (queue === 'payment') {
-    return paymentHold
-  }
-
-  if (queue === 'carried') {
-    return carriedOver && !paymentHold
-  }
-
-  if (queue === 'late') {
-    return !paymentHold && !carriedOver && getOrderAgeMinutes(order, now) >= 20
-  }
-
-  return !paymentHold && !carriedOver
-}
-
 export function StaffOrdersPage() {
   const { user } = useAuth()
   const printing = useRestaurantPrinting()
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
   const [orders, setOrders] = useState<AdminOrder[]>([])
+  // The live work, fetched as its own queue. The kitchen board and the overdue chime need it whatever
+  // tab is showing, and reading it off the current page would hide work behind the "Closed" tab.
+  const [activeOrders, setActiveOrders] = useState<AdminOrder[]>([])
+  const [queueCounts, setQueueCounts] = useState<Record<Queue, number>>(emptyQueueCounts)
   const [totalOrderCount, setTotalOrderCount] = useState(0)
   const [restaurants, setRestaurants] = useState<Restaurant[]>([])
   const [restaurantFilter, setRestaurantFilter] = useState(
@@ -335,7 +335,7 @@ export function StaffOrdersPage() {
     orderEventRevision,
     printOrder,
     setSettingsOpen,
-    setPlatformRestaurantId,
+    openPrintTasks,
   } = printing
 
   useEffect(() => {
@@ -357,6 +357,10 @@ export function StaffOrdersPage() {
     }
   }, [printTicket])
 
+  // Answering a refund without leaving the screen the order is worked on. Shared with the order
+  // list so both say the same thing about approving standing the kitchen down.
+  const refundReview = useRefundRequestReview(() => loadOrdersRef.current())
+
   const loadOrders = useCallback(async (showToast = false) => {
     const requestId = loadRequestIdRef.current + 1
     loadRequestIdRef.current = requestId
@@ -366,23 +370,34 @@ export function StaffOrdersPage() {
       setError(null)
       const sort = sortRequests[sortOption]
       const normalizedSearch = debouncedSearch.trim()
-      const request = {
-        page: 1,
-        pageSize: 100,
-        search: normalizedSearch || undefined,
-        sortBy: sort.sortBy,
-        sortDirection: sort.sortDirection,
-        restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
-      } as const
-      const response = isPlatformOwner
-        ? await getAdminOrders(request)
-        : await getStaffOrders(request)
+      const fetchQueue = (which: Queue) => {
+        const request = {
+          queue: which,
+          page: 1,
+          pageSize: 100,
+          search: normalizedSearch || undefined,
+          sortBy: sort.sortBy,
+          sortDirection: sort.sortDirection,
+          restaurantId: isPlatformOwner && restaurantFilter !== 'all' ? restaurantFilter : undefined,
+        } as const
+
+        return isPlatformOwner ? getAdminOrders(request) : getStaffOrders(request)
+      }
+
+      // The queue on screen, and the live work behind it. Asked for separately because the board and
+      // the chime have to keep seeing the kitchen while someone reads through the closed orders.
+      const [response, activeResponse] = await Promise.all([
+        fetchQueue(queue),
+        queue === 'active' ? null : fetchQueue('active'),
+      ])
 
       if (requestId !== loadRequestIdRef.current) {
         return
       }
 
       setOrders(response.items)
+      setActiveOrders(activeResponse ? activeResponse.items : response.items)
+      setQueueCounts(response.queueCounts)
       setTotalOrderCount(response.totalItems)
       setLastUpdated(new Date())
       if (showToast) toast.success('Staff order queue refreshed')
@@ -400,7 +415,7 @@ export function StaffOrdersPage() {
         setRefreshing(false)
       }
     }
-  }, [debouncedSearch, isPlatformOwner, restaurantFilter, sortOption])
+  }, [debouncedSearch, isPlatformOwner, queue, restaurantFilter, sortOption])
 
   useEffect(() => {
     loadOrdersRef.current = () => loadOrders()
@@ -418,7 +433,12 @@ export function StaffOrdersPage() {
   useEffect(() => {
     if (lastOrderEventRevisionRef.current === orderEventRevision) return
     lastOrderEventRevisionRef.current = orderEventRevision
-    setQueue('active')
+    // Reload where the staff member already is. This used to jump to Active on every order event —
+    // and every event counts: an update from another till, a deletion, even the realtime connection
+    // coming back. Someone halfway through a refund on the Payment holds tab, or looking up an order
+    // in Closed, lost their place to an event that had nothing to do with them, and the till does
+    // that several times a service. What changed still surfaces on its own: the affected order moves
+    // to whichever queue now holds it, the tab counts follow, and a new order announces itself.
     const timer = window.setTimeout(() => void loadOrdersRef.current(), 300)
     return () => window.clearTimeout(timer)
   }, [orderEventRevision])
@@ -444,49 +464,49 @@ export function StaffOrdersPage() {
     }
   }, [loadOrders])
 
-  const visibleOrders = useMemo(() => {
-    const now = lastUpdated ?? new Date()
-    return orders.filter((order) => orderMatchesQueue(order, queue, now))
-  }, [lastUpdated, orders, queue])
+  // Already the queue: the server picked these rows by the same rules it counted with.
+  const visibleOrders = orders
 
   const kitchenLanes = useMemo(() => {
     const now = lastUpdated ?? new Date()
 
     return (['new', 'preparing', 'ready'] as KitchenLane[]).map((lane) => ({
       lane,
-      orders: orders
+      orders: activeOrders
         .filter((order) =>
           kitchenLaneStatuses[lane].has(order.status) &&
           canStaffProcessOrder(order) &&
           !isCarriedOverOrder(order, now),
         )
         .sort((first, second) => {
+          // In the acceptance lane the clock that matters starts when the money settled, not when
+          // the order was raised: an order placed long ago but paid a minute ago is not the one
+          // keeping a customer waiting.
+          if (lane === 'new') {
+            const byUrgency = compareByAcceptanceUrgency(first, second, now.getTime())
+            if (byUrgency !== 0) {
+              return byUrgency
+            }
+          }
+
           const firstAge = getOrderAgeMinutes(first, now)
           const secondAge = getOrderAgeMinutes(second, now)
           return secondAge - firstAge
         }),
     }))
-  }, [lastUpdated, orders])
+  }, [activeOrders, lastUpdated])
+
+  // Re-sounds the chime while any paid order sits unaccepted, for whoever walked away from the
+  // screen between the order arriving and someone tapping Accept.
+  useOverdueAcceptanceAlert(activeOrders)
 
   const kitchenOrderCount = useMemo(
     () => kitchenLanes.reduce((total, lane) => total + lane.orders.length, 0),
     [kitchenLanes],
   )
 
-  const queueCounts = useMemo(() => {
-    const now = lastUpdated ?? new Date()
-
-    return Object.fromEntries(
-      (Object.keys(queueLabels) as Queue[]).map((value) => [
-        value,
-        orders.filter((order) => orderMatchesQueue(order, value, now)).length,
-      ]),
-    ) as Record<Queue, number>
-  }, [lastUpdated, orders])
-
   const priorityCounts = useMemo(() => {
     const now = lastUpdated ?? new Date()
-    const activeOrders = orders.filter((order) => orderMatchesQueue(order, 'active', now))
 
     return {
       needsAction: activeOrders.filter((order) => {
@@ -495,15 +515,20 @@ export function StaffOrdersPage() {
       }).length,
       ready: activeOrders.filter((order) => order.status === 'Ready').length,
       late: activeOrders.filter((order) => getOrderSignal(order, now).isLate).length,
-      paymentHolds: orders.filter((order) => orderMatchesQueue(order, 'payment', now)).length,
-      carried: orders.filter((order) => orderMatchesQueue(order, 'carried', now)).length,
+      // Counted over every order the filters match, not over the page on screen.
+      paymentHolds: queueCounts.payment,
+      carried: queueCounts.carried,
     }
-  }, [lastUpdated, orders])
+  }, [activeOrders, lastUpdated, queueCounts])
 
   const selectedRestaurant = restaurants.find((restaurant) => restaurant.id === restaurantFilter)
+  // Which restaurant this station prints for, which is now independent of what the list is showing.
+  const printStationRestaurantName =
+    restaurants.find((restaurant) => restaurant.id === printing.activeRestaurantId)?.name
+    ?? 'the restaurant it is assigned to'
   const restaurantName = isPlatformOwner
     ? selectedRestaurant?.name ?? 'All restaurants'
-    : orders[0]?.restaurantName ?? 'Your restaurant'
+    : activeOrders[0]?.restaurantName ?? orders[0]?.restaurantName ?? 'Your restaurant'
   const queueScopeDescription = isPlatformOwner
     ? restaurantFilter === 'all'
       ? 'Platform-wide live order queue.'
@@ -528,6 +553,12 @@ export function StaffOrdersPage() {
       toast.success(`${order.orderNumber}: ${actionLabels[action]}`, {
         description: `Order is now ${updatedOrder.status}.`,
       })
+      if (action === 'Accept') {
+        publishOperationalSuccess(
+          `${formatServiceCode(updatedOrder)} accepted`,
+          'The order was accepted successfully and is ready for kitchen processing.',
+        )
+      }
     } catch (transitionError) {
       toast.error('Order could not be processed', {
         description: transitionError instanceof Error ? transitionError.message : 'The request failed.',
@@ -571,6 +602,16 @@ export function StaffOrdersPage() {
 
   return (
     <main className="content-grid">
+      <RefundRequestReviewDialog
+        order={refundReview.order}
+        submitting={refundReview.submitting}
+        note={refundReview.note}
+        onNoteChange={refundReview.setNote}
+        amount={refundReview.amount}
+        onAmountChange={refundReview.setAmount}
+        onClose={refundReview.close}
+        onDecide={(decision, note, approvedCents) => void refundReview.decide(decision, note, approvedCents)}
+      />
       <Card>
         <CardHeader className="section-header">
           <div className="admin-page-title">
@@ -605,6 +646,22 @@ export function StaffOrdersPage() {
             </Button>
           </div>
         ) : null}
+        {/* Said out loud, because the list filter no longer drags the print station along with it.
+            Browsing another restaurant's orders is a normal thing for an owner to do, and tickets
+            keep coming out for whichever restaurant this station is assigned to — which is right, but
+            only obvious if someone says so. */}
+        {isPlatformOwner && printing.activeRestaurantId && restaurantFilter !== 'all'
+          && restaurantFilter !== printing.activeRestaurantId ? (
+          <div className="mx-6 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/35 p-3 text-muted-foreground">
+            <span className="flex items-center gap-2 text-sm">
+              <AlertCircle className="size-4 shrink-0" />
+              You are viewing {selectedRestaurant?.name ?? 'another restaurant'}. This print station still prints for {printStationRestaurantName}.
+            </span>
+            <Button type="button" variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
+              Change print restaurant
+            </Button>
+          </div>
+        ) : null}
         {printJobs.failedCount + printJobs.deadLetterCount > 0 ? (
           <div className="mx-6 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-destructive">
             <span className="flex items-center gap-2 text-sm">
@@ -612,7 +669,7 @@ export function StaffOrdersPage() {
               {printJobs.failedCount + printJobs.deadLetterCount} print job
               {printJobs.failedCount + printJobs.deadLetterCount === 1 ? '' : 's'} need attention.
             </span>
-            <Button type="button" variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
+            <Button type="button" variant="outline" size="sm" onClick={openPrintTasks}>
               Open print tasks
             </Button>
           </div>
@@ -663,12 +720,13 @@ export function StaffOrdersPage() {
             {isPlatformOwner ? (
               <div className="staff-orders-filter space-y-1.5">
                 <span className="text-sm font-medium">Restaurant</span>
+                {/* Filters the list and nothing else. It used to reassign this print station at the
+                    same time, so looking at another restaurant's orders quietly moved where tickets
+                    printed — a change nobody asked for and nothing announced. The print station is
+                    set deliberately, in the printer settings. */}
                 <Select
                   value={restaurantFilter}
-                  onValueChange={(value) => {
-                    setRestaurantFilter(value)
-                    setPlatformRestaurantId(value === 'all' ? undefined : value)
-                  }}
+                  onValueChange={setRestaurantFilter}
                 >
                   <SelectTrigger aria-label="Filter staff orders by restaurant">
                     <SelectValue placeholder="Select restaurant" />
@@ -783,11 +841,13 @@ export function StaffOrdersPage() {
             </div>
           ) : null}
 
-          {totalOrderCount > orders.length ? (
+          {/* About the list below, so it stays out of the kitchen board — which shows the live work
+              whichever queue is selected, and is never the thing being truncated here. */}
+          {viewMode === 'orders' && totalOrderCount > orders.length ? (
             <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/35 p-3 text-muted-foreground">
               <AlertCircle className="mt-0.5 size-4 shrink-0" />
               <span className="text-sm">
-                Showing the first {orders.length} of {totalOrderCount} matching orders. Refine the restaurant or search filter to find older orders.
+                Showing the first {orders.length} of {totalOrderCount} orders in {queueLabels[queue]}. Refine the search or restaurant filter to find older ones.
               </span>
             </div>
           ) : null}
@@ -854,7 +914,8 @@ export function StaffOrdersPage() {
 
                             <div className="staff-kitchen-meta">
                               <Badge variant="outline">{itemCount} item{itemCount === 1 ? '' : 's'}</Badge>
-                              <OrderStatusBadge status={order.status} />
+                              <OrderStatusBadge status={order.status} paymentStatus={order.paymentStatus} />
+                              <AcceptanceWaitBadge order={order} />
                               <PaymentStatusBadge status={order.paymentStatus} />
                               {counterPaymentNeeded ? <Badge variant="outline" className="staff-order-counter-badge">Counter due</Badge> : null}
                               {order.customerName ? <Badge variant="outline"><UserRound className="size-3" />{order.customerName}</Badge> : null}
@@ -875,12 +936,23 @@ export function StaffOrdersPage() {
                               {order.items.map((item) => {
                                 const optionGroups = groupSelectedOptions(item)
                                 const itemName = item.itemNameSnapshot?.trim() || 'Unnamed item'
+                                // The number here is what the kitchen acts on, so it is what is
+                                // left to make. A line refunded in full is struck through rather
+                                // than removed: staff who remember ordering it need to see why it
+                                // is not being made.
+                                const refund = describeRefundedItem(item)
 
                                 return (
-                                  <div key={item.id} className="staff-kitchen-item">
+                                  <div
+                                    key={item.id}
+                                    className={`staff-kitchen-item${refund.isFullyRefunded ? ' is-refunded-line' : ''}`}
+                                  >
                                     <div className="staff-kitchen-item-main">
-                                      <span>{item.quantity}x</span>
+                                      <span>{refund.remainingQuantity || item.quantity}x</span>
                                       <strong>{itemName}</strong>
+                                      {refund.refundLabel ? (
+                                        <span className="staff-kitchen-item-refund">{refund.refundLabel}</span>
+                                      ) : null}
                                     </div>
                                     {optionGroups.length > 0 ? (
                                       <div className="staff-kitchen-options">
@@ -907,7 +979,7 @@ export function StaffOrdersPage() {
                             </div>
 
                             <div className="staff-kitchen-actions">
-                              {order.paymentMethod === 'PayAtCounter' && order.paymentStatus !== 'Paid' ? (
+                              {canSettleAtCounter(order) ? (
                                 <Button type="button" variant="outline" size="sm" disabled={isBusy} onClick={() => void markCounterPayment(order)}>
                                   Mark paid
                                 </Button>
@@ -958,6 +1030,7 @@ export function StaffOrdersPage() {
                 const isBusy = busyOrderId === order.id
                 const primaryAction = getStaffPrimaryAction(order)
                 const destructiveActions = getStaffDestructiveActions(order)
+                const recoveryAction = getStaffRecoveryAction(order)
                 const safetyNote = hasSafetyNote(order)
 
                 return (
@@ -995,7 +1068,7 @@ export function StaffOrdersPage() {
                         </div>
                         <div className="flex items-start justify-between gap-3">
                           <div>
-                            <h2 id={`staff-order-${order.id}`} className="font-heading text-base font-medium">{formatServiceCode(order)}</h2>
+                            <h2 id={`staff-order-${order.id}`} className="staff-order-service-code">{formatServiceCode(order)}</h2>
                             <CardDescription className="mt-1 flex items-center gap-1.5">
                               {order.orderType === 'DineIn' ? <Utensils size={14} /> : <ShoppingBag size={14} />}
                               {getOrderScope(order)}
@@ -1014,7 +1087,8 @@ export function StaffOrdersPage() {
                           {order.tableNumber ? (
                             <Badge variant="secondary">Table {order.tableNumber}</Badge>
                           ) : null}
-                          <OrderStatusBadge status={order.status} />
+                          <OrderStatusBadge status={order.status} paymentStatus={order.paymentStatus} />
+                              <AcceptanceWaitBadge order={order} />
                           <PaymentStatusBadge status={order.paymentStatus} />
                           <Badge variant="secondary">{order.restaurantName ?? 'Assigned restaurant'}</Badge>
                           {counterPaymentNeeded ? (
@@ -1055,12 +1129,20 @@ export function StaffOrdersPage() {
                           {order.items.map((item) => {
                             const optionGroups = groupSelectedOptions(item)
                             const itemName = item.itemNameSnapshot?.trim() || 'Unnamed item'
+                            const refund = describeRefundedItem(item)
 
                             return (
-                              <div key={item.id} className="rounded-lg border bg-muted/20 p-3">
+                              <div
+                                key={item.id}
+                                className={`rounded-lg border bg-muted/20 p-3${
+                                  refund.isFullyRefunded ? ' is-refunded-line' : ''}`}
+                              >
                                 <div className="flex justify-between gap-3 text-sm">
                                   <span className="font-medium text-foreground">
-                                    <strong>{item.quantity}x</strong> {itemName}
+                                    <strong>{refund.remainingQuantity || item.quantity}x</strong> {itemName}
+                                    {refund.refundLabel ? (
+                                      <span className="staff-kitchen-item-refund">{refund.refundLabel}</span>
+                                    ) : null}
                                   </span>
                                   <span className="font-medium">{formatMoney(item.totalPrice, order.currency)}</span>
                                 </div>
@@ -1100,6 +1182,21 @@ export function StaffOrdersPage() {
                           })}
                         </div>
 
+                        {/* One line, and only when it exists — the kitchen screen earns its keep by
+                            being scannable. It is a button because the person who sees the request
+                            is the person who should be able to answer it, without leaving the
+                            screen they are working. */}
+                        {order.pendingRefundRequest ? (
+                          <button
+                            type="button"
+                            className="staff-order-payment-message is-refunded staff-order-refund-request"
+                            onClick={() => refundReview.open(order)}
+                          >
+                            <Undo2 className="mt-0.5 size-4 shrink-0" />
+                            <span className="text-sm">Customer has asked for a refund</span>
+                            <span className="staff-order-refund-cta">Review</span>
+                          </button>
+                        ) : null}
                         {paymentMessage ? (
                           <div className={cn(
                             'staff-order-payment-message',
@@ -1113,7 +1210,7 @@ export function StaffOrdersPage() {
                         ) : null}
 
                         <div className="staff-order-action-row">
-                          {order.paymentMethod === 'PayAtCounter' && order.paymentStatus !== 'Paid' ? (
+                          {canSettleAtCounter(order) ? (
                             <Button type="button" variant="outline" size="sm" disabled={isBusy} onClick={() => void markCounterPayment(order)}>
                               Mark paid
                             </Button>
@@ -1141,7 +1238,22 @@ export function StaffOrdersPage() {
                               {actionLabels[action]}
                             </Button>
                           ))}
-                          {!primaryAction && destructiveActions.length === 0 && !counterPaymentNeeded ? (
+                          {/* Outline rather than the primary style: putting an order back into
+                              service is a correction, and a page of finished orders should not read
+                              as an invitation to undo them. It asks for a reason like the other
+                              corrections do. */}
+                          {recoveryAction ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={isBusy}
+                              onClick={() => beginTransition(order, recoveryAction)}
+                            >
+                              {actionLabels[recoveryAction]}
+                            </Button>
+                          ) : null}
+                          {!primaryAction && !recoveryAction && destructiveActions.length === 0 && !counterPaymentNeeded ? (
                             <span className="text-sm text-muted-foreground">No action available.</span>
                           ) : null}
                         </div>
@@ -1263,12 +1375,17 @@ export function PrinterSettingsDialog({
   frontCounterSettings,
   printJobs,
   printJobsLoading,
+  showPrintTasks,
+  onPrintTasksShown,
   onOpenChange,
   onKitchenSettingsChange,
   onFrontCounterSettingsChange,
   onRefreshPrintJobs,
   onRetryPrintJob,
   onPrintTestTicket,
+  printerReadiness,
+  lastSuccessfulPrintAt,
+  onCheckPrinterReadiness,
   showPrintRestaurantSelector = false,
   printRestaurants = [],
   activePrintRestaurantId,
@@ -1279,18 +1396,59 @@ export function PrinterSettingsDialog({
   frontCounterSettings: ThermalPrinterSettings
   printJobs: PrintJobList
   printJobsLoading: boolean
+  /** Set when someone arrived here from the attention banner, so the task list opens for them. */
+  showPrintTasks: boolean
+  onPrintTasksShown: () => void
   onOpenChange: (open: boolean) => void
   onKitchenSettingsChange: (updates: Partial<ThermalPrinterSettings>) => void
   onFrontCounterSettingsChange: (updates: Partial<ThermalPrinterSettings>) => void
   onRefreshPrintJobs: () => void
   onRetryPrintJob: (jobId: string) => void
   onPrintTestTicket: (target: 'kitchen' | 'front-counter') => void
+  printerReadiness: PrinterReadiness | null
+  lastSuccessfulPrintAt: number | null
+  onCheckPrinterReadiness: () => Promise<unknown>
   showPrintRestaurantSelector?: boolean
   printRestaurants?: Restaurant[]
   activePrintRestaurantId?: string
   onPrintRestaurantChange?: (restaurantId: string) => void
 }) {
   const [printerArea, setPrinterArea] = useState<'kitchen' | 'front-counter'>('kitchen')
+  const printTasksRef = useRef<HTMLDetailsElement>(null)
+  const failedPrintJobCount = printJobs.failedCount + printJobs.deadLetterCount
+  // Open by default when something has failed. A disclosure is right for a list nobody needs; it is
+  // the wrong shape for the one thing an alert just sent someone to deal with.
+  const [printTasksOpen, setPrintTasksOpen] = useState(failedPrintJobCount > 0)
+
+  // What needs answering first. The list came back newest-updated first, which buries a failure
+  // under every ticket that printed fine since.
+  const orderedPrintJobs = useMemo(() => {
+    const needsAttention = (job: PrintJob) => job.state === 'Failed' || job.state === 'DeadLetter'
+
+    return [...printJobs.jobs].sort((first, second) => {
+      if (needsAttention(first) !== needsAttention(second)) {
+        return needsAttention(first) ? -1 : 1
+      }
+      return second.updatedAt.localeCompare(first.updatedAt)
+    })
+  }, [printJobs.jobs])
+
+  useEffect(() => {
+    if (!showPrintTasks) return
+
+    // Deferred so this is a response to the request rather than a render-time write, and so the
+    // section is on screen before it is scrolled to — the dialog scrolls, and the tasks sit below
+    // the fold on a laptop.
+    const timer = window.setTimeout(() => {
+      setPrinterArea('kitchen')
+      setPrintTasksOpen(true)
+      onPrintTasksShown()
+      printTasksRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }, 0)
+
+    return () => window.clearTimeout(timer)
+  }, [onPrintTasksShown, showPrintTasks])
+
   const settings = printerArea === 'kitchen' ? kitchenSettings : frontCounterSettings
   const onSettingsChange = printerArea === 'kitchen'
     ? onKitchenSettingsChange
@@ -1302,11 +1460,38 @@ export function PrinterSettingsDialog({
   const [qzPrintersLoading, setQzPrintersLoading] = useState(false)
   const [qzHostSubnet, setQzHostSubnet] = useState<string | null>(null)
   const qzDiscoveryGenerationRef = useRef(0)
-  const [qzPrinterTestStatus, setQzPrinterTestStatus] = useState<ConnectionTestStatus>('untested')
-  const [qzNetworkTestStatus, setQzNetworkTestStatus] = useState<ConnectionTestStatus>('untested')
-  const [qzSerialTestStatus, setQzSerialTestStatus] = useState<ConnectionTestStatus>('untested')
-  const [webSerialTestStatus, setWebSerialTestStatus] = useState<ConnectionTestStatus>('untested')
-  const [webUsbTestStatus, setWebUsbTestStatus] = useState<ConnectionTestStatus>('untested')
+  // One transient flag and one record per route. Five pieces of state, reset by hand from a dozen
+  // places, is what let a completed check disagree with the panel beside it: the status could be
+  // cleared by something that had not changed the printer at all.
+  const [testingTransport, setTestingTransport] = useState<PrinterTransport | null>(null)
+  const [connectionChecks, setConnectionChecks] = useState(loadPrinterConnectionChecks)
+
+  const connectionTestStatus = useCallback(
+    (transport: PrinterTransport): ConnectionTestStatus =>
+      testingTransport === transport
+        ? 'testing'
+        : lastPrinterConnectionCheck(
+            connectionChecks,
+            printerRouteKey(printerArea, settings, transport),
+          )?.outcome ?? 'untested',
+    [connectionChecks, printerArea, settings, testingTransport],
+  )
+
+  const settleConnectionTest = useCallback(
+    (transport: PrinterTransport, outcome: PrinterCheckOutcome) => {
+      setTestingTransport((current) => (current === transport ? null : current))
+      setConnectionChecks(
+        recordPrinterConnectionCheck(printerRouteKey(printerArea, settings, transport), outcome),
+      )
+    },
+    [printerArea, settings],
+  )
+
+  const qzPrinterTestStatus = connectionTestStatus('qz-printer')
+  const qzNetworkTestStatus = connectionTestStatus('qz-network')
+  const qzSerialTestStatus = connectionTestStatus('qz-serial')
+  const webSerialTestStatus = connectionTestStatus('web-serial')
+  const webUsbTestStatus = connectionTestStatus('web-usb')
   const netTesting = qzNetworkTestStatus === 'testing'
   const qzSerialTesting = qzSerialTestStatus === 'testing'
   const serialTesting = webSerialTestStatus === 'testing'
@@ -1394,26 +1579,26 @@ export function PrinterSettingsDialog({
       toast.error('Enter the printer IP first')
       return
     }
-    setQzNetworkTestStatus('testing')
+    setTestingTransport('qz-network')
     try {
       const port = settings.qzNetworkPort || defaultThermalPrinterSettings.qzNetworkPort
       const reachable = await probeQzNetworkPrinter(host, port)
       if (reachable) {
-        setQzNetworkTestStatus('succeeded')
+        settleConnectionTest('qz-network', 'succeeded')
         toast.success('Printer reachable', { description: `${host}:${port} accepted a connection.` })
       } else {
-        setQzNetworkTestStatus('failed')
+        settleConnectionTest('qz-network', 'failed')
         toast.error('No response', {
           description: `${host}:${port} did not answer. Check the IP, that the printer is on the network, and that RAW/9100 is enabled.`,
         })
       }
     } catch (error) {
-      setQzNetworkTestStatus('failed')
+      settleConnectionTest('qz-network', 'failed')
       toast.error('Could not test the printer', {
         description: error instanceof Error ? error.message : 'The connection test failed.',
       })
     }
-  }, [settings.qzNetworkHost, settings.qzNetworkPort])
+  }, [settleConnectionTest, settings.qzNetworkHost, settings.qzNetworkPort])
 
   // Track the latest printer name without making the discovery callback depend on
   // it (which would refetch the printer list on every keystroke).
@@ -1536,18 +1721,6 @@ export function PrinterSettingsDialog({
   const [clearingQueue, setClearingQueue] = useState(false)
   const [bleSelecting, setBleSelecting] = useState(false)
 
-  const resetQzTargetTests = useCallback(() => {
-    setQzPrinterTestStatus('untested')
-    setQzNetworkTestStatus('untested')
-    setQzSerialTestStatus('untested')
-  }, [])
-
-  const resetAllConnectionTests = useCallback(() => {
-    resetQzTargetTests()
-    setWebSerialTestStatus('untested')
-    setWebUsbTestStatus('untested')
-  }, [resetQzTargetTests])
-
   const testSelectedQzPrinter = useCallback(async () => {
     const printerName = settings.qzPrinterName.trim()
     if (!printerName) {
@@ -1555,7 +1728,7 @@ export function PrinterSettingsDialog({
       return
     }
 
-    setQzPrinterTestStatus('testing')
+    setTestingTransport('qz-printer')
     try {
       const printers = await listQzTrayPrinterDescriptors()
       const printer = printers.find((candidate) => candidate.name === printerName)
@@ -1572,19 +1745,19 @@ export function PrinterSettingsDialog({
         )
       }
 
-      setQzPrinterTestStatus('succeeded')
+      settleConnectionTest('qz-printer', 'succeeded')
       toast.success('System printer test completed', {
         description: health.status === 'UNKNOWN'
           ? `${printerName} is available to QZ and Windows. Its driver did not expose physical device status, so only a real test ticket can fully verify the USB cable and printer.`
           : `${printerName} is available and reported ${health.status.replaceAll('_', ' ').toLowerCase()}.`,
       })
     } catch (error) {
-      setQzPrinterTestStatus('failed')
+      settleConnectionTest('qz-printer', 'failed')
       toast.error('System printer test failed', {
         description: error instanceof Error ? error.message : 'The selected Windows printer could not be verified.',
       })
     }
-  }, [settings.qzPrinterName])
+  }, [settleConnectionTest, settings.qzPrinterName])
 
   // BLE picker (user gesture) → connect + discover the writable characteristic.
   // The GATT connection then stays open between prints.
@@ -1615,44 +1788,44 @@ export function PrinterSettingsDialog({
       return
     }
 
-    setQzSerialTestStatus('testing')
+    setTestingTransport('qz-serial')
     try {
       await testQzSerialConnection(portName, settings.serialBaudRate)
-      setQzSerialTestStatus('succeeded')
+      settleConnectionTest('qz-serial', 'succeeded')
       toast.success('Bluetooth COM connection verified', {
         description: `${portName} opened through QZ and accepted a non-printing status request. The connection will stay open.`,
       })
     } catch (error) {
-      setQzSerialTestStatus('failed')
+      settleConnectionTest('qz-serial', 'failed')
       toast.error('Could not open the Bluetooth COM port', {
         description: error instanceof Error ? error.message : 'The QZ serial connection test failed.',
       })
     }
-  }, [settings.qzSerialPort, settings.serialBaudRate])
+  }, [settleConnectionTest, settings.qzSerialPort, settings.serialBaudRate])
 
   const testSelectedWebSerialPort = useCallback(async () => {
-    setWebSerialTestStatus('testing')
+    setTestingTransport('web-serial')
     try {
       const { label } = await testWebSerialConnection(settings.serialBaudRate)
       setSerialPortLabel(label)
-      setWebSerialTestStatus('succeeded')
+      settleConnectionTest('web-serial', 'succeeded')
       toast.success('Serial connection verified', {
         description: `${label} opened and accepted a non-printing status request. The connection will stay open.`,
       })
     } catch (error) {
       if (error instanceof DOMException && error.name === 'NotFoundError') {
-        setWebSerialTestStatus('untested')
+        setTestingTransport(null)
         return
       }
-      setWebSerialTestStatus('failed')
+      settleConnectionTest('web-serial', 'failed')
       toast.error('Could not test the serial connection', {
         description: error instanceof Error ? error.message : 'The Web Serial connection test failed.',
       })
     }
-  }, [settings.serialBaudRate])
+  }, [settleConnectionTest, settings.serialBaudRate])
 
   const testSelectedWebUsbPrinter = useCallback(async () => {
-    setWebUsbTestStatus('testing')
+    setTestingTransport('web-usb')
     try {
       const result = await testWebUsbConnection(settings)
       setUsbDeviceLabel(result.label)
@@ -1665,21 +1838,21 @@ export function PrinterSettingsDialog({
           usbEndpointNumber: result.endpointNumber,
         })
       }
-      setWebUsbTestStatus('succeeded')
+      settleConnectionTest('web-usb', 'succeeded')
       toast.success('USB connection verified', {
         description: `${result.label} accepted a non-printing status request on interface ${result.interfaceNumber}, endpoint ${result.endpointNumber}.`,
       })
     } catch (error) {
       if (error instanceof DOMException && error.name === 'NotFoundError') {
-        setWebUsbTestStatus('untested')
+        setTestingTransport(null)
         return
       }
-      setWebUsbTestStatus('failed')
+      settleConnectionTest('web-usb', 'failed')
       toast.error('Could not test the USB connection', {
         description: error instanceof Error ? error.message : 'The WebUSB connection test failed.',
       })
     }
-  }, [onSettingsChange, settings])
+  }, [onSettingsChange, settleConnectionTest, settings])
 
   // Recovery tool for the classic spooler pile-up: cancel jobs that queued while
   // the printer was down, so bringing it back does not burst out stale tickets.
@@ -1721,7 +1894,7 @@ export function PrinterSettingsDialog({
 
       if (probe === 'skipped') {
         setSerialPortLabel(label)
-        setWebSerialTestStatus('untested')
+        setTestingTransport(null)
         toast.success('Serial port selected', { description: `${label} — later prints reuse it without asking.` })
         return
       }
@@ -1831,7 +2004,7 @@ export function PrinterSettingsDialog({
         usbEndpointNumber: detected.endpointNumber,
       })
       setUsbDeviceLabel(detected.label)
-      setWebUsbTestStatus('untested')
+      setTestingTransport(null)
       toast.success('USB printer selected', { description: detected.label })
     } catch (error) {
       if (error instanceof DOMException && error.name === 'NotFoundError') {
@@ -1868,10 +2041,9 @@ export function PrinterSettingsDialog({
         <div className="staff-printer-settings">
           <Tabs
             value={printerArea}
-            onValueChange={(value) => {
-              resetAllConnectionTests()
-              setPrinterArea(value as 'kitchen' | 'front-counter')
-            }}
+            // Deliberately no reset: each area keeps its own recorded result, and looking at the
+            // other tab is not a statement about this printer.
+            onValueChange={(value) => setPrinterArea(value as 'kitchen' | 'front-counter')}
           >
             <TabsList className="grid w-full grid-cols-2">
               <TabsTrigger value="kitchen">Kitchen</TabsTrigger>
@@ -1914,7 +2086,6 @@ export function PrinterSettingsDialog({
               <Select
                 value={settings.mode}
                 onValueChange={(value) => {
-                  resetAllConnectionTests()
                   onSettingsChange({ mode: value as ThermalPrinterMode })
                 }}
               >
@@ -2063,7 +2234,6 @@ export function PrinterSettingsDialog({
                   <Select
                     value={settings.qzTargetType}
                     onValueChange={(value) => {
-                      resetQzTargetTests()
                       onSettingsChange({ qzTargetType: value as QzTargetType })
                     }}
                   >
@@ -2102,7 +2272,7 @@ export function PrinterSettingsDialog({
                       <Select
                         value={settings.qzPrinterName || undefined}
                         onValueChange={(value) => {
-                          setQzPrinterTestStatus('untested')
+                          setTestingTransport(null)
                           onSettingsChange({ qzPrinterName: value })
                         }}
                       >
@@ -2153,7 +2323,7 @@ export function PrinterSettingsDialog({
                         value={settings.qzPrinterName}
                         placeholder={qzPrintersLoading ? 'Detecting printers…' : 'Epson TM-T88VI'}
                         onChange={(event) => {
-                          setQzPrinterTestStatus('untested')
+                          setTestingTransport(null)
                           onSettingsChange({ qzPrinterName: event.target.value })
                         }}
                       />
@@ -2189,7 +2359,7 @@ export function PrinterSettingsDialog({
                         value={settings.qzNetworkHost}
                         placeholder={qzHostSubnet ? `${qzHostSubnet}50` : '192.168.1.50'}
                         onChange={(event) => {
-                          setQzNetworkTestStatus('untested')
+                          setTestingTransport(null)
                           onSettingsChange({ qzNetworkHost: event.target.value })
                         }}
                       />
@@ -2202,7 +2372,7 @@ export function PrinterSettingsDialog({
                         min={1}
                         value={settings.qzNetworkPort}
                         onChange={(event) => {
-                          setQzNetworkTestStatus('untested')
+                          setTestingTransport(null)
                           onSettingsChange({ qzNetworkPort: Number(event.target.value) })
                         }}
                       />
@@ -2248,7 +2418,7 @@ export function PrinterSettingsDialog({
                         <Select
                           value={settings.qzSerialPort || undefined}
                           onValueChange={(value) => {
-                            setQzSerialTestStatus('untested')
+                            setTestingTransport(null)
                             onSettingsChange({ qzSerialPort: value })
                           }}
                         >
@@ -2272,7 +2442,7 @@ export function PrinterSettingsDialog({
                           value={settings.qzSerialPort}
                           placeholder="COM4"
                           onChange={(event) => {
-                            setQzSerialTestStatus('untested')
+                            setTestingTransport(null)
                             onSettingsChange({ qzSerialPort: event.target.value })
                           }}
                         />
@@ -2327,6 +2497,14 @@ export function PrinterSettingsDialog({
                 </Button>
               </div>
 
+              {/* Sits directly under the connection controls, because "connected" is the status
+                  people were reading as "will print" — this is the one that answers that. */}
+              <PrinterReadinessPanel
+                readiness={printerReadiness}
+                lastSuccessfulPrintAt={lastSuccessfulPrintAt}
+                onRecheck={onCheckPrinterReadiness}
+              />
+
               {printerArea === 'kitchen' && settings.autoPrintNewOrders ? (
                 <div className="flex flex-col items-start gap-2 rounded-md border border-amber-300/70 bg-amber-50/70 p-2 dark:border-amber-700/70 dark:bg-amber-950/30">
                   <p className="text-[0.7rem] leading-snug text-amber-800 dark:text-amber-200">
@@ -2348,7 +2526,12 @@ export function PrinterSettingsDialog({
               ) : null}
 
               {printerArea === 'kitchen' ? (
-                <details className="rounded-md border border-border bg-background/60 p-2">
+                <details
+                  ref={printTasksRef}
+                  open={printTasksOpen}
+                  onToggle={(event) => setPrintTasksOpen(event.currentTarget.open)}
+                  className="rounded-md border border-border bg-background/60 p-2"
+                >
                   <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-medium">
                     <span className="flex items-center gap-2">
                       <ListChecks size={14} />
@@ -2379,7 +2562,7 @@ export function PrinterSettingsDialog({
                   <div className="mt-2 max-h-52 space-y-1.5 overflow-y-auto">
                     {printJobs.jobs.length === 0 ? (
                       <p className="text-[0.7rem] text-muted-foreground">No print jobs recorded for this restaurant.</p>
-                    ) : printJobs.jobs.map((job) => (
+                    ) : orderedPrintJobs.map((job) => (
                       <div
                         key={job.id}
                         className="flex items-start justify-between gap-2 rounded-md border border-border/70 px-2 py-1.5"
@@ -2405,6 +2588,13 @@ export function PrinterSettingsDialog({
                               {job.lastError ?? job.lastStatusDetail}
                             </p>
                           ) : null}
+                          {/* Which machine, and when. "A ticket failed" is not an errand until
+                              somebody knows where to walk and whether it is still relevant. */}
+                          <p className="mt-0.5 text-[0.68rem] text-muted-foreground">
+                            {job.printerName || job.stationName || 'No printer claimed it'}
+                            {' · '}
+                            {formatDateTime(job.updatedAt)}
+                          </p>
                         </div>
                         {job.state === 'Failed' || job.state === 'DeadLetter' ? (
                           <Button type="button" variant="outline" size="sm" onClick={() => onRetryPrintJob(job.id)}>
@@ -2516,8 +2706,8 @@ export function PrinterSettingsDialog({
                 <Select
                   value={String(settings.serialBaudRate)}
                   onValueChange={(value) => {
-                    setQzSerialTestStatus('untested')
-                    setWebSerialTestStatus('untested')
+                    setTestingTransport(null)
+                    setTestingTransport(null)
                     onSettingsChange({ serialBaudRate: Number(value) })
                   }}
                 >
@@ -2585,7 +2775,7 @@ export function PrinterSettingsDialog({
                     value={settings.usbVendorId}
                     placeholder="0x04b8"
                     onChange={(event) => {
-                      setWebUsbTestStatus('untested')
+                      setTestingTransport(null)
                       onSettingsChange({ usbVendorId: event.target.value })
                     }}
                   />
@@ -2596,7 +2786,7 @@ export function PrinterSettingsDialog({
                     value={settings.usbProductId}
                     placeholder="optional"
                     onChange={(event) => {
-                      setWebUsbTestStatus('untested')
+                      setTestingTransport(null)
                       onSettingsChange({ usbProductId: event.target.value })
                     }}
                   />
@@ -2609,7 +2799,7 @@ export function PrinterSettingsDialog({
                     min={0}
                     value={settings.usbInterfaceNumber}
                     onChange={(event) => {
-                      setWebUsbTestStatus('untested')
+                      setTestingTransport(null)
                       onSettingsChange({ usbInterfaceNumber: Number(event.target.value) })
                     }}
                   />
@@ -2622,7 +2812,7 @@ export function PrinterSettingsDialog({
                     min={1}
                     value={settings.usbEndpointNumber}
                     onChange={(event) => {
-                      setWebUsbTestStatus('untested')
+                      setTestingTransport(null)
                       onSettingsChange({ usbEndpointNumber: Number(event.target.value) })
                     }}
                   />

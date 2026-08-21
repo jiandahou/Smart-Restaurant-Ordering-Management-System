@@ -7,7 +7,13 @@ namespace DineFlow.Api.Services;
 
 public sealed class UnconfirmedCustomerCleanupService : BackgroundService
 {
-    public static readonly TimeSpan ConfirmationWindow = TimeSpan.FromHours(1);
+    /// <summary>
+    /// How long an unconfirmed account, and the link that confirms it, remain valid. Long enough
+    /// that someone who signs up on the way home can still confirm after they arrive. Applies only
+    /// to email confirmation — see EmailConfirmationTokenProvider for why it is not the shared
+    /// Identity token lifespan.
+    /// </summary>
+    public static readonly TimeSpan ConfirmationWindow = TimeSpan.FromHours(24);
 
     private static readonly TimeSpan CleanupInterval = TimeSpan.FromMinutes(15);
 

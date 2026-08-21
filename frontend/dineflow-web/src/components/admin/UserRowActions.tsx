@@ -39,12 +39,13 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '
 import { Input } from '../ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
 import { RestaurantCombobox } from './RestaurantCombobox'
+import { optionalFullNameSchema } from '@/lib/nameFields'
 import { canManageUser, roleRank, userRoleLabels } from './userRoles'
 
 const managedRoles = ['RestaurantOwner', 'Admin', 'Staff', 'Customer'] as const satisfies readonly ManagedUserRole[]
 
 const updateUserSchema = z.object({
-  fullName: z.string(),
+  fullName: optionalFullNameSchema(),
   email: z.email('Enter a valid email address.'),
   restaurantId: z.string(),
   role: z.enum(managedRoles),

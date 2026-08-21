@@ -1,9 +1,12 @@
 using DineFlow.Api.Hubs;
+using DineFlow.Api.Options;
 using DineFlow.Api.Services;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Microsoft.EntityFrameworkCore;
 
 namespace DineFlow.Tests.Infrastructure;
 
@@ -24,8 +27,19 @@ public static class TestServiceStubs
     public static ReportLogWriter CreateReportLogWriter(AppDbContext context) =>
         new(context, new HttpContextAccessor());
 
-    public static PaymentNotificationService CreatePaymentNotificationService() =>
-        new(new NoOpEmailSender(), NullLogger<PaymentNotificationService>.Instance);
+    /// <summary>Real layout, unconfigured operator: enough to render, nothing to assert against.</summary>
+    public static TransactionalEmailLayout CreateEmailLayout() =>
+        new(Options.Create(new ComplianceOptions()));
+
+    public static PaymentNotificationService CreatePaymentNotificationService(AppDbContext? context = null) =>
+        new(
+            new TransactionalEmailOutbox(
+                context ?? new AppDbContext(new DbContextOptionsBuilder<AppDbContext>()
+                    .UseInMemoryDatabase($"stub-outbox-{Guid.NewGuid()}")
+                    .Options),
+                NullLogger<TransactionalEmailOutbox>.Instance),
+            NullLogger<PaymentNotificationService>.Instance,
+            CreateEmailLayout());
 
     private sealed class NoOpEmailSender : IEmailSender
     {

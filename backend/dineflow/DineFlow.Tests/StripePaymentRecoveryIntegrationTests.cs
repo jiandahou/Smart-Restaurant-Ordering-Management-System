@@ -167,17 +167,29 @@ public sealed class StripePaymentRecoveryIntegrationTests
         await context.SaveChangesAsync();
 
         var stripeClient = new RecordingStripeClient((_, _) => throw new StripeException("temporary timeout"));
+        var stripeOptions = Options.Create(new StripeOptions
+        {
+            SecretKey = "sk_test_checkout",
+            SuccessUrl = "http://localhost/payment/success",
+            CancelUrl = "http://localhost/payment/cancelled"
+        });
+        var notifier = TestServiceStubs.CreateOrderRealtimeNotifier();
+        var reportLogWriter = TestServiceStubs.CreateReportLogWriter(context);
+        var paymentSyncService = new PaymentSyncService(
+            context,
+            stripeClient,
+            stripeOptions,
+            new OrderAutoAcceptanceService(context, reportLogWriter),
+            notifier,
+            reportLogWriter,
+            NullLogger<PaymentSyncService>.Instance);
         var service = new StripeOrderCheckoutService(
             context,
             stripeClient,
-            Options.Create(new StripeOptions
-            {
-                SecretKey = "sk_test_checkout",
-                SuccessUrl = "http://localhost/payment/success",
-                CancelUrl = "http://localhost/payment/cancelled"
-            }),
-            TestServiceStubs.CreateOrderRealtimeNotifier(),
-            TestServiceStubs.CreateReportLogWriter(context),
+            stripeOptions,
+            notifier,
+            paymentSyncService,
+            reportLogWriter,
             NullLogger<StripeOrderCheckoutService>.Instance);
 
         var result = await service.StartAsync(order.Id, null, null, CancellationToken.None);
@@ -189,6 +201,113 @@ public sealed class StripePaymentRecoveryIntegrationTests
         Assert.Equal("https://checkout.stripe.test/original", payment.CheckoutUrl);
         Assert.Equal("order-checkout-original", payment.IdempotencyKey);
         Assert.Single(order.Payments);
+    }
+
+    [Fact]
+    public async Task CompletedCheckoutWithoutWebhook_ReconcilesPaymentAndDoesNotCreateSecondSession()
+    {
+        await using var context = CreateContext();
+        var restaurant = new RestaurantEntity
+        {
+            Name = "Recovery Restaurant",
+            Address = "1 Test Street",
+            Phone = "0000",
+            Currency = "aud",
+            StripeAccountId = "acct_checkout",
+            StripeChargesEnabled = true
+        };
+        var order = new Order
+        {
+            Restaurant = restaurant,
+            RestaurantId = restaurant.Id,
+            OrderNumber = "RECOVERY-PAID",
+            PaymentMethod = PaymentMethod.Online,
+            PaymentStatus = PaymentStatus.Pending,
+            TotalAmount = 25m
+        };
+        order.OrderItems.Add(new OrderItem
+        {
+            Order = order,
+            OrderId = order.Id,
+            MenuItemNameSnapshot = "Meal",
+            Quantity = 1,
+            UnitPrice = 25m,
+            BasePriceSnapshot = 25m
+        });
+        var payment = new Payment
+        {
+            Order = order,
+            OrderId = order.Id,
+            Provider = PaymentProviders.Stripe,
+            ProviderCheckoutSessionId = "cs_completed",
+            ProviderPaymentIntentId = "pi_completed",
+            CheckoutUrl = "https://checkout.stripe.test/completed",
+            IdempotencyKey = "order-checkout-completed",
+            StripeAccountId = restaurant.StripeAccountId,
+            AmountCents = 2_500,
+            Currency = "aud",
+            Status = PaymentStatus.Pending
+        };
+        order.Payments.Add(payment);
+        context.Add(order);
+        await context.SaveChangesAsync();
+
+        var stripeClient = new RecordingStripeClient((method, path) =>
+        {
+            Assert.Equal(HttpMethod.Get, method);
+            if (path == "/v1/checkout/sessions/cs_completed")
+            {
+                return new Session
+                {
+                    Id = "cs_completed",
+                    Status = "complete",
+                    PaymentStatus = "paid",
+                    PaymentIntentId = "pi_completed"
+                };
+            }
+
+            Assert.Equal("/v1/payment_intents/pi_completed", path);
+            return new PaymentIntent
+            {
+                Id = "pi_completed",
+                Status = "succeeded"
+            };
+        });
+        var stripeOptions = Options.Create(new StripeOptions
+        {
+            SecretKey = "sk_test_checkout",
+            SuccessUrl = "http://localhost/payment/success",
+            CancelUrl = "http://localhost/payment/cancelled"
+        });
+        var notifier = TestServiceStubs.CreateOrderRealtimeNotifier();
+        var reportLogWriter = TestServiceStubs.CreateReportLogWriter(context);
+        var paymentSyncService = new PaymentSyncService(
+            context,
+            stripeClient,
+            stripeOptions,
+            new OrderAutoAcceptanceService(context, reportLogWriter),
+            notifier,
+            reportLogWriter,
+            NullLogger<PaymentSyncService>.Instance);
+        var service = new StripeOrderCheckoutService(
+            context,
+            stripeClient,
+            stripeOptions,
+            notifier,
+            paymentSyncService,
+            reportLogWriter,
+            NullLogger<StripeOrderCheckoutService>.Instance);
+
+        var result = await service.StartAsync(order.Id, null, null, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(409, result.StatusCode);
+        Assert.Equal("Payment confirmed. The order status has been updated.", result.Message);
+        Assert.Equal(PaymentStatus.Paid, payment.Status);
+        Assert.Equal(PaymentStatus.Paid, order.PaymentStatus);
+        Assert.Equal(3, stripeClient.RequestCount);
+        Assert.Single(order.Payments);
+        Assert.Equal("cs_completed", payment.ProviderCheckoutSessionId);
     }
 
     private static AppDbContext CreateContext() =>

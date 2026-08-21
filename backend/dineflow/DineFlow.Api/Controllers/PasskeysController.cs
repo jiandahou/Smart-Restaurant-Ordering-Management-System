@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using System.Text;
+using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Auth;
 using DineFlow.Api.Services;
 using DineFlow.Application.Authentication;
@@ -11,6 +12,7 @@ using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace DineFlow.Api.Controllers;
@@ -84,6 +86,7 @@ public sealed class PasskeysController : ControllerBase
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.Authentication)]
     [HttpPost("login/options")]
     public IActionResult LoginOptions()
     {
@@ -100,6 +103,7 @@ public sealed class PasskeysController : ControllerBase
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.Authentication)]
     [HttpPost("login/complete")]
     public async Task<IActionResult> LoginComplete(
         CompletePasskeyLoginRequest request,
@@ -169,6 +173,17 @@ public sealed class PasskeysController : ControllerBase
             });
         }
 
+        // A locked account stays locked on every route in. The assertion itself is not guessable,
+        // so no failure is counted here — only the existing lockout is honoured.
+        if (await _userManager.IsLockedOutAsync(user))
+        {
+            return StatusCode(StatusCodes.Status423Locked, new
+            {
+                message = "Too many failed attempts. Try again later.",
+                code = "account_locked"
+            });
+        }
+
         return await BuildAuthenticatedResponseAsync(user, "Passkey sign-in successful.");
     }
 
@@ -192,7 +207,8 @@ public sealed class PasskeysController : ControllerBase
         {
             return BadRequest(new
             {
-                message = "MFA verification is required to change passkeys."
+                message = "MFA verification is required to change passkeys.",
+                code = MfaVerificationCodes.SensitiveActionRequired
             });
         }
 
@@ -246,7 +262,8 @@ public sealed class PasskeysController : ControllerBase
         {
             return BadRequest(new
             {
-                message = "MFA verification is required to change passkeys."
+                message = "MFA verification is required to change passkeys.",
+                code = MfaVerificationCodes.SensitiveActionRequired
             });
         }
 
@@ -303,7 +320,8 @@ public sealed class PasskeysController : ControllerBase
         {
             return BadRequest(new
             {
-                message = "MFA verification is required to change passkeys."
+                message = "MFA verification is required to change passkeys.",
+                code = MfaVerificationCodes.SensitiveActionRequired
             });
         }
 

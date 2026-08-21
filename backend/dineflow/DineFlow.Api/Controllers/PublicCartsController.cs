@@ -1,7 +1,9 @@
 using System.Data;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Cart;
+using DineFlow.Api.Compliance;
 using DineFlow.Api.Contracts.Order;
 using DineFlow.Api.Contracts.Payments;
 using DineFlow.Api.Options;
@@ -14,9 +16,11 @@ using DineFlow.Infrastructure.Persistence;
 using DineFlow.Infrastructure.Restaurant;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using Stripe;
 using Stripe.Checkout;
 using PaymentMethod = DineFlow.Infrastructure.Payments.PaymentMethod;
@@ -27,6 +31,9 @@ namespace DineFlow.Api.Controllers;
 [AllowAnonymous]
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 [Route("api/public/carts")]
+// Anonymous, and the participant token is the only credential. Applies to every action here,
+// including join — creating carts in bulk is its own kind of abuse.
+[EnableRateLimiting(RateLimitPolicies.CartAccess)]
 public class PublicCartsController(
     AppDbContext dbContext,
     CartAccessService cartAccessService,
@@ -41,9 +48,19 @@ public class PublicCartsController(
     StripeOrderCheckoutService stripeOrderCheckoutService,
     IStripeClient stripeClient,
     IOptions<StripeOptions> stripeOptions,
+    CartTokenFailureTracker cartTokenFailureTracker,
     ILogger<PublicCartsController> logger) : ControllerBase
 {
+    /// <summary>
+    /// Trims a declaration and treats whitespace as nothing declared, so a snapshot never records
+    /// a blank that reads as a declaration nobody made.
+    /// </summary>
+    private static string? NormalizeDisclosureSnapshot(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
     private const string ParticipantTokenHeader = "X-Cart-Participant-Token";
+    private const string IdempotencyKeyHeader = "Idempotency-Key";
+    private const int MaximumIdempotencyKeyLength = 200;
     private const int MaximumItemQuantity = 100;
     private const int MaximumItemNoteLength = 2_000;
     private const int MaximumCartNoteLength = 4_000;
@@ -73,13 +90,34 @@ public class PublicCartsController(
             return BadRequest(new { message = "Table QR ordering only supports DineIn." });
         }
 
-        var requestedOrderType = OrderType.Takeaway;
-        if (hasRestaurantId && !string.IsNullOrWhiteSpace(request.OrderType))
+        // A table QR is unambiguous — it is dine-in by definition. Joining by restaurant is not, and
+        // the default here used to be Takeaway: a request that named no type was answered 200 with
+        // a takeaway cart nobody had chosen. For a restaurant offering both, that is a guess about
+        // how the customer intends to eat, and it changes what they are quoted and how the kitchen
+        // treats the order. Better to refuse and let the caller ask.
+        var requestedOrderType = OrderType.DineIn;
+
+        if (hasRestaurantId)
         {
+            if (string.IsNullOrWhiteSpace(request.OrderType))
+            {
+                return BadRequest(new
+                {
+                    message = "Choose how you would like to order before starting a cart.",
+                    code = "order_type_required",
+                    allowedOrderTypes = new[] { nameof(OrderType.DineIn), nameof(OrderType.Takeaway) }
+                });
+            }
+
             if (!Enum.TryParse<OrderType>(request.OrderType, true, out requestedOrderType) ||
                 requestedOrderType is not (OrderType.DineIn or OrderType.Takeaway))
             {
-                return BadRequest(new { message = "OrderType must be DineIn or Takeaway." });
+                return BadRequest(new
+                {
+                    message = "OrderType must be DineIn or Takeaway.",
+                    code = "order_type_invalid",
+                    allowedOrderTypes = new[] { nameof(OrderType.DineIn), nameof(OrderType.Takeaway) }
+                });
             }
         }
 
@@ -181,7 +219,20 @@ public class PublicCartsController(
                 return unavailableResult;
             }
 
-            cart = new Cart
+            // The table branch above reuses a table's open cart; this one always made a new one.
+            // So a signed-in customer pressing "Order again" twice ended up with two active carts
+            // for the same restaurant, the second one on screen and the first left in the database
+            // holding items nobody would ever see again.
+            //
+            // Only resolvable for a signed-in customer: a guest is identified by the participant
+            // token their browser is holding, and a request that arrives without one is, as far as
+            // the server can tell, a different person.
+            var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            var existingCart = string.IsNullOrWhiteSpace(currentUserId)
+                ? null
+                : await FindResumableCartAsync(restaurantId, requestedOrderType, currentUserId, now, cancellationToken);
+
+            cart = existingCart ?? new Cart
             {
                 Id = Guid.NewGuid(),
                 RestaurantId = restaurantId,
@@ -192,7 +243,10 @@ public class PublicCartsController(
                 CreatedAt = now
             };
 
-            await dbContext.Carts.AddAsync(cart, cancellationToken);
+            if (existingCart is null)
+            {
+                await dbContext.Carts.AddAsync(cart, cancellationToken);
+            }
         }
 
         var participantToken = GenerateParticipantToken();
@@ -220,6 +274,32 @@ public class PublicCartsController(
         });
     }
 
+    /// <summary>
+    /// This customer's open cart for the same restaurant and ordering mode, or null when they have
+    /// none. Matched through the participant rows, which are what tie a cart to an account.
+    /// </summary>
+    private async Task<Cart?> FindResumableCartAsync(
+        Guid restaurantId,
+        OrderType orderType,
+        string customerId,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        return await dbContext.Carts
+            .Where(cart =>
+                cart.RestaurantId == restaurantId &&
+                cart.TableId == null &&
+                cart.OrderType == orderType &&
+                cart.Status == CartStatus.Active &&
+                cart.ExpiresAt > now &&
+                dbContext.CartParticipants.Any(participant =>
+                    participant.CartId == cart.Id && participant.CustomerId == customerId))
+            // Newest first: if earlier data left more than one behind, resuming the most recent is
+            // the one the customer last saw.
+            .OrderByDescending(cart => cart.CreatedAt)
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
     [HttpGet("{cartId:guid}")]
     public async Task<IActionResult> GetCart(
         Guid cartId,
@@ -243,6 +323,7 @@ public class PublicCartsController(
         Guid cartId,
         AddCartItemRequest request,
         [FromHeader(Name = ParticipantTokenHeader)] string? participantToken,
+        [FromHeader(Name = IdempotencyKeyHeader)] string? idempotencyKey,
         CancellationToken cancellationToken)
     {
         var validationError = ValidateItem(request.Quantity, request.Note);
@@ -252,11 +333,45 @@ public class PublicCartsController(
             return BadRequest(new { message = validationError });
         }
 
+        if (idempotencyKey is { Length: > MaximumIdempotencyKeyLength })
+        {
+            return BadRequest(new
+            {
+                message = $"{IdempotencyKeyHeader} must not exceed {MaximumIdempotencyKeyLength} characters."
+            });
+        }
+
+        // Adding is the one cart operation that is not repeatable — it adds to whatever is already
+        // there. The claim below and the mutation share this transaction, so the key is recorded if
+        // and only if the quantity moved.
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted,
+            cancellationToken);
+
         var access = await AuthorizeMutableCartAsync(cartId, participantToken, cancellationToken);
 
         if (access.ErrorResult is not null)
         {
             return access.ErrorResult;
+        }
+
+        // Everything below reads the cart's lines, decides, and writes back. Ten callers doing that
+        // at once all read the same "before" and all wrote the same "after", so nine of ten adds
+        // vanished while every one of them was answered 200. Serialising per cart is the fix: the
+        // contention is one customer, or one table, and correctness is worth more than the wait.
+        await LockCartAsync(cartId, cancellationToken);
+
+        if (!await TryClaimMutationAsync(cartId, idempotencyKey, cancellationToken))
+        {
+            // This exact add already happened. The caller is retrying because it never heard back,
+            // so answer with the cart as it stands rather than adding again.
+            await transaction.CommitAsync(cancellationToken);
+
+            var replayed = await cartAccessService.LoadSnapshotAsync(cartId, cancellationToken);
+
+            return replayed is null
+                ? NotFound(new { message = "Cart not found." })
+                : Ok(replayed);
         }
 
         var cart = access.Cart!;
@@ -285,6 +400,55 @@ public class PublicCartsController(
         if (optionSelection.Errors.Count > 0)
         {
             return BadRequest(new { message = string.Join(" ", optionSelection.Errors) });
+        }
+
+        // Checked before the cart is touched. Stock is only reserved at checkout, so this cannot
+        // promise the portions will still be there — but it stops a customer choosing options and
+        // pressing pay on a dish the menu could already tell them is nearly gone.
+        var alreadyInCart = await dbContext.CartItems
+            .Where(item => item.CartId == cartId && item.MenuItemId == request.MenuItemId)
+            .SumAsync(item => item.Quantity, cancellationToken);
+        var stockLimit = CartStockLimit.Evaluate(menuItem.StockQuantity, alreadyInCart, request.Quantity);
+
+        if (!stockLimit.IsAllowed)
+        {
+            return Conflict(new
+            {
+                message = stockLimit.DescribeRefusal(menuItem.Name),
+                code = "insufficient_stock",
+                remaining = stockLimit.Remaining,
+                alreadyInCart = stockLimit.AlreadyInCart
+            });
+        }
+
+        // Modifiers run out too, and until this check existed the cart only found out at payment.
+        // Same warning as the dish above, for the same reason: said while it can still be changed.
+        var trackedOptions = optionSelection.SelectedOptions
+            .Select(selection => new CartOptionStockLimit.Request(
+                selection.Option.Id,
+                selection.Option.Name,
+                selection.Option.StockQuantity,
+                selection.Quantity))
+            .ToList();
+
+        if (trackedOptions.Exists(option => option.StockQuantity is not null))
+        {
+            var optionUnitsInCart = CartOptionStockLimit.UnitsInCart(await dbContext.CartItems
+                .Where(item => item.CartId == cartId)
+                .ToListAsync(cancellationToken));
+            var optionShortages = CartOptionStockLimit.Evaluate(
+                trackedOptions,
+                request.Quantity,
+                optionUnitsInCart);
+
+            if (optionShortages.Count > 0)
+            {
+                return Conflict(new
+                {
+                    message = CartOptionStockLimit.DescribeRefusal(optionShortages),
+                    code = "insufficient_option_stock"
+                });
+            }
         }
 
         var note = NormalizeNote(request.Note);
@@ -324,6 +488,7 @@ public class PublicCartsController(
         cart.UpdatedAt = DateTime.UtcNow;
         access.Participant!.LastSeenAt = DateTime.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
 
         var snapshot = await cartAccessService.LoadSnapshotAsync(cartId, cancellationToken);
 
@@ -364,12 +529,22 @@ public class PublicCartsController(
             return BadRequest(new { message = validationError });
         }
 
+        // The version check below compares what the caller saw against what is stored. Without the
+        // lock, two simultaneous edits both read the same version, both pass the check and both
+        // write — which is the very thing the check exists to catch. The lock makes the read, the
+        // check and the write one step; the version turns a *stale* edit into a conflict.
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted,
+            cancellationToken);
+
         var access = await AuthorizeMutableCartAsync(cartId, participantToken, cancellationToken);
 
         if (access.ErrorResult is not null)
         {
             return access.ErrorResult;
         }
+
+        await LockCartAsync(cartId, cancellationToken);
 
         var item = await dbContext.CartItems.FirstOrDefaultAsync(
             cartItem => cartItem.Id == cartItemId && cartItem.CartId == cartId,
@@ -378,6 +553,32 @@ public class PublicCartsController(
         if (item is null)
         {
             return NotFound(new { message = "Cart item not found." });
+        }
+
+        if (request.ExpectedUpdatedAt is null)
+        {
+            return BadRequest(new
+            {
+                message = "This edit is missing the line version it was based on, so it cannot be "
+                    + "checked against changes made by anyone else. Reload the cart and try again.",
+                code = "missing_expected_version"
+            });
+        }
+
+        // The cart is shared, and this edit sets an absolute quantity rather than adjusting one, so
+        // the loser of a race does not lose part of their change — they lose all of it, silently.
+        if (CartItemWasChangedElsewhere(item, request.ExpectedUpdatedAt.Value))
+        {
+            var current = await cartAccessService.LoadSnapshotAsync(cartId, cancellationToken);
+
+            return Conflict(new
+            {
+                message = "Someone else changed this item while you were editing it. "
+                    + "Here is the cart as it stands now.",
+                code = "cart_item_conflict",
+                currentUpdatedAt = CartItemVersionOf(item),
+                cart = current
+            });
         }
 
         var note = NormalizeNote(request.Note);
@@ -417,6 +618,79 @@ public class PublicCartsController(
                 .ToArray();
         }
 
+        // Same warning the add path gives, for the other way a quantity can grow. This edit sets an
+        // absolute quantity, so what the rest of the cart holds is what counts as "already there".
+        var stockQuantity = await dbContext.MenuItems
+            .Where(menuItem => menuItem.Id == item.MenuItemId)
+            .Select(menuItem => new { menuItem.StockQuantity, menuItem.Name })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (stockQuantity is not null)
+        {
+            var elsewhereInCart = await dbContext.CartItems
+                .Where(cartItem =>
+                    cartItem.CartId == cartId &&
+                    cartItem.Id != cartItemId &&
+                    cartItem.MenuItemId == item.MenuItemId)
+                .SumAsync(cartItem => cartItem.Quantity, cancellationToken);
+            var stockLimit = CartStockLimit.Evaluate(
+                stockQuantity.StockQuantity,
+                elsewhereInCart,
+                request.Quantity);
+
+            if (!stockLimit.IsAllowed)
+            {
+                return Conflict(new
+                {
+                    message = stockLimit.DescribeRefusal(stockQuantity.Name),
+                    code = "insufficient_stock",
+                    remaining = stockLimit.Remaining,
+                    alreadyInCart = stockLimit.AlreadyInCart
+                });
+            }
+        }
+
+        // A quantity change multiplies the modifiers along with the dish, so this runs whether or
+        // not the options themselves were edited. Absolute quantity again: only the cart's other
+        // lines count as already committed.
+        var requestedOptionCounts = selectedOptionIds
+            .GroupBy(optionId => optionId)
+            .ToDictionary(group => group.Key, group => group.Count());
+
+        if (requestedOptionCounts.Count > 0)
+        {
+            var requestedOptionIds = requestedOptionCounts.Keys.ToArray();
+            var trackedOptions = await dbContext.MenuItemOptions
+                .AsNoTracking()
+                .Where(option => requestedOptionIds.Contains(option.Id) && option.StockQuantity != null)
+                .Select(option => new { option.Id, option.Name, option.StockQuantity })
+                .ToListAsync(cancellationToken);
+
+            if (trackedOptions.Count > 0)
+            {
+                var optionUnitsElsewhere = CartOptionStockLimit.UnitsInCart(await dbContext.CartItems
+                    .Where(cartItem => cartItem.CartId == cartId && cartItem.Id != cartItemId)
+                    .ToListAsync(cancellationToken));
+                var optionShortages = CartOptionStockLimit.Evaluate(
+                    trackedOptions.Select(option => new CartOptionStockLimit.Request(
+                        option.Id,
+                        option.Name,
+                        option.StockQuantity,
+                        requestedOptionCounts[option.Id])),
+                    request.Quantity,
+                    optionUnitsElsewhere);
+
+                if (optionShortages.Count > 0)
+                {
+                    return Conflict(new
+                    {
+                        message = CartOptionStockLimit.DescribeRefusal(optionShortages),
+                        code = "insufficient_option_stock"
+                    });
+                }
+            }
+        }
+
         var matchingLines = await dbContext.CartItems
             .Where(cartItem =>
                 cartItem.CartId == cartId &&
@@ -449,6 +723,7 @@ public class PublicCartsController(
         access.Cart!.UpdatedAt = DateTime.UtcNow;
         access.Participant!.LastSeenAt = DateTime.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
 
         return await ReturnUpdatedCartAsync(cartId, "item-updated", cancellationToken);
     }
@@ -460,12 +735,18 @@ public class PublicCartsController(
         [FromHeader(Name = ParticipantTokenHeader)] string? participantToken,
         CancellationToken cancellationToken)
     {
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted,
+            cancellationToken);
+
         var access = await AuthorizeMutableCartAsync(cartId, participantToken, cancellationToken);
 
         if (access.ErrorResult is not null)
         {
             return access.ErrorResult;
         }
+
+        await LockCartAsync(cartId, cancellationToken);
 
         var item = await dbContext.CartItems.FirstOrDefaultAsync(
             cartItem => cartItem.Id == cartItemId && cartItem.CartId == cartId,
@@ -480,6 +761,7 @@ public class PublicCartsController(
         access.Cart!.UpdatedAt = DateTime.UtcNow;
         access.Participant!.LastSeenAt = DateTime.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
 
         return await ReturnUpdatedCartAsync(cartId, "item-removed", cancellationToken);
     }
@@ -490,6 +772,10 @@ public class PublicCartsController(
         [FromHeader(Name = ParticipantTokenHeader)] string? participantToken,
         CancellationToken cancellationToken)
     {
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted,
+            cancellationToken);
+
         var access = await AuthorizeMutableCartAsync(cartId, participantToken, cancellationToken);
 
         if (access.ErrorResult is not null)
@@ -497,12 +783,16 @@ public class PublicCartsController(
             return access.ErrorResult;
         }
 
+        await LockCartAsync(cartId, cancellationToken);
+
         var items = await dbContext.CartItems
             .Where(cartItem => cartItem.CartId == cartId)
             .ToListAsync(cancellationToken);
 
         if (items.Count == 0)
         {
+            await transaction.CommitAsync(cancellationToken);
+
             return await ReturnUpdatedCartAsync(cartId, "items-cleared", cancellationToken);
         }
 
@@ -510,6 +800,7 @@ public class PublicCartsController(
         access.Cart!.UpdatedAt = DateTime.UtcNow;
         access.Participant!.LastSeenAt = DateTime.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
 
         return await ReturnUpdatedCartAsync(cartId, "items-cleared", cancellationToken);
     }
@@ -526,6 +817,10 @@ public class PublicCartsController(
             return BadRequest(new { message = $"Cart note cannot exceed {MaximumCartNoteLength} characters." });
         }
 
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.ReadCommitted,
+            cancellationToken);
+
         var access = await AuthorizeMutableCartAsync(cartId, participantToken, cancellationToken);
 
         if (access.ErrorResult is not null)
@@ -533,10 +828,13 @@ public class PublicCartsController(
             return access.ErrorResult;
         }
 
+        await LockCartAsync(cartId, cancellationToken);
+
         access.Cart!.CustomerNote = NormalizeNote(request.Note);
         access.Cart.UpdatedAt = DateTime.UtcNow;
         access.Participant!.LastSeenAt = DateTime.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
 
         return await ReturnUpdatedCartAsync(cartId, "note-updated", cancellationToken);
     }
@@ -544,6 +842,7 @@ public class PublicCartsController(
     [HttpPost("{cartId:guid}/checkout")]
     public async Task<IActionResult> Checkout(
         Guid cartId,
+        [FromBody] CheckoutCartRequest? request,
         [FromHeader(Name = ParticipantTokenHeader)] string? participantToken,
         CancellationToken cancellationToken)
     {
@@ -567,6 +866,13 @@ public class PublicCartsController(
             return NotFound(new { message = "Cart not found." });
         }
 
+        // The lock above did its job — a second caller waits here until the first commits — but the
+        // values it returned were being thrown away. Authorization already loaded this cart, and a
+        // tracked entity wins identity resolution: EF hands back the instance read *before* the
+        // lock and leaves its properties alone. So the loser of the race woke up holding a snapshot
+        // that still said Active with no order, and cheerfully placed a second one.
+        await dbContext.Entry(cart).ReloadAsync(cancellationToken);
+
         if (cart.Status == CartStatus.Submitted && cart.OrderId.HasValue)
         {
             var existingOrder = await LoadOrderAsync(cart.OrderId.Value, cancellationToken);
@@ -585,9 +891,31 @@ public class PublicCartsController(
             });
         }
 
+        // Checked ahead of the generic "not active" test below. Between authorization and the lock
+        // above, another request can expire this cart; without this, that timing decides whether
+        // the caller is told "gone" or "no longer active" for one and the same reason.
+        if (cart.Status == CartStatus.Expired)
+        {
+            return StatusCode(StatusCodes.Status410Gone, new { message = "Cart has expired." });
+        }
+
         if (cart.Status != CartStatus.Active)
         {
             return Conflict(new { message = "Cart is no longer active." });
+        }
+
+        if (request is null ||
+            request.AcceptedCustomerTermsVersion != LegalDocumentVersions.CustomerTerms ||
+            request.AcknowledgedPrivacyPolicyVersion != LegalDocumentVersions.PrivacyPolicy ||
+            request.AcknowledgedAllergenNoticeVersion != LegalDocumentVersions.AllergenNotice)
+        {
+            return BadRequest(new
+            {
+                message = "Accept the current Customer Terms and acknowledge the Privacy and Allergen notices before ordering.",
+                requiredCustomerTermsVersion = LegalDocumentVersions.CustomerTerms,
+                requiredPrivacyPolicyVersion = LegalDocumentVersions.PrivacyPolicy,
+                requiredAllergenNoticeVersion = LegalDocumentVersions.AllergenNotice
+            });
         }
 
         if (cart.ExpiresAt <= DateTime.UtcNow)
@@ -684,7 +1012,12 @@ public class PublicCartsController(
             .ToDictionaryAsync(item => item.Id, cancellationToken);
 
         var now = DateTime.UtcNow;
-        var orderCustomerId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? access.Participant?.CustomerId;
+        // The signed-in caller, or nobody. This used to fall back to the participant's stored
+        // customer, which is how an anonymous request ended up placing an order under the account
+        // that had used this tab earlier. Authorization now refuses that combination outright, and
+        // taking the identity from the request alone means an order can never name someone who is
+        // not the one making it.
+        var orderCustomerId = User.FindFirstValue(ClaimTypes.NameIdentifier);
 
         // Only orders with nobody signed in behind them need a bearer secret; for everyone else the
         // account itself is the credential.
@@ -696,9 +1029,18 @@ public class PublicCartsController(
         {
             Id = Guid.NewGuid(),
             RestaurantId = cart.RestaurantId,
+            // Claims the cart. The unique index on this column is the last line of defence against
+            // one cart becoming two orders.
+            CartId = cart.Id,
             TableId = cart.TableId,
             TableSessionId = tableSession?.Id,
             CustomerId = orderCustomerId,
+            AcceptedCustomerTermsVersion = request.AcceptedCustomerTermsVersion,
+            AcknowledgedPrivacyPolicyVersion = request.AcknowledgedPrivacyPolicyVersion,
+            AcknowledgedAllergenNoticeVersion = request.AcknowledgedAllergenNoticeVersion,
+            LegalAcceptedAt = DateTime.UtcNow,
+            LegalAcceptanceIpAddress = HttpContext.Connection.RemoteIpAddress?.ToString(),
+            LegalAcceptanceUserAgent = Request.Headers.UserAgent.ToString(),
             GuestAccessTokenHash = guestAccess?.Hash,
             OrderNumber = await GenerateOrderNumberAsync(cancellationToken),
             OrderType = cart.OrderType,
@@ -711,17 +1053,21 @@ public class PublicCartsController(
 
         foreach (var cartItem in cartItems)
         {
-            if (!menuItems.TryGetValue(cartItem.MenuItemId, out var menuItem) ||
-                menuItem.RestaurantId != cart.RestaurantId ||
-                menuItem.Category is null ||
-                menuItem.Category.RestaurantId != cart.RestaurantId ||
-                !menuItem.Category.IsActive ||
-                !menuItem.IsAvailable ||
-                menuItem.IsSoldOut)
+            menuItems.TryGetValue(cartItem.MenuItemId, out var menuItem);
+
+            // The same rule the cart snapshot reports, so a cart can never show a line as orderable
+            // that this then refuses.
+            var availability = CartLineAvailability.Evaluate(menuItem, cart.RestaurantId);
+
+            // The null check is redundant with the verdict — an absent item is never orderable — but
+            // it is what makes that provable to the compiler on the lines below.
+            if (menuItem is null || !availability.IsOrderable)
             {
                 return Conflict(new
                 {
-                    message = "Cart contains unavailable, sold out, or cross-restaurant items."
+                    message = $"{menuItem?.Name ?? "An item in your cart"}: {availability.Reason}",
+                    code = "cart_item_unavailable",
+                    menuItemId = cartItem.MenuItemId
                 });
             }
 
@@ -740,6 +1086,11 @@ public class PublicCartsController(
                 Id = Guid.NewGuid(),
                 MenuItemId = menuItem.Id,
                 MenuItemNameSnapshot = menuItem.Name,
+                // Frozen with the name and the price. A correction to the menu must not rewrite
+                // what a past customer was shown.
+                AllergensSnapshot = NormalizeDisclosureSnapshot(menuItem.Allergens),
+                MayContainAllergensSnapshot = NormalizeDisclosureSnapshot(menuItem.MayContainAllergens),
+                CrossContactStatementSnapshot = NormalizeDisclosureSnapshot(menuItem.CrossContactStatement),
                 BasePriceSnapshot = menuItem.Price,
                 Quantity = cartItem.Quantity,
                 UnitPrice = optionSelection.UnitPrice,
@@ -760,6 +1111,11 @@ public class PublicCartsController(
                     GroupNameSnapshot = groupName,
                     OptionNameSnapshot = option.Name,
                     PriceAdjustmentSnapshot = option.PriceAdjustment,
+                    // Frozen with the name and the price: a receipt has to say what the customer
+                    // was told, not what the menu says today.
+                    AllergensSnapshot = option.Allergens,
+                    MayContainAllergensSnapshot = option.MayContainAllergens,
+                    CrossContactStatementSnapshot = option.CrossContactStatement,
                     Quantity = selectedOption.Quantity,
                     CreatedAt = now
                 });
@@ -783,6 +1139,22 @@ public class PublicCartsController(
             {
                 message = "Some items sold out while the cart was being submitted.",
                 items = OrderController.DescribeUnavailableItems(unavailableItemIds, order.OrderItems)
+            });
+        }
+
+        // Same transaction as the dish. A cart that takes the last portion and finds its tracked
+        // extra gone must take neither, or the kitchen owes a plate it cannot make.
+        var unavailableOptionIds = await menuItemStockService.TryReserveOptionsAsync(
+            OrderOptionStock.RequestedQuantities(order.OrderItems),
+            cancellationToken);
+
+        if (unavailableOptionIds.Count > 0)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Conflict(new
+            {
+                message = "Some options sold out while the cart was being submitted.",
+                options = OrderController.DescribeUnavailableOptions(unavailableOptionIds, order.OrderItems)
             });
         }
 
@@ -826,8 +1198,35 @@ public class PublicCartsController(
                 order.PaymentMethod,
                 order.TotalAmount
             });
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (IsCartAlreadyOrderedViolation(exception))
+        {
+            // The unique index refused a second order for this cart. Reaching here means the lock
+            // above was bypassed somehow, so the safe answer is the order that did commit — not an
+            // error that would invite the caller to try again and keep trying.
+            await transaction.RollbackAsync(cancellationToken);
+            logger.LogWarning(
+                exception,
+                "A second checkout for cart {CartId} was stopped by the database, not by the cart lock.",
+                cartId);
+
+            var committed = await FindOrderForCartAsync(cartId, cancellationToken);
+
+            if (committed is null)
+            {
+                return Conflict(new { message = "This cart was already submitted, but its order could not be loaded." });
+            }
+
+            return Ok(new CheckoutCartResponse
+            {
+                Message = "Order was already submitted.",
+                Order = MapOrder(committed)
+            });
+        }
 
         var submittedOrder = await LoadOrderAsync(order.Id, cancellationToken);
         var cartSnapshot = await cartAccessService.LoadSnapshotAsync(cartId, cancellationToken);
@@ -851,6 +1250,92 @@ public class PublicCartsController(
             // The one and only time the plaintext leaves the server.
             GuestAccessToken = guestAccess?.Token
         });
+    }
+
+    /// <summary>
+    /// True when the write failed because this cart already has an order, rather than for any
+    /// other reason. Matched on the index name so an unrelated constraint is never swallowed.
+    /// </summary>
+    private static bool IsCartAlreadyOrderedViolation(DbUpdateException exception) =>
+        exception.InnerException is PostgresException { SqlState: "23505" } postgres &&
+        string.Equals(postgres.ConstraintName, "IX_Orders_CartId_Unique", StringComparison.Ordinal);
+
+    /// <summary>The order this cart already produced, read outside the failed transaction.</summary>
+    private async Task<Order?> FindOrderForCartAsync(Guid cartId, CancellationToken cancellationToken)
+    {
+        var orderId = await dbContext.Orders
+            .AsNoTracking()
+            .Where(order => order.CartId == cartId)
+            .Select(order => (Guid?)order.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return orderId is null ? null : await LoadOrderAsync(orderId.Value, cancellationToken);
+    }
+
+    /// <summary>
+    /// A cart line's version. A line nobody has edited yet has no <c>UpdatedAt</c>, and treating
+    /// that as "nothing to compare" would leave a just-added line unprotected — which is exactly
+    /// when two people at a table are most likely to be adjusting the same thing.
+    /// </summary>
+    private static DateTime CartItemVersionOf(CartItem item) => item.UpdatedAt ?? item.CreatedAt;
+
+    /// <summary>
+    /// True when the line has moved on since the editor loaded it. Compared to the millisecond
+    /// because the value makes a round trip through JSON, and a comparison tight enough to fail on
+    /// a rounding difference would reject every edit.
+    /// </summary>
+    private static bool CartItemWasChangedElsewhere(CartItem item, DateTime expectedUpdatedAt) =>
+        Math.Abs((CartItemVersionOf(item) - expectedUpdatedAt).TotalMilliseconds) > 1;
+
+    /// <summary>
+    /// Holds this cart against other writers until the transaction ends.
+    ///
+    /// <para>
+    /// Deliberately <c>AsNoTracking</c>: authorization has already loaded this cart, and a tracked
+    /// entity wins identity resolution, so a tracking query here would hand back the instance read
+    /// before the lock and quietly discard the row the lock just re-read. Nothing needs the values
+    /// — only the lock.
+    /// </para>
+    /// </summary>
+    private Task LockCartAsync(Guid cartId, CancellationToken cancellationToken) =>
+        dbContext.Carts
+            .FromSqlInterpolated($"SELECT * FROM \"Carts\" WHERE \"Id\" = {cartId} FOR UPDATE")
+            .AsNoTracking()
+            .FirstOrDefaultAsync(cancellationToken);
+
+    /// <summary>
+    /// Claims this key for this cart, or reports that it has already been used.
+    ///
+    /// <para>
+    /// The insert is the decision. Reading first and inserting after would leave a window where two
+    /// retries both see nothing and both proceed — which is the very situation being defended
+    /// against. A concurrent retry blocks on the unique index until the first transaction commits
+    /// and then loses, exactly as a later retry does.
+    /// </para>
+    ///
+    /// <para>A caller that sends no key gets the old behaviour: nothing to match, nothing claimed.</para>
+    /// </summary>
+    private async Task<bool> TryClaimMutationAsync(
+        Guid cartId,
+        string? idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        var key = idempotencyKey?.Trim();
+
+        if (string.IsNullOrEmpty(key))
+        {
+            return true;
+        }
+
+        var inserted = await dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"""
+             INSERT INTO "CartMutations" ("Id", "CartId", "IdempotencyKey", "CreatedAt")
+             VALUES ({Guid.NewGuid()}, {cartId}, {key}, {DateTime.UtcNow})
+             ON CONFLICT ("CartId", "IdempotencyKey") DO NOTHING
+             """,
+            cancellationToken);
+
+        return inserted == 1;
     }
 
     [HttpPut("{cartId:guid}/payment-method")]
@@ -895,31 +1380,12 @@ public class PublicCartsController(
             return NotFound(new { message = "Order not found." });
         }
 
-        if (order.PaymentStatus == PaymentStatus.Paid)
-        {
-            return Conflict(new { message = "The payment method cannot be changed after payment." });
-        }
+        // Shared with the order-level route so the two cannot drift on what is allowed.
+        var refusal = OrderPaymentMethodPolicy.Refuse(order, paymentMethod);
 
-        if (order.Payments.Any(payment => payment.Status == PaymentStatus.Pending))
+        if (refusal is not null)
         {
-            return Conflict(new { message = "The payment method cannot be changed while an online payment is pending." });
-        }
-
-        if (paymentMethod == PaymentMethod.PayAtCounter &&
-            order.Restaurant?.PaymentPolicy != RestaurantPaymentPolicy.PayAtCounterAllowed)
-        {
-            return Conflict(new { message = "This restaurant requires online payment before the order can be processed." });
-        }
-
-        if (paymentMethod == PaymentMethod.Online &&
-            (order.Restaurant is null ||
-             string.IsNullOrWhiteSpace(order.Restaurant.StripeAccountId) ||
-             !order.Restaurant.StripeChargesEnabled))
-        {
-            return Conflict(new
-            {
-                message = "Online payment is not available for this restaurant yet. Please choose pay at counter."
-            });
+            return Conflict(new { message = refusal });
         }
 
         order.PaymentMethod = paymentMethod;
@@ -1008,12 +1474,41 @@ public class PublicCartsController(
         string? participantToken,
         CancellationToken cancellationToken)
     {
+        var source = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
         var access = await cartAccessService.AuthorizeAsync(
             cartId,
             participantToken,
             cancellationToken);
 
-        if (access.Failure == CartAccessFailure.Expired)
+        // The lockout is applied to the *outcome*, not to the request. Checking it before the
+        // lookup was cheaper and wrong: an attacker on a restaurant's own wifi could spend the
+        // budget deliberately and take every diner behind that address offline with them. Someone
+        // holding a real token is, by definition, not the source this is defending against — so
+        // they are let through no matter what anyone else on their connection has been doing.
+        if (access.Failure == CartAccessFailure.InvalidToken)
+        {
+            cartTokenFailureTracker.RecordFailure(source);
+
+            if (cartTokenFailureTracker.IsLockedOut(source))
+            {
+                return new CartAccessResult(null, null, StatusCode(
+                    StatusCodes.Status429TooManyRequests,
+                    new
+                    {
+                        message = "Too many invalid cart links from this connection. Wait a few minutes and try again.",
+                        code = "cart_token_attempts_exceeded"
+                    }));
+            }
+        }
+        else if (access.Failure == CartAccessFailure.None)
+        {
+            // Holding a real token proves this is not the source the budget is for.
+            cartTokenFailureTracker.Clear(source);
+        }
+
+        // Only the request that actually expired it announces the fact; the rest are simply told.
+        if (access.JustExpired)
         {
             await cartRealtimeNotifier.CartExpiredAsync(cartId, cancellationToken);
         }
@@ -1021,9 +1516,37 @@ public class PublicCartsController(
         if (access.Failure == CartAccessFailure.None && access.Participant is not null)
         {
             var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            var participantOwner = access.Participant.CustomerId;
+            var participantIsOwned = !string.IsNullOrWhiteSpace(participantOwner);
+            var callerIsSignedIn = !string.IsNullOrWhiteSpace(currentUserId);
 
-            if (!string.IsNullOrWhiteSpace(currentUserId) &&
-                !string.Equals(access.Participant.CustomerId, currentUserId, StringComparison.Ordinal))
+            // A participant that belongs to an account may only be used by that account. This used
+            // to handle one direction only — a guest signing in claimed their own participant — and
+            // said nothing about the reverse. So after logging out, the tab kept sending the same
+            // token, the participant stayed bound to the account that had signed out, and the order
+            // it eventually placed was attributed to them: their name and address surfaced in the
+            // restaurant's order list, under a session the browser was labelling "Guest".
+            //
+            // The same check covers a second account picking the token up, which would otherwise
+            // silently transfer the first one's cart.
+            if (participantIsOwned &&
+                !string.Equals(participantOwner, currentUserId, StringComparison.Ordinal))
+            {
+                return new CartAccessResult(
+                    access.Cart,
+                    null,
+                    Unauthorized(new
+                    {
+                        message = callerIsSignedIn
+                            ? "This cart belongs to a different account. Start a new one to keep ordering."
+                            : "You have signed out, so this cart is no longer yours. Start a new one to order as a guest.",
+                        code = "participant_identity_changed"
+                    }));
+            }
+
+            // A guest who signs in claims the participant they have been using. Only ever null to
+            // non-null: the branch above has already rejected any actual change of owner.
+            if (callerIsSignedIn && !participantIsOwned)
             {
                 access.Participant.CustomerId = currentUserId;
                 access.Participant.LastSeenAt = DateTime.UtcNow;
@@ -1144,6 +1667,9 @@ public class PublicCartsController(
                     OrderId = item.OrderId,
                     MenuItemId = item.MenuItemId,
                     MenuItemNameSnapshot = item.MenuItemNameSnapshot,
+                    AllergensSnapshot = item.AllergensSnapshot,
+                    MayContainAllergensSnapshot = item.MayContainAllergensSnapshot,
+                    CrossContactStatementSnapshot = item.CrossContactStatementSnapshot,
                     ItemNameSnapshot = item.MenuItemNameSnapshot,
                     BasePriceSnapshot = item.BasePriceSnapshot,
                     Quantity = item.Quantity,
@@ -1159,6 +1685,9 @@ public class PublicCartsController(
                         MenuItemOptionId = option.MenuItemOptionId,
                         GroupNameSnapshot = option.GroupNameSnapshot,
                         OptionNameSnapshot = option.OptionNameSnapshot,
+                        AllergensSnapshot = option.AllergensSnapshot,
+                        MayContainAllergensSnapshot = option.MayContainAllergensSnapshot,
+                        CrossContactStatementSnapshot = option.CrossContactStatementSnapshot,
                         PriceAdjustmentSnapshot = option.PriceAdjustmentSnapshot,
                         Quantity = option.Quantity
                     }).ToList()
@@ -1251,17 +1780,16 @@ public class PublicCartsController(
         foreach (var group in optionGroups)
         {
             var selectedInGroup = selectedOptions
-                .Where(selection => selection.Option.GroupId == group.Id)
-                .Sum(selection => selection.Quantity);
+                .Count(selection => selection.Option.GroupId == group.Id);
 
             if (group.IsRequired && selectedInGroup < group.MinSelections)
             {
-                errors.Add($"'{group.Name}' requires at least {group.MinSelections} selection(s) for '{menuItem.Name}'.");
+                errors.Add($"'{group.Name}' requires at least {group.MinSelections} choice(s) for '{menuItem.Name}'.");
             }
 
             if (selectedInGroup > group.MaxSelections)
             {
-                errors.Add($"'{group.Name}' allows at most {group.MaxSelections} selection(s) for '{menuItem.Name}'.");
+                errors.Add($"'{group.Name}' allows at most {group.MaxSelections} choice(s) for '{menuItem.Name}'.");
             }
         }
 
@@ -1560,21 +2088,8 @@ public class PublicCartsController(
         return QueryHelpers.AddQueryString(url, "returnTo", returnPath);
     }
 
-    private static string AppendSessionId(string url)
-    {
-        if (string.IsNullOrWhiteSpace(url))
-        {
-            return "http://localhost:5173/payment/success?session_id={CHECKOUT_SESSION_ID}";
-        }
-
-        if (url.Contains("{CHECKOUT_SESSION_ID}", StringComparison.Ordinal))
-        {
-            return url;
-        }
-
-        var separator = url.Contains('?') ? '&' : '?';
-        return $"{url}{separator}session_id={{CHECKOUT_SESSION_ID}}";
-    }
+    private static string AppendSessionId(string url) =>
+        StripeCheckoutReturnUrl.WithSessionId(url);
 
     private sealed record CartAccessResult(
         Cart? Cart,

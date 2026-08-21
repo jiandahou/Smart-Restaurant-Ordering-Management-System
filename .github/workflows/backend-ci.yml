@@ -18,6 +18,30 @@ jobs:
     name: Backend build
     runs-on: ubuntu-latest
 
+    # Some behaviour can only be asserted against a real database. Atomicity is the clearest case:
+    # the refresh-token rotation tests passed for as long as the defect existed, because an
+    # in-memory provider has no concurrency to be wrong about — one refresh token could be rotated
+    # into six by presenting it from six tabs at once, and every test was green. Without this
+    # service those tests skip, and a skipped test reports nothing while looking like it passed.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dineflow_user
+          POSTGRES_PASSWORD: dineflow_ci
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dineflow_user"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Read by PostgresTestDatabase; each test creates and drops its own database beneath it.
+      DINEFLOW_TEST_DB: "Host=localhost;Port=5432;Database=postgres;Username=dineflow_user;Password=dineflow_ci"
+
     defaults:
       run:
         working-directory: backend/dineflow
@@ -36,3 +60,53 @@ jobs:
 
       - name: Build
         run: dotnet build DineFlow.sln --configuration Release --no-restore
+
+      # Each check runs even when an earlier one fails, so a red build reports every problem
+      # at once instead of one per push.
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: >
+          dotnet test DineFlow.sln --configuration Release --no-build
+          --logger "trx;LogFileName=backend-tests.trx"
+          --results-directory TestResults
+
+      # A skipped test reports nothing while looking like it passed. The database-backed tests skip
+      # themselves when DINEFLOW_TEST_DB is unset, so if the service above ever stops being reachable
+      # this job would go green having quietly stopped checking the very things it was added for.
+      - name: Assert no test was skipped
+        if: ${{ !cancelled() }}
+        run: |
+          report=TestResults/backend-tests.trx
+          # Checked first: a gate that passes when its own input is missing is not a gate. Without
+          # this, a rename or a crashed run would sail through reporting "0 skipped".
+          if [ ! -f "$report" ]; then
+            echo "::error::$report not found, so nothing could be checked."
+            exit 1
+          fi
+          skipped=$(grep -o 'outcome="NotExecuted"' "$report" | wc -l | tr -d ' ')
+          echo "Skipped tests: $skipped"
+          if [ "$skipped" != "0" ]; then
+            echo "::error::$skipped test(s) were skipped. If these are the PostgreSQL tests, DINEFLOW_TEST_DB is not reaching the service container."
+            grep -o 'testName="[^"]*"[^>]*outcome="NotExecuted"' "$report" | head -20
+            exit 1
+          fi
+
+      # Fails on High or Critical, including transitive packages — the FS-007 advisories were
+      # both transitive. Parsed from the text output rather than `--format json`, which the .NET 8
+      # SDK pinned above does not support.
+      - name: Audit NuGet packages
+        if: ${{ !cancelled() }}
+        run: |
+          dotnet list package --vulnerable --include-transitive | tee nuget-audit.txt
+          if grep -qE '[[:space:]](High|Critical)[[:space:]]' nuget-audit.txt; then
+            echo "::error::High or Critical NuGet advisories found. See the listing above."
+            exit 1
+          fi
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-results
+          path: backend/dineflow/TestResults/
+          if-no-files-found: warn

@@ -173,6 +173,13 @@ public class RestaurantOperationsController(
     {
         Id = restaurant.Id,
         Name = restaurant.Name,
-        AutoAcceptOrders = restaurant.AutoAcceptOrders
+        AutoAcceptOrders = restaurant.AutoAcceptOrders,
+        StripeConnectStatus = string.IsNullOrWhiteSpace(restaurant.StripeAccountId)
+            ? "NotConnected"
+            : restaurant.StripeChargesEnabled && restaurant.StripePayoutsEnabled
+                ? "Ready"
+                : restaurant.StripeDetailsSubmitted ? "Restricted" : "OnboardingIncomplete",
+        OnlinePaymentsEnabled = restaurant.StripeChargesEnabled &&
+            !string.IsNullOrWhiteSpace(restaurant.StripeAccountId)
     };
 }

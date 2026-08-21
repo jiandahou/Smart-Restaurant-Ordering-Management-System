@@ -26,6 +26,16 @@ public class CreateMenuOptionRequest
     public int AdjustmentType { get; set; } = 0; // 0=Add, 1=Remove, 2=Replace
     public int MaxQuantity { get; set; } = 1;
     public int DisplayOrder { get; set; }
+
+    /// <summary>
+    /// What this modifier itself contains. Declared on the option because the dish's own
+    /// declaration describes the dish as listed, and adding something changes the plate.
+    /// </summary>
+    public string? Allergens { get; set; }
+
+    public string? MayContainAllergens { get; set; }
+
+    public string? CrossContactStatement { get; set; }
 }
 
 public class UpdateMenuOptionRequest
@@ -35,5 +45,15 @@ public class UpdateMenuOptionRequest
     public int AdjustmentType { get; set; } = 0;
     public int MaxQuantity { get; set; } = 1;
     public int DisplayOrder { get; set; }
+
+    /// <summary>
+    /// What this modifier itself contains. Declared on the option because the dish's own
+    /// declaration describes the dish as listed, and adding something changes the plate.
+    /// </summary>
+    public string? Allergens { get; set; }
+
+    public string? MayContainAllergens { get; set; }
+
+    public string? CrossContactStatement { get; set; }
     public bool IsAvailable { get; set; } = true;
 }

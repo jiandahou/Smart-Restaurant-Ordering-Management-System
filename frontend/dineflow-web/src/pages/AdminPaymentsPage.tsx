@@ -10,7 +10,6 @@ import {
   ChevronLeft,
   ChevronRight,
   CreditCard,
-  Copy,
   Download,
   ExternalLink,
   ReceiptText,
@@ -44,6 +43,7 @@ import {
   type AdminRefundRequestStatus,
   type AdminRefundSummary,
   type PaymentEnvironment,
+  type RefundOrderRequest,
   type Restaurant,
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
@@ -80,6 +80,10 @@ import { Textarea } from '../components/ui/textarea'
 import { HorizontalTableScroll } from '../components/HorizontalTableScroll'
 import { isOrderPayable, payablePaymentStatuses as payablePaymentStatusList } from '../lib/orderStats'
 import { canRefundOrder } from '../lib/paymentRefunds'
+import { getPaginationPresentation } from '../lib/paginationPresentation'
+import { fetchAllExportRows, serializeCsv, type CsvCell } from '../lib/paymentCsvExport'
+import { normalizePaymentSearch, paymentSearchMaxLength } from '../lib/paymentSearch'
+import { ProviderIdentifier } from '@/components/orders/ProviderIdentifier'
 
 type SortKey =
   | 'createdAt'
@@ -186,59 +190,8 @@ function formatCurrencyBreakdown(
     .join(' · ')
 }
 
-function CompactIdentifier({
-  value,
-  fallback,
-  label,
-}: {
-  value?: string | null
-  fallback: string
-  label: string
-}) {
-  if (!value) {
-    return <span className="table-subtext">{fallback}</span>
-  }
-
-  const compact = value.length > 22 ? `${value.slice(0, 10)}…${value.slice(-7)}` : value
-  return (
-    <span className="payment-identifier">
-      <code title={value}>{compact}</code>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        aria-label={`Copy ${label}`}
-        onClick={(event) => {
-          event.stopPropagation()
-          void navigator.clipboard.writeText(value)
-            .then(() => toast.success(`${label} copied`))
-            .catch(() => toast.error(`Could not copy ${label}`))
-        }}
-      >
-        <Copy size={13} />
-      </Button>
-    </span>
-  )
-}
-
-async function fetchExportRows<T>(
-  load: (page: number) => Promise<{ items: T[]; totalPages: number }>,
-) {
-  const first = await load(1)
-  const rows = [...first.items]
-  const pageLimit = Math.min(first.totalPages, 50)
-  for (let page = 2; page <= pageLimit; page += 1) {
-    rows.push(...(await load(page)).items)
-  }
-  return rows
-}
-
-function downloadCsv(filename: string, headers: string[], rows: Array<Array<string | number | null | undefined>>) {
-  const escapeCell = (value: string | number | null | undefined) => {
-    const text = value == null ? '' : String(value)
-    return `"${text.replaceAll('"', '""')}"`
-  }
-  const csv = [headers, ...rows].map((row) => row.map(escapeCell).join(',')).join('\r\n')
+function downloadCsv(filename: string, headers: string[], rows: CsvCell[][]) {
+  const csv = serializeCsv(headers, rows)
   const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' }))
   const anchor = document.createElement('a')
   anchor.href = url
@@ -271,7 +224,7 @@ export function AdminPaymentsPage() {
   const [urlSearchParams, setUrlSearchParams] = useSearchParams()
   const initialUrlState = {
     activeTab: readAllowedParam(urlSearchParams, 'view', ['orders', 'requests', 'history'] as const, 'orders'),
-    search: urlSearchParams.get('q') ?? '',
+    search: normalizePaymentSearch(urlSearchParams.get('q') ?? ''),
     dateFrom: urlSearchParams.get('from') ?? '',
     dateTo: urlSearchParams.get('to') ?? '',
     paymentFilter: readAllowedParam(urlSearchParams, 'payment', ['all', ...paymentStatusOptions], 'all'),
@@ -304,7 +257,7 @@ export function AdminPaymentsPage() {
     pendingPayment: 0,
     failedPayment: 0,
     payable: 0,
-    revenue: 0,
+    revenue: [],
   })
   const [refundSummary, setRefundSummary] = useState<AdminRefundSummary>({
     total: 0,
@@ -395,15 +348,14 @@ export function AdminPaymentsPage() {
   }, [restaurantDirectory])
 
   const filteredOrders = orders
-  const pageStart = totalItems === 0 ? 0 : (page - 1) * pageSize + 1
-  const pageEnd = Math.min(page * pageSize, totalItems)
-  const refundPageStart = refundTotalItems === 0 ? 0 : (refundPage - 1) * refundPageSize + 1
-  const refundPageEnd = Math.min(refundPage * refundPageSize, refundTotalItems)
-  const refundRequestPageStart = refundRequestTotalItems === 0 ? 0 : (refundRequestPage - 1) * refundRequestPageSize + 1
-  const refundRequestPageEnd = Math.min(refundRequestPage * refundRequestPageSize, refundRequestTotalItems)
-  const currentPage = totalPages === 0 ? 0 : page
-  const currentRefundPage = refundTotalPages === 0 ? 0 : refundPage
-  const currentRefundRequestPage = refundRequestTotalPages === 0 ? 0 : refundRequestPage
+  const paymentPagination = getPaginationPresentation(page, pageSize, totalItems, totalPages)
+  const refundPagination = getPaginationPresentation(refundPage, refundPageSize, refundTotalItems, refundTotalPages)
+  const refundRequestPagination = getPaginationPresentation(
+    refundRequestPage,
+    refundRequestPageSize,
+    refundRequestTotalItems,
+    refundRequestTotalPages,
+  )
   const selectedRestaurantFilterLabel = restaurantOptions.find((restaurant) => restaurant.value === restaurantFilter)?.label ?? restaurantFilter
   const selectedPaymentFilterLabel = paymentFilter === 'all' ? '' : getPaymentStatusLabel(paymentFilter)
   const selectedOrderStatusFilterLabel = orderStatusFilter === 'all' ? '' : getOrderStatusLabel(orderStatusFilter)
@@ -751,7 +703,7 @@ export function AdminPaymentsPage() {
 
     try {
       if (activeTab === 'orders') {
-        const rows = await fetchExportRows((exportPage) => getAdminOrders({
+        const rows = await fetchAllExportRows((exportPage) => getAdminOrders({
           page: exportPage,
           pageSize: 100,
           search: debouncedSearch.trim() || undefined,
@@ -783,7 +735,7 @@ export function AdminPaymentsPage() {
           ]),
         )
       } else if (activeTab === 'requests') {
-        const rows = await fetchExportRows((exportPage) => getAdminRefundRequests({
+        const rows = await fetchAllExportRows((exportPage) => getAdminRefundRequests({
           page: exportPage,
           pageSize: 100,
           search: debouncedSearch.trim() || undefined,
@@ -816,7 +768,7 @@ export function AdminPaymentsPage() {
           ]),
         )
       } else {
-        const rows = await fetchExportRows((exportPage) => getAdminRefunds({
+        const rows = await fetchAllExportRows((exportPage) => getAdminRefunds({
           page: exportPage,
           pageSize: 100,
           search: debouncedSearch.trim() || undefined,
@@ -923,7 +875,7 @@ export function AdminPaymentsPage() {
     }
   }
 
-  const submitRefund = async () => {
+  const submitRefund = async (payload: RefundOrderRequest) => {
     if (!pendingRefundOrder) {
       return
     }
@@ -931,10 +883,7 @@ export function AdminPaymentsPage() {
     setRefundingOrderId(pendingRefundOrder.id)
 
     try {
-      const updatedOrder = await refundAdminOrder(pendingRefundOrder.id, {
-        reason: refundReason.trim() || undefined,
-        amountCents: refundMode === 'full' ? undefined : (parseRefundAmountCents(refundAmount) ?? undefined),
-      })
+      const updatedOrder = await refundAdminOrder(pendingRefundOrder.id, payload)
       setOrders((current) => current.map((item) => item.id === updatedOrder.id ? updatedOrder : item))
       await loadOrders()
       toast.success('Refund created', {
@@ -1086,7 +1035,7 @@ export function AdminPaymentsPage() {
                 <span>
                   {item.quantity} x {formatMoney(item.unitPrice, order.currency)}
                 </span>
-                <OrderItemOptionBadges options={item.selectedOptions} currency={order.currency} />
+                <OrderItemOptionBadges item={item} options={item.selectedOptions} currency={order.currency} />
                 {item.note && <small>{item.note}</small>}
               </div>
               <strong>{formatMoney(item.totalPrice, order.currency)}</strong>
@@ -1126,7 +1075,13 @@ export function AdminPaymentsPage() {
               : formatMoney(0, order.currency)}
           </strong>
           <span>Latest session</span>
-          <strong>{order.latestPayment?.providerCheckoutSessionId || 'No checkout session yet'}</strong>
+          <strong>
+            <ProviderIdentifier
+              value={order.latestPayment?.providerCheckoutSessionId}
+              fallback="No checkout session yet"
+              label="checkout session id"
+            />
+          </strong>
           <span>Created</span>
           <strong>{formatDate(order.createdAt)}</strong>
         </div>
@@ -1334,7 +1289,8 @@ export function AdminPaymentsPage() {
                   <Search size={16} />
                   <Input
                     value={search}
-                    onChange={(event) => { setPage(1); setRefundPage(1); setRefundRequestPage(1); setSearch(event.target.value) }}
+                    maxLength={paymentSearchMaxLength}
+                    onChange={(event) => { setPage(1); setRefundPage(1); setRefundRequestPage(1); setSearch(normalizePaymentSearch(event.target.value)) }}
                     placeholder="Search order, customer, restaurant, table, or payment ids"
                   />
                 </div>
@@ -1663,7 +1619,7 @@ export function AdminPaymentsPage() {
                           <span className="table-subtext">{order.customerName || order.customerEmail || 'Guest / unknown'}</span>
                         </td>
                         <td>
-                          <OrderStatusBadge status={order.status} />
+                          <OrderStatusBadge status={order.status} paymentStatus={order.paymentStatus} />
                           <span className="table-subtext">{getOrderTypeLabel(order.orderType)}</span>
                         </td>
                         <td>
@@ -1685,9 +1641,11 @@ export function AdminPaymentsPage() {
                               ? getPaymentStatusLabel(order.latestPayment.status)
                               : 'No payment yet'}
                           </strong>
-                          <span className="table-subtext">
-                            {order.latestPayment?.providerCheckoutSessionId || 'No checkout session yet'}
-                          </span>
+                          <ProviderIdentifier
+                            value={order.latestPayment?.providerCheckoutSessionId}
+                            fallback="No checkout session yet"
+                            label="checkout session id"
+                          />
                         </td>
                         <td>{formatDate(order.createdAt)}</td>
                         <td className="payment-action-cell">
@@ -1764,7 +1722,7 @@ export function AdminPaymentsPage() {
 
                       <div className="admin-payment-mobile-status-row">
                         <div>
-                          <OrderStatusBadge status={order.status} />
+                          <OrderStatusBadge status={order.status} paymentStatus={order.paymentStatus} />
                           <PaymentStatusBadge status={order.paymentStatus} />
                         </div>
                         <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
@@ -1829,8 +1787,14 @@ export function AdminPaymentsPage() {
 
               <div className="pagination-bar compact-pagination admin-payments-pagination">
                 <span className="pagination-range">
-                  <span className="pagination-full">Showing {pageStart}-{pageEnd} of {totalItems}</span>
-                  <span className="pagination-compact">{pageStart}-{pageEnd} / {totalItems}</span>
+                  {paymentPagination.start === null ? (
+                    <span>No results</span>
+                  ) : (
+                    <>
+                      <span className="pagination-full">Showing {paymentPagination.start}-{paymentPagination.end} of {totalItems}</span>
+                      <span className="pagination-compact">{paymentPagination.start}-{paymentPagination.end} / {totalItems}</span>
+                    </>
+                  )}
                 </span>
                 <div className="pagination-actions">
                   <Select value={String(pageSize)} onValueChange={(value) => { setPage(1); setPageSize(Number(value)) }}>
@@ -1842,11 +1806,11 @@ export function AdminPaymentsPage() {
                     </SelectContent>
                   </Select>
                   <span className="pagination-page">
-                    <span className="pagination-full">Page {currentPage} of {totalPages}</span>
-                    <span className="pagination-compact">{currentPage} / {totalPages}</span>
+                    <span className="pagination-full">Page {paymentPagination.currentPage} of {paymentPagination.totalPages}</span>
+                    <span className="pagination-compact">{paymentPagination.currentPage} / {paymentPagination.totalPages}</span>
                   </span>
                   <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={loading || page <= 1} aria-label="Previous payment orders page"><ChevronLeft size={16} /></Button>
-                  <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={loading || page >= totalPages} aria-label="Next payment orders page"><ChevronRight size={16} /></Button>
+                  <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.min(paymentPagination.totalPages, current + 1))} disabled={loading || paymentPagination.currentPage >= paymentPagination.totalPages} aria-label="Next payment orders page"><ChevronRight size={16} /></Button>
                 </div>
               </div>
             </TabsContent>
@@ -1883,6 +1847,7 @@ export function AdminPaymentsPage() {
                     <th>Restaurant</th>
                     <th>Status</th>
                     <th>Amount</th>
+                    <th>Allocation</th>
                     <th>Reason</th>
                     <th>Updated</th>
                     <th>Review</th>
@@ -1895,9 +1860,9 @@ export function AdminPaymentsPage() {
                         <td>
                           <span className="table-name">
                             <Undo2 size={16} />
-                            <CompactIdentifier value={refundRequest.id} fallback="No request id" label="refund request id" />
+                            <ProviderIdentifier value={refundRequest.id} fallback="No request id" label="refund request id" />
                           </span>
-                          <CompactIdentifier value={refundRequest.paymentRefundId} fallback="No refund transaction yet" label="refund id" />
+                          <ProviderIdentifier value={refundRequest.paymentRefundId} fallback="No refund transaction yet" label="refund id" />
                         </td>
                         <td>
                           <strong>{refundRequest.orderNumber || 'Unknown order'}</strong>
@@ -2026,8 +1991,14 @@ export function AdminPaymentsPage() {
 
                 <div className="pagination-bar compact-pagination admin-payments-pagination">
                   <span className="pagination-range">
-                    <span className="pagination-full">Showing {refundRequestPageStart}-{refundRequestPageEnd} of {refundRequestTotalItems}</span>
-                    <span className="pagination-compact">{refundRequestPageStart}-{refundRequestPageEnd} / {refundRequestTotalItems}</span>
+                    {refundRequestPagination.start === null ? (
+                      <span>No results</span>
+                    ) : (
+                      <>
+                        <span className="pagination-full">Showing {refundRequestPagination.start}-{refundRequestPagination.end} of {refundRequestTotalItems}</span>
+                        <span className="pagination-compact">{refundRequestPagination.start}-{refundRequestPagination.end} / {refundRequestTotalItems}</span>
+                      </>
+                    )}
                   </span>
                   <div className="pagination-actions">
                     <Select value={String(refundRequestPageSize)} onValueChange={(value) => { setRefundRequestPage(1); setRefundRequestPageSize(Number(value)) }}>
@@ -2039,11 +2010,11 @@ export function AdminPaymentsPage() {
                       </SelectContent>
                     </Select>
                     <span className="pagination-page">
-                      <span className="pagination-full">Page {currentRefundRequestPage} of {refundRequestTotalPages}</span>
-                      <span className="pagination-compact">{currentRefundRequestPage} / {refundRequestTotalPages}</span>
+                      <span className="pagination-full">Page {refundRequestPagination.currentPage} of {refundRequestPagination.totalPages}</span>
+                      <span className="pagination-compact">{refundRequestPagination.currentPage} / {refundRequestPagination.totalPages}</span>
                     </span>
                     <Button type="button" variant="outline" size="icon" onClick={() => setRefundRequestPage((current) => Math.max(1, current - 1))} disabled={refundRequestsLoading || refundRequestPage <= 1} aria-label="Previous refund requests page"><ChevronLeft size={16} /></Button>
-                    <Button type="button" variant="outline" size="icon" onClick={() => setRefundRequestPage((current) => Math.min(refundRequestTotalPages, current + 1))} disabled={refundRequestsLoading || refundRequestPage >= refundRequestTotalPages} aria-label="Next refund requests page"><ChevronRight size={16} /></Button>
+                    <Button type="button" variant="outline" size="icon" onClick={() => setRefundRequestPage((current) => Math.min(refundRequestPagination.totalPages, current + 1))} disabled={refundRequestsLoading || refundRequestPagination.currentPage >= refundRequestPagination.totalPages} aria-label="Next refund requests page"><ChevronRight size={16} /></Button>
                   </div>
                 </div>
               </section>
@@ -2131,9 +2102,9 @@ export function AdminPaymentsPage() {
                       <td>
                         <span className="table-name">
                           <Undo2 size={16} />
-                          <CompactIdentifier value={refund.providerRefundId || refund.id} fallback="No refund id" label="refund id" />
+                          <ProviderIdentifier value={refund.providerRefundId || refund.id} fallback="No refund id" label="refund id" />
                         </span>
-                        <CompactIdentifier value={refund.providerPaymentIntentId} fallback="No payment intent" label="payment intent id" />
+                        <ProviderIdentifier value={refund.providerPaymentIntentId} fallback="No payment intent" label="payment intent id" />
                       </td>
                       <td>
                         <strong>{refund.orderNumber || 'Unknown order'}</strong>
@@ -2155,6 +2126,18 @@ export function AdminPaymentsPage() {
                         <strong>{formatMoney(refund.amountCents / 100, refund.currency)}</strong>
                       </td>
                       <td>
+                        {refund.items.length > 0 ? refund.items.map((item) => (
+                          <span key={item.orderItemId} className="table-subtext">
+                            {item.quantity} × {item.menuItemNameSnapshot}: {formatMoney(item.amountCents / 100, refund.currency)}
+                          </span>
+                        )) : <span className="table-subtext">No item allocation</span>}
+                        {refund.unattributedAmountCents > 0 && (
+                          <span className="table-subtext text-amber-700">
+                            General / legacy: {formatMoney(refund.unattributedAmountCents / 100, refund.currency)}
+                          </span>
+                        )}
+                      </td>
+                      <td>
                         <strong className="payment-untrusted-text" title={refund.reason || undefined}>{refund.reason || 'No reason recorded'}</strong>
                         {refund.failureReason && <span className="table-subtext text-destructive">{refund.failureReason}</span>}
                       </td>
@@ -2165,7 +2148,7 @@ export function AdminPaymentsPage() {
                   ))}
                   {refunds.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="empty-cell">
+                      <td colSpan={8} className="empty-cell">
                         {refundsLoading
                           ? 'Loading refund records...'
                           : 'No refund records match the current filters.'}
@@ -2188,8 +2171,18 @@ export function AdminPaymentsPage() {
                             <Undo2 size={18} />
                           </span>
                           <div className="restaurant-mobile-primary">
-                            <strong title={refund.providerRefundId || refund.id}>{refund.providerRefundId || refund.id}</strong>
-                            <span title={refund.providerPaymentIntentId || undefined}>{refund.providerPaymentIntentId || 'No payment intent'}</span>
+                            <strong>
+                              <ProviderIdentifier
+                                value={refund.providerRefundId || refund.id}
+                                fallback="No refund id"
+                                label="refund id"
+                              />
+                            </strong>
+                            <ProviderIdentifier
+                              value={refund.providerPaymentIntentId}
+                              fallback="No payment intent"
+                              label="payment intent id"
+                            />
                           </div>
                           <Badge
                             variant={refund.status === 'Failed' ? 'destructive' : refund.status === 'Succeeded' ? 'secondary' : 'outline'}
@@ -2202,6 +2195,25 @@ export function AdminPaymentsPage() {
                         <div className="refund-mobile-amount-row">
                           <span>Refunded</span>
                           <strong>{formatMoney(refund.amountCents / 100, refund.currency)}</strong>
+                        </div>
+
+                        <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+                          <strong>Allocation</strong>
+                          {refund.items.map((item) => (
+                            <div key={item.orderItemId} className="mt-1 flex justify-between gap-2">
+                              <span>{item.quantity} × {item.menuItemNameSnapshot}</span>
+                              <span>{formatMoney(item.amountCents / 100, refund.currency)}</span>
+                            </div>
+                          ))}
+                          {refund.unattributedAmountCents > 0 && (
+                            <div className="mt-1 flex justify-between gap-2 text-amber-700">
+                              <span>General / legacy</span>
+                              <span>{formatMoney(refund.unattributedAmountCents / 100, refund.currency)}</span>
+                            </div>
+                          )}
+                          {refund.items.length === 0 && refund.unattributedAmountCents === 0 ? (
+                            <span className="mt-1 block text-muted-foreground">No item allocation</span>
+                          ) : null}
                         </div>
 
                         <div className="restaurant-mobile-meta-grid refund-mobile-meta-grid">
@@ -2257,8 +2269,14 @@ export function AdminPaymentsPage() {
 
                 <div className="pagination-bar compact-pagination admin-payments-pagination">
                   <span className="pagination-range">
-                    <span className="pagination-full">Showing {refundPageStart}-{refundPageEnd} of {refundTotalItems}</span>
-                    <span className="pagination-compact">{refundPageStart}-{refundPageEnd} / {refundTotalItems}</span>
+                    {refundPagination.start === null ? (
+                      <span>No results</span>
+                    ) : (
+                      <>
+                        <span className="pagination-full">Showing {refundPagination.start}-{refundPagination.end} of {refundTotalItems}</span>
+                        <span className="pagination-compact">{refundPagination.start}-{refundPagination.end} / {refundTotalItems}</span>
+                      </>
+                    )}
                   </span>
                   <div className="pagination-actions">
                     <Select value={String(refundPageSize)} onValueChange={(value) => { setRefundPage(1); setRefundPageSize(Number(value)) }}>
@@ -2270,11 +2288,11 @@ export function AdminPaymentsPage() {
                       </SelectContent>
                     </Select>
                     <span className="pagination-page">
-                      <span className="pagination-full">Page {currentRefundPage} of {refundTotalPages}</span>
-                      <span className="pagination-compact">{currentRefundPage} / {refundTotalPages}</span>
+                      <span className="pagination-full">Page {refundPagination.currentPage} of {refundPagination.totalPages}</span>
+                      <span className="pagination-compact">{refundPagination.currentPage} / {refundPagination.totalPages}</span>
                     </span>
                     <Button type="button" variant="outline" size="icon" onClick={() => setRefundPage((current) => Math.max(1, current - 1))} disabled={refundsLoading || refundPage <= 1} aria-label="Previous refund records page"><ChevronLeft size={16} /></Button>
-                    <Button type="button" variant="outline" size="icon" onClick={() => setRefundPage((current) => Math.min(refundTotalPages, current + 1))} disabled={refundsLoading || refundPage >= refundTotalPages} aria-label="Next refund records page"><ChevronRight size={16} /></Button>
+                    <Button type="button" variant="outline" size="icon" onClick={() => setRefundPage((current) => Math.min(refundPagination.totalPages, current + 1))} disabled={refundsLoading || refundPagination.currentPage >= refundPagination.totalPages} aria-label="Next refund records page"><ChevronRight size={16} /></Button>
                   </div>
                 </div>
               </section>
@@ -2363,6 +2381,7 @@ export function AdminPaymentsPage() {
 
       <OrderRefundDialog
         order={pendingRefundOrder}
+        environmentMode={paymentEnvironment?.mode ?? null}
         reason={refundReason}
         mode={refundMode}
         amount={refundAmount}
@@ -2378,7 +2397,7 @@ export function AdminPaymentsPage() {
             setRefundAmount('')
           }
         }}
-        onConfirm={() => void submitRefund()}
+        onConfirm={(payload) => void submitRefund(payload)}
       />
     </main>
   )

@@ -6,6 +6,7 @@ import {
   getStaffPaymentMessage,
   getStaffPaymentState,
   getStaffPrimaryAction,
+  getStaffRecoveryAction,
   hasSafetyNote,
   isCarriedOverOrder,
   isStaffPaymentHold,
@@ -14,6 +15,7 @@ import {
 function order(overrides: Partial<AdminOrder> = {}): AdminOrder {
   return {
     id: 'order-1',
+    pendingRefundRequest: null,
     restaurantId: 'restaurant-1',
     restaurantName: 'Central Market Table',
     currency: 'AUD',
@@ -45,9 +47,14 @@ function order(overrides: Partial<AdminOrder> = {}): AdminOrder {
       menuItemId: 'menu-1',
       itemNameSnapshot: 'Market Arancini',
       quantity: 1,
+      basePriceSnapshot: 24,
       unitPrice: 24,
-      totalPrice: 24,
-      note: null,
+            totalPrice: 24,
+            refundedAmountCents: 0,
+            refundableAmountCents: 2400,
+            refundedQuantity: 0,
+            refundableQuantity: 2,
+            note: null,
       selectedOptions: [],
     }],
     ...overrides,
@@ -103,5 +110,48 @@ describe('staff order management helpers', () => {
     expect(isCarriedOverOrder(order({ status: 'Completed' }), now)).toBe(false)
     expect(hasSafetyNote(order({ customerNote: 'Tree nut allergy' }))).toBe(true)
     expect(hasSafetyNote(order({ customerNote: 'Extra napkins' }))).toBe(false)
+  })
+})
+
+/**
+ * Putting a finished order back into service.
+ *
+ * <p>
+ * The server offers <code>Reopen</code> on every terminal order and the screen offered it on none:
+ * eighty-six closed cards, zero buttons. An order cancelled by mistake had no way back.
+ * </p>
+ */
+describe('reopening a finished order', () => {
+  const terminal = ['Completed', 'Cancelled', 'Rejected'] as const
+
+  it.each(terminal)('offers it on a %s order the server will reopen', (status) => {
+    expect(getStaffRecoveryAction(order({ status, availableActions: ['Reopen'] }))).toBe('Reopen')
+  })
+
+  /**
+   * Whether an order may be reopened is the server's call — reopening a completed order needs the
+   * payment to be settled, and it withholds the action when it is not. The screen follows that list
+   * rather than keeping a second opinion that could disagree with it.
+   */
+  it.each(terminal)('offers nothing on a %s order the server withheld it from', (status) => {
+    expect(getStaffRecoveryAction(order({ status, availableActions: [] }))).toBeNull()
+  })
+
+  it('offers nothing while the order is still running', () => {
+    expect(getStaffRecoveryAction(order({ status: 'Preparing', availableActions: ['MarkReady', 'Cancel'] }))).toBeNull()
+  })
+
+  /** An order fetched without its actions is not an order with none — it says nothing either way. */
+  it('offers nothing when the server said nothing', () => {
+    expect(getStaffRecoveryAction(order({ status: 'Cancelled', availableActions: undefined }))).toBeNull()
+  })
+
+  /** Reopening is a correction, not the order's next step, so it stays out of the primary slot. */
+  it('does not become the primary action', () => {
+    const closed = order({ status: 'Cancelled', availableActions: ['Reopen'] })
+
+    expect(getStaffPrimaryAction(closed)).toBeNull()
+    expect(getStaffDestructiveActions(closed)).toEqual([])
+    expect(getStaffRecoveryAction(closed)).toBe('Reopen')
   })
 })

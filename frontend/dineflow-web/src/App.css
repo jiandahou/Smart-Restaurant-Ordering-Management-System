@@ -12,6 +12,18 @@
   width: min(420px, 100%);
 }
 
+.registration-screen {
+  position: relative;
+  padding-top: 76px;
+}
+
+.registration-back-button {
+  position: absolute;
+  z-index: 1;
+  top: max(20px, env(safe-area-inset-top));
+  left: max(20px, env(safe-area-inset-left));
+}
+
 .dark .login-screen {
   background:
     linear-gradient(145deg, rgba(5, 22, 18, 0.94), rgba(12, 18, 14, 0.9) 48%, rgba(19, 16, 9, 0.92)),
@@ -221,6 +233,38 @@
   color: var(--muted-foreground);
 }
 
+/* Access denied: what was asked for, what it needs, and what this account has — the three facts
+   staff need to tell "my account is set up wrong" from "I opened the wrong link". */
+.access-denied-details {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--subtle);
+  font-size: 0.85rem;
+}
+
+.access-denied-details div {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.access-denied-details dt {
+  color: var(--muted-foreground);
+  font-weight: 600;
+}
+
+.access-denied-details dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
 .navbar-status-button.ok {
   color: #15803d;
   border-color: rgba(34, 197, 94, 0.42);
@@ -338,6 +382,240 @@
 
 .mobile-topbar-actions {
   display: none;
+}
+
+.operational-notification-trigger {
+  position: relative;
+}
+
+.operational-notification-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--panel-bg);
+  border-radius: 999px;
+  background: #3b82f6;
+}
+
+.operational-notification-dot[data-severity='error'] {
+  background: #ef4444;
+}
+
+.operational-notification-dot[data-severity='warning'] {
+  background: #f59e0b;
+}
+
+.operational-notification-dot[data-severity='success'] {
+  background: #10b981;
+}
+
+.operational-notification-count {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  min-width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0 4px;
+  border: 2px solid var(--bg);
+  border-radius: 999px;
+  color: white;
+  background: #dc2626;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.operational-notification-popover {
+  width: min(420px, calc(100vw - 24px));
+  max-height: min(560px, calc(100dvh - 96px));
+  padding: 0;
+  overflow: hidden;
+}
+
+.operational-notification-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.operational-notification-heading > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.operational-notification-heading strong {
+  color: var(--text-h);
+  font-size: 15px;
+}
+
+.operational-notification-heading span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.operational-notification-heading > span {
+  min-width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--text-h);
+  background: var(--subtle);
+  font-weight: 850;
+}
+
+.operational-notification-list {
+  max-height: min(480px, calc(100dvh - 165px));
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.operational-notification-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
+  border-left: 4px solid #3b82f6;
+  border-radius: 10px;
+  background: var(--panel-bg);
+}
+
+.operational-notification-item[data-severity='error'] {
+  border-left-color: #ef4444;
+  background: color-mix(in srgb, #ef4444 6%, var(--panel-bg));
+}
+
+.operational-notification-item[data-severity='warning'] {
+  border-left-color: #f59e0b;
+  background: color-mix(in srgb, #f59e0b 7%, var(--panel-bg));
+}
+
+.operational-notification-item[data-severity='success'] {
+  border-left-color: #10b981;
+  background: color-mix(in srgb, #10b981 7%, var(--panel-bg));
+}
+
+.operational-notification-item-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--text-h);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.operational-notification-item > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.operational-notification-item strong {
+  color: var(--text-h);
+  font-size: 13px;
+}
+
+.operational-notification-item span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.operational-notification-item [data-slot='button'] {
+  width: fit-content;
+  margin-top: 3px;
+}
+
+.operational-notification-empty {
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  padding: 34px 18px;
+  color: #059669;
+  text-align: center;
+}
+
+.operational-notification-empty strong {
+  color: var(--text-h);
+}
+
+.operational-notification-empty span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.operational-notification-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 11px;
+  margin: 12px 0;
+  padding: 10px 10px 10px 12px;
+  border: 1px solid color-mix(in srgb, #3b82f6 38%, var(--border));
+  border-left: 5px solid #3b82f6;
+  border-radius: 10px;
+  background: color-mix(in srgb, #3b82f6 7%, var(--panel-bg));
+  box-shadow: 0 12px 28px -24px rgba(15, 23, 42, 0.6);
+}
+
+.operational-notification-banner[data-severity='error'] {
+  border-color: color-mix(in srgb, #ef4444 42%, var(--border));
+  border-left-color: #ef4444;
+  background: color-mix(in srgb, #ef4444 7%, var(--panel-bg));
+}
+
+.operational-notification-banner[data-severity='warning'] {
+  border-color: color-mix(in srgb, #f59e0b 48%, var(--border));
+  border-left-color: #f59e0b;
+  background: color-mix(in srgb, #f59e0b 8%, var(--panel-bg));
+}
+
+.operational-notification-banner[data-severity='success'] {
+  border-color: color-mix(in srgb, #10b981 42%, var(--border));
+  border-left-color: #10b981;
+  background: color-mix(in srgb, #10b981 8%, var(--panel-bg));
+}
+
+.operational-notification-banner-icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--text-h);
+  background: color-mix(in srgb, var(--panel-bg) 78%, transparent);
+}
+
+.operational-notification-banner > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.operational-notification-banner strong {
+  color: var(--text-h);
+  font-size: 13px;
+}
+
+.operational-notification-banner span {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .mobile-user-menu {
@@ -1149,6 +1427,16 @@
   box-shadow: 0 16px 34px rgba(249, 115, 22, 0.16);
 }
 
+.staff-order-service-code {
+  color: var(--text-h);
+  font-family: var(--font-heading);
+  font-size: clamp(30px, 3vw, 40px);
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.025em;
+  line-height: 0.95;
+}
+
 .staff-order-signal-row {
   display: flex;
   align-items: center;
@@ -1171,11 +1459,27 @@
 
 .staff-printer-dialog {
   max-width: min(720px, calc(100vw - 28px));
+  max-height: calc(100vh - 28px);
+  max-height: calc(100dvh - 28px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 
 .staff-printer-settings {
   display: grid;
+  /* A grid with no declared columns gets one auto column, and an auto column is sized to its
+     max-content — the longest unbreakable run inside it, regardless of how narrow the box is. The
+     print-task list holds order numbers and printer error sentences long enough to push that past
+     700px, so the panel simply grew and its contents ran out past the dialog edge. minmax(0, 1fr)
+     ties the column to the box and lets the text wrap instead. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+  padding-right: 4px;
 }
 
 .staff-printer-grid {
@@ -1188,6 +1492,7 @@
 .staff-printer-field {
   min-width: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
 }
 
@@ -1219,6 +1524,9 @@
 .staff-printer-route-card {
   min-width: 0;
   display: grid;
+  /* min-width above only lets the card itself be squeezed; without this its single auto column
+     still measures to max-content and pushes the card open from the inside. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   padding: 12px;
   border: 1px solid color-mix(in oklab, var(--border) 86%, transparent);
@@ -1985,6 +2293,45 @@
   scrollbar-width: thin;
 }
 
+.restaurant-stripe-import-banner {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--subtle) 56%, transparent);
+}
+
+.restaurant-stripe-import-banner > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.restaurant-stripe-import-banner p,
+.restaurant-stripe-import-banner span {
+  margin: 0;
+}
+
+.restaurant-stripe-import-banner p {
+  color: var(--text-h);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.restaurant-stripe-import-banner span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.restaurant-stripe-import-banner [data-slot='button'] {
+  flex: 0 0 auto;
+}
+
 .restaurant-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2108,6 +2455,13 @@
   min-width: 0;
 }
 
+/* The "to" between the two times. Its column is sized to the text on wide screens, so nothing shows
+   there, but narrow screens give it a fixed 22px and the word sat against the left edge of it —
+   closer to the opening time than the closing one it also belongs to. */
+.opening-hours-window > span {
+  text-align: center;
+}
+
 .opening-hours-remove-window {
   width: 34px;
   min-width: 34px;
@@ -2187,6 +2541,29 @@
 
 .restaurant-details-dialog {
   max-width: min(600px, calc(100% - 32px));
+}
+
+.restaurant-profile-details-dialog {
+  width: min(600px, calc(100vw - 32px));
+  height: min(820px, calc(100dvh - 32px));
+  max-height: calc(100dvh - 32px);
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.restaurant-details-scroll {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: 1px 6px 8px 1px;
+}
+
+.restaurant-details-scroll:focus {
+  outline: none;
 }
 
 .restaurant-payments-dialog {
@@ -3053,7 +3430,7 @@
 
 .restaurant-autosave-status[data-state='pending'],
 .restaurant-autosave-status[data-state='saving'] {
-  color: var(--brand-primary-strong);
+  color: var(--brand-primary-hover);
 }
 
 .restaurant-autosave-status[data-state='error'] {
@@ -3210,7 +3587,7 @@
 }
 
 .restaurant-calendar-day.is-open .restaurant-calendar-day-status {
-  color: var(--brand-primary-strong);
+  color: var(--brand-primary-hover);
   background: color-mix(in oklab, var(--brand-primary-soft) 44%, var(--panel-bg));
 }
 
@@ -3581,6 +3958,41 @@
 }
 
 @media (max-width: 760px) {
+  .restaurant-stripe-import-banner {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .restaurant-stripe-import-banner [data-slot='button'] {
+    width: 100%;
+  }
+
+  .restaurant-profile-details-dialog {
+    top: auto;
+    bottom: 0;
+    left: 9px;
+    right: 9px;
+    width: auto;
+    max-width: none;
+    height: min(92dvh, 760px);
+    max-height: min(92dvh, 760px);
+    gap: 12px;
+    padding: 14px;
+    border-radius: 18px 18px 0 0;
+    transform: none;
+    translate: none;
+  }
+
+  .restaurant-profile-details-dialog [data-slot='dialog-header'] {
+    padding-right: 42px;
+  }
+
+  .restaurant-details-scroll {
+    gap: 14px;
+    padding-right: 2px;
+  }
+
   .restaurant-public-card {
     grid-template-columns: 1fr;
   }
@@ -3808,8 +4220,18 @@ button.menu-metric[aria-pressed='true'] {
   grid-template-columns: repeat(2, minmax(150px, 1fr)) auto;
 }
 
+/* Same shape as .restaurant-dialog: a bounded box whose second row is the form, so the form body
+   scrolls and the actions stay on screen. Without the bound the dialog grew past the viewport and
+   Save and Cancel sat below it with nothing to scroll. */
 .menu-dialog {
   max-width: min(620px, calc(100% - 32px));
+  /* Both units, smallest wins: dvh follows a mobile browser's collapsing toolbar, but some engines
+     report it as the largest viewport, which is how the dialog ended up taller than the window it
+     was supposed to fit inside. vh alone would ignore the toolbar. */
+  height: min(90dvh, 90vh, 760px);
+  max-height: min(90dvh, 90vh, 760px);
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .menu-item-dialog {
@@ -4980,7 +5402,7 @@ button.menu-metric[aria-pressed='true'] {
 .mfa-method-card {
   min-width: 0;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px 12px;
   padding: 10px 12px;
@@ -4994,19 +5416,10 @@ button.menu-metric[aria-pressed='true'] {
   background: rgba(240, 253, 244, 0.74);
 }
 
-.mfa-method-card > [data-slot='badge'] {
+/* Aligned with the scope switches below, so a method and what it protects read as one control
+   vocabulary rather than two. */
+.mfa-method-card > [data-slot='switch'] {
   justify-self: end;
-}
-
-.mfa-method-card > [data-slot='button'] {
-  justify-self: end;
-  min-width: 92px;
-  height: 34px;
-  border-radius: 10px;
-}
-
-.mfa-method-card > [data-slot='button'] + [data-slot='button'] {
-  min-width: 88px;
 }
 
 .mfa-method-card.muted {
@@ -5072,8 +5485,27 @@ button.menu-metric[aria-pressed='true'] {
   justify-content: space-between;
   gap: 14px;
   padding: 12px;
-  border: 1px solid var(--danger-border);
-  border-radius: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+}
+
+.mfa-danger-row > div > strong {
+  color: var(--text-h);
+}
+
+.mfa-disable-all {
+  height: 34px;
+  border-radius: 10px;
+  color: var(--danger);
+  border-color: var(--danger-border);
+  background: transparent;
+  font-weight: 700;
+}
+
+.mfa-disable-all:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
   background: var(--danger-bg);
 }
 
@@ -7053,6 +7485,21 @@ button.menu-metric[aria-pressed='true'] {
   font-weight: 650;
 }
 
+/* What the chosen modifiers declared. Given the same warning colour as the menu's allergen panel
+   so it reads as the same kind of information wherever it appears. */
+.order-item-option-allergens {
+  margin: 4px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warning-foreground, #7c4a03);
+}
+
+@media (prefers-color-scheme: dark) {
+  .order-item-option-allergens {
+    color: var(--warning-foreground, #fcd9a4);
+  }
+}
+
 .order-note {
   display: grid;
   gap: 4px;
@@ -7301,7 +7748,7 @@ button.menu-metric[aria-pressed='true'] {
 }
 
 .admin-reports-summary-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   padding: 10px;
   border-top: 1px solid color-mix(in oklab, var(--border) 86%, transparent);
@@ -7326,6 +7773,42 @@ button.menu-metric[aria-pressed='true'] {
   grid-template-columns: 1fr;
   align-items: stretch;
   gap: 8px;
+}
+
+.admin-reports-filter-chips {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.admin-reports-filter-chips .restaurant-filter-chip {
+  max-width: min(320px, 78vw);
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in oklab, var(--border) 88%, transparent);
+  border-radius: 999px;
+  color: var(--text);
+  background: var(--panel-bg);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.admin-reports-filter-chips .restaurant-filter-chip span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-reports-filter-chips .restaurant-filter-chip svg {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
 }
 
 .admin-reports-filter-row {
@@ -7361,7 +7844,7 @@ button.menu-metric[aria-pressed='true'] {
 
 .report-business-summary-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   padding: 10px;
   border-top: 1px solid color-mix(in oklab, var(--border) 86%, transparent);
@@ -7417,6 +7900,16 @@ button.menu-metric[aria-pressed='true'] {
 
 .report-error-banner {
   margin: 0;
+}
+
+.report-error-banner > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.report-error-banner > div > span {
+  display: block;
 }
 
 .report-activity-feed {
@@ -7500,8 +7993,24 @@ button.menu-metric[aria-pressed='true'] {
 
 .report-activity-heading time {
   flex: 0 0 auto;
+  display: grid;
+  justify-items: end;
+  gap: 2px;
   color: var(--muted-foreground);
   font-size: 12px;
+  white-space: nowrap;
+}
+
+.report-activity-heading time small,
+.report-inline-timezone {
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.report-inline-timezone {
+  display: block;
+  margin-top: 3px;
   white-space: nowrap;
 }
 
@@ -7647,6 +8156,11 @@ button.menu-metric[aria-pressed='true'] {
 .report-policy-note svg {
   flex: 0 0 auto;
   margin-top: 1px;
+}
+
+.report-policy-warning {
+  color: var(--destructive);
+  font-weight: 760;
 }
 
 .report-filter-input {
@@ -7849,6 +8363,26 @@ button.menu-metric[aria-pressed='true'] {
   overflow: auto;
 }
 
+.report-json-dialog {
+  width: min(900px, calc(100vw - 32px));
+  max-width: 900px;
+}
+
+.report-json-dialog-code {
+  display: block;
+  max-height: min(62dvh, 680px);
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--subtle) 68%, transparent);
+  font-size: 12px;
+  line-height: 1.5;
+  tab-size: 2;
+  white-space: pre;
+}
+
 .json-hl-key  { color: var(--primary); }
 .json-hl-str  { color: oklch(0.47 0.13 142); }
 .json-hl-bool { color: oklch(0.53 0.18 47); }
@@ -8030,6 +8564,27 @@ button.menu-metric[aria-pressed='true'] {
 
 .my-orders-header {
   align-items: center;
+}
+
+/* On a phone the title, its description and two buttons were all competing for one row: the card
+   grid gave the text a narrow column and it wrapped every two words while the buttons sat beside
+   it. Stacked below a certain width, each gets the full line. */
+@media (max-width: 640px) {
+  .my-orders-header {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .my-orders-header-action {
+    grid-area: auto;
+    justify-content: stretch;
+  }
+
+  .my-orders-header-action [data-slot='button'] {
+    flex: 1;
+  }
 }
 
 .my-orders-header-action {
@@ -8250,6 +8805,178 @@ button.menu-metric[aria-pressed='true'] {
   width: 16px;
   height: 16px;
   stroke-width: 2.4;
+}
+
+/* The reason an order was turned away. Sits with the status, not with the refund state: it
+   explains the order itself, and it is the first thing a customer looks for on a rejected one. */
+/* An order the customer has asked to have refunded. Marked on the card itself because during
+   service this is the one thing that changes what staff should do next, and it used to be visible
+   only on the payments screen. */
+/* A line whose every unit has been refunded. Struck through rather than removed: staff who
+   remember taking the order need to see why it is not being made, and a ticket that silently loses
+   a line looks like a printing fault. */
+.is-refunded-line {
+  opacity: 0.55;
+}
+
+.is-refunded-line .staff-kitchen-item-main strong,
+.is-refunded-line > .flex > span:first-child > strong,
+.is-refunded-line > .flex > span:first-child {
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+}
+
+.staff-kitchen-item-refund {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* The affordance. A coloured strip reads as a status; these read as something to press. */
+.admin-order-refund-request-cta,
+.admin-order-row-refund-cta,
+.staff-order-refund-cta {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+
+.staff-order-refund-cta {
+  margin-left: 6px;
+}
+
+.admin-order-refund-request:hover .admin-order-refund-request-cta,
+.admin-order-row-refund-button:hover .admin-order-row-refund-cta,
+.staff-order-refund-request:hover .staff-order-refund-cta {
+  text-decoration-thickness: 2px;
+}
+
+.admin-order-refund-request:focus-visible,
+.admin-order-row-refund-button:focus-visible,
+.staff-order-refund-request:focus-visible {
+  outline: 2px solid var(--ring, currentColor);
+  outline-offset: 2px;
+}
+
+/* The desktop table, which is the view most staff work from. */
+.admin-order-row-refund-requested > td:first-child {
+  box-shadow: inset 3px 0 0 0 color-mix(in srgb, var(--warning, var(--danger)) 62%, transparent);
+}
+
+.admin-order-row-refund-button {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--warning, var(--danger)) 44%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warning, var(--danger)) 12%, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.admin-order-row-refund-button:hover {
+  background: color-mix(in srgb, var(--warning, var(--danger)) 20%, transparent);
+}
+
+/* The kitchen-screen version: the same line, made pressable. */
+.staff-order-refund-request {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.staff-order-refund-request:hover {
+  filter: brightness(0.97);
+}
+
+.admin-order-card-refund-requested {
+  border-color: color-mix(in srgb, var(--warning, var(--danger)) 46%, transparent);
+  box-shadow: inset 3px 0 0 0 color-mix(in srgb, var(--warning, var(--danger)) 62%, transparent);
+}
+
+.admin-order-refund-request {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--warning, var(--danger)) 40%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning, var(--danger)) 10%, transparent);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.admin-order-refund-request:hover {
+  background: color-mix(in srgb, var(--warning, var(--danger)) 16%, transparent);
+}
+
+.admin-order-refund-request > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.admin-order-refund-request-summary {
+  font-size: 0.85rem;
+  color: var(--muted-foreground);
+}
+
+.admin-order-refund-request-warning {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--danger);
+}
+
+.my-order-closure {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 34%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.my-order-closure-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--danger);
+}
+
+.my-order-closure strong {
+  display: block;
+  font-size: 0.9rem;
+}
+
+.my-order-closure p {
+  margin: 2px 0 0;
+  font-size: 0.85rem;
+  line-height: 1.35;
+  color: var(--muted-foreground);
 }
 
 .my-order-refund-state {
@@ -8809,6 +9536,13 @@ button.menu-metric[aria-pressed='true'] {
   .my-order-total {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  /* Stacking put the total under its own label at the left edge, which reads as another line of
+     detail rather than the figure the card is about. Wide screens keep it at the right end of the
+     row; sending it to the right end of the last line keeps that same corner. */
+  .my-order-total strong {
+    align-self: flex-end;
   }
 
   .my-order-amount {
@@ -9725,6 +10459,21 @@ button.menu-metric[aria-pressed='true'] {
     min-height: 40px;
   }
 
+  .operational-notification-banner {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: start;
+  }
+
+  .operational-notification-banner > [data-slot='button']:not([data-size='icon-sm']) {
+    grid-column: 2 / -1;
+    width: fit-content;
+  }
+
+  .operational-notification-banner > [data-size='icon-sm'] {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
   .nav-actions {
     display: none;
   }
@@ -10528,10 +11277,6 @@ button.menu-metric[aria-pressed='true'] {
     padding: 8px;
   }
 
-  .report-business-summary-grid > div:last-child {
-    grid-column: 1 / -1;
-  }
-
   .report-date-filter-grid {
     grid-template-columns: 1fr;
   }
@@ -10595,7 +11340,7 @@ button.menu-metric[aria-pressed='true'] {
   }
 
   .admin-reports-summary-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
     padding: 8px;
   }
@@ -10675,6 +11420,24 @@ button.menu-metric[aria-pressed='true'] {
     max-width: none;
     height: min(92dvh, 760px);
     max-height: min(92dvh, 760px);
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 12px;
+    overflow: hidden;
+    padding: 14px;
+    border-radius: 18px 18px 0 0;
+    transform: none;
+    translate: none;
+  }
+
+  .menu-dialog {
+    top: auto;
+    bottom: 0;
+    left: 9px;
+    right: 9px;
+    width: auto;
+    max-width: none;
+    height: min(92dvh, 92vh, 760px);
+    max-height: min(92dvh, 92vh, 760px);
     grid-template-rows: auto minmax(0, 1fr);
     gap: 12px;
     overflow: hidden;
@@ -10865,8 +11628,28 @@ button.menu-metric[aria-pressed='true'] {
     border-radius: 8px;
   }
 
+  /* A 46px cell cannot hold an "Open"/"Closed" pill, so this used to be hidden outright — which
+     left the calendar showing nothing but numbers, and no way to see which days the restaurant
+     is shut. A dot fits, and colour is enough to pick the closed days out of a month at a glance.
+     The word itself stays in the DOM but unsized; every cell's aria-label already carries the
+     full wording, so nothing is lost to a screen reader. */
   .restaurant-calendar-day-status {
-    display: none;
+    width: 7px;
+    height: 7px;
+    min-height: 7px;
+    padding: 0;
+    border-radius: 999px;
+    font-size: 0;
+    line-height: 0;
+    overflow: hidden;
+  }
+
+  .restaurant-calendar-day.is-open .restaurant-calendar-day-status {
+    background: var(--brand-primary);
+  }
+
+  .restaurant-calendar-day.is-closed .restaurant-calendar-day-status {
+    background: var(--destructive);
   }
 
   .restaurant-calendar-empty-override > div {
@@ -11265,22 +12048,54 @@ button.menu-metric[aria-pressed='true'] {
     padding: 12px;
   }
 
+  /* Stays a row. Stacking put the avatar and the quick actions on a second line pinned to the
+     left, under the logo — on a phone that reads as stray content rather than the account control
+     people look for in the corner. The 768px rules above already lay this out correctly; what did
+     not fit at this width was the name and address beside the avatar, so that is what gives way. */
   .topbar {
-    align-items: stretch;
-    flex-direction: column;
-    gap: 8px;
+    align-items: center;
+    flex-direction: row;
+    gap: 10px;
   }
 
   .topbar-brand {
-    width: 100%;
+    min-width: 0;
+    flex: 1 1 auto;
   }
 
+  /* Capped, because the overflow below only engages once the box has a limit to overflow. Without
+     one a staff member's longer toolbar simply grew and squeezed the logo to a sliver instead of
+     scrolling — the actions never shrink, so the brand is what gives. */
   .mobile-topbar-actions {
-    width: 100%;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 62%;
+    /* Not flex-end: overflow under flex-end spills out of the *start* edge, at negative offsets
+       that scrollWidth does not count and no scroll can reach. The box already hugs its content
+       and sits at the right of the bar, so starting from the left costs nothing when everything
+       fits and keeps the excess scrollable when it does not. */
     justify-content: flex-start;
     overflow-x: auto;
-    padding-bottom: 2px;
+    /* overflow-x: auto quietly makes overflow-y auto too — the spec forbids one axis scrolling
+       while the other visibly overflows. That clipped the notification badge, which sits at
+       top: -7px on purpose, leaving its top third sliced off. The padding gives the clip box room
+       for it and the negative margin takes that room back out of the layout, so the bar itself
+       does not move. */
+    padding-top: 10px;
+    margin-top: -10px;
+    padding-bottom: 10px;
+    margin-bottom: -8px;
     scrollbar-width: none;
+  }
+
+  /* Just the avatar at this width. */
+  .mobile-user-menu-trigger-copy {
+    display: none;
+  }
+
+  .mobile-user-menu-trigger {
+    max-width: none;
+    padding: 4px;
   }
 
   .mobile-topbar-actions::-webkit-scrollbar {
@@ -12230,6 +13045,64 @@ button.menu-metric[aria-pressed='true'] {
   font-size: 13px;
 }
 
+/* The recent counter transactions lookup: a short list, read at the counter with a customer
+   waiting, so each row is one line and the action sits at the end of it. */
+.front-counter-recent-payments-dialog {
+  max-width: 560px;
+}
+
+.front-counter-recent-payments-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 48vh;
+  overflow-y: auto;
+}
+
+.front-counter-recent-payment {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.front-counter-recent-payment > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.front-counter-recent-payment > div:first-child strong {
+  font-size: 15px;
+}
+
+.front-counter-recent-payment-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Shown when the money was taken but the pickup could not be completed. Deliberately the same
+   settled green as the change-due panel: the cashier's first question is whether the customer has
+   paid, and the answer is yes. */
+.front-counter-settlement-paid-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--brand-success) 42%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--brand-success) 10%, var(--card));
+  color: var(--foreground);
+  font-size: 13px;
+}
+
 .front-counter-tender-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -12449,172 +13322,211 @@ button.menu-metric[aria-pressed='true'] {
   color: var(--destructive);
 }
 
-.front-counter-receipt-print {
+/* Receipt / tax invoice document. Shared by the front counter print and the customer's own
+   order page, so both hand over an identical document. Hidden on screen unless a surface opts
+   in with .receipt-print-visible; body.printing-receipt reveals it for window.print(). The
+   paper colours are deliberately fixed in both themes — this is a facsimile of the docket. */
+.receipt-print {
   display: none;
+  color: #000;
+  background: #fff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+  line-height: 1.28;
+}
+
+.receipt-print.receipt-print-visible {
+  display: block;
+  width: 100%;
+  max-width: 80mm;
+  margin: 0 auto;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.receipt-print h1,
+.receipt-print p,
+.receipt-print dl,
+.receipt-print dd {
+  margin: 0;
+}
+
+.receipt-print .receipt-header {
+  padding-bottom: 8px;
+  border-bottom: 1px dashed #000;
+  text-align: center;
+}
+
+.receipt-print .receipt-header span {
+  display: block;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.receipt-print .receipt-header h1 {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.receipt-print .receipt-header p {
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.receipt-print .receipt-meta,
+.receipt-print .receipt-total {
+  display: grid;
+  gap: 4px;
+  padding: 8px 0;
+  border-bottom: 1px dashed #000;
+}
+
+.receipt-print .receipt-meta div,
+.receipt-print .receipt-total div {
+  display: grid;
+  grid-template-columns: 22mm minmax(0, 1fr);
+  gap: 4px;
+}
+
+.receipt-print .receipt-meta dt,
+.receipt-print .receipt-total dt {
+  color: #000;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.receipt-print .receipt-meta dd,
+.receipt-print .receipt-total dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 700;
+  text-align: right;
+}
+
+.receipt-print .receipt-items {
+  display: grid;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.receipt-print .receipt-item {
+  break-inside: avoid;
+  display: grid;
+  gap: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed #000;
+}
+
+.receipt-print .receipt-item-main {
+  display: grid;
+  grid-template-columns: 9mm minmax(0, 1fr) auto;
+  gap: 4px;
+  font-size: 14px;
+  line-height: 1.18;
+}
+
+.receipt-print .receipt-item-main strong,
+.receipt-print .receipt-item-main span,
+.receipt-print .receipt-item-main small {
+  color: #000;
+  font-size: inherit;
+  font-weight: 900;
+}
+
+.receipt-print .receipt-item-main small {
+  white-space: nowrap;
+}
+
+.receipt-print .receipt-options {
+  display: grid;
+  gap: 3px;
+  padding-left: 9mm;
+}
+
+.receipt-print .receipt-options div {
+  display: grid;
+  gap: 1px;
+}
+
+.receipt-print .receipt-options strong,
+.receipt-print .receipt-note strong {
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.receipt-print .receipt-options span,
+.receipt-print .receipt-note {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.receipt-print .receipt-note {
+  margin: 0 0 0 9mm;
+}
+
+.receipt-print .receipt-item-modifier {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px;
+  padding-left: 9mm;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.receipt-print .receipt-item-modifier small {
+  font-size: inherit;
+  white-space: nowrap;
+}
+
+.receipt-print .receipt-item-line-total {
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.receipt-print .receipt-total {
+  border-top: 2px solid #000;
+  border-bottom: 0;
+}
+
+.receipt-print .receipt-total div:last-child {
+  font-size: 13px;
+}
+
+.receipt-print .receipt-footer {
+  display: grid;
+  gap: 3px;
+  padding-top: 8px;
+  text-align: center;
+  font-weight: 800;
 }
 
 @media print {
-  body.front-counter-printing-receipt * {
+  body.printing-receipt * {
     visibility: hidden !important;
   }
 
-  body.front-counter-printing-receipt .front-counter-receipt-print,
-  body.front-counter-printing-receipt .front-counter-receipt-print * {
+  body.printing-receipt .receipt-print,
+  body.printing-receipt .receipt-print * {
     visibility: visible !important;
   }
 
-  body.front-counter-printing-receipt .front-counter-receipt-print {
+  body.printing-receipt .receipt-print {
     position: fixed;
     inset: 0 auto auto 0;
     display: block !important;
     width: 80mm;
     max-width: 80mm;
+    margin: 0;
     padding: 0;
+    border: 0;
     color: #000 !important;
     background: #fff !important;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
-    font-size: 11px;
-    line-height: 1.28;
-  }
-
-  .front-counter-receipt-print h1,
-  .front-counter-receipt-print p,
-  .front-counter-receipt-print dl,
-  .front-counter-receipt-print dd {
-    margin: 0;
-  }
-
-  .front-counter-receipt-header {
-    padding-bottom: 8px;
-    border-bottom: 1px dashed #000;
-    text-align: center;
-  }
-
-  .front-counter-receipt-header span {
-    display: block;
-    font-size: 10px;
-    font-weight: 800;
-    text-transform: uppercase;
-  }
-
-  .front-counter-receipt-header h1 {
-    margin-top: 2px;
-    overflow-wrap: anywhere;
-    font-size: 24px;
-    line-height: 1;
-  }
-
-  .front-counter-receipt-header p {
-    margin-top: 4px;
-    font-size: 11px;
-    font-weight: 700;
-  }
-
-  .front-counter-receipt-meta,
-  .front-counter-receipt-total {
-    display: grid;
-    gap: 4px;
-    padding: 8px 0;
-    border-bottom: 1px dashed #000;
-  }
-
-  .front-counter-receipt-meta div,
-  .front-counter-receipt-total div {
-    display: grid;
-    grid-template-columns: 22mm minmax(0, 1fr);
-    gap: 4px;
-  }
-
-  .front-counter-receipt-meta dt,
-  .front-counter-receipt-total dt {
-    color: #000;
-    font-weight: 800;
-    text-transform: uppercase;
-  }
-
-  .front-counter-receipt-meta dd,
-  .front-counter-receipt-total dd {
-    min-width: 0;
-    overflow-wrap: anywhere;
-    font-weight: 700;
-    text-align: right;
-  }
-
-  .front-counter-receipt-items {
-    display: grid;
-    gap: 8px;
-    padding: 8px 0;
-  }
-
-  .front-counter-receipt-item {
-    break-inside: avoid;
-    display: grid;
-    gap: 4px;
-    padding-bottom: 8px;
-    border-bottom: 1px dashed #000;
-  }
-
-  .front-counter-receipt-item-main {
-    display: grid;
-    grid-template-columns: 9mm minmax(0, 1fr) auto;
-    gap: 4px;
-    font-size: 14px;
-    line-height: 1.18;
-  }
-
-  .front-counter-receipt-item-main strong,
-  .front-counter-receipt-item-main span,
-  .front-counter-receipt-item-main small {
-    color: #000;
-    font-size: inherit;
-    font-weight: 900;
-  }
-
-  .front-counter-receipt-item-main small {
-    white-space: nowrap;
-  }
-
-  .front-counter-receipt-options {
-    display: grid;
-    gap: 3px;
-    padding-left: 9mm;
-  }
-
-  .front-counter-receipt-options div {
-    display: grid;
-    gap: 1px;
-  }
-
-  .front-counter-receipt-options strong,
-  .front-counter-receipt-note strong {
-    font-size: 10px;
-    font-weight: 900;
-    text-transform: uppercase;
-  }
-
-  .front-counter-receipt-options span,
-  .front-counter-receipt-note {
-    font-size: 12px;
-    font-weight: 700;
-  }
-
-  .front-counter-receipt-note {
-    margin: 0 0 0 9mm;
-  }
-
-  .front-counter-receipt-total {
-    border-top: 2px solid #000;
-    border-bottom: 0;
-  }
-
-  .front-counter-receipt-total div:last-child {
-    font-size: 13px;
-  }
-
-  .front-counter-receipt-footer {
-    padding-top: 8px;
-    text-align: center;
-    font-weight: 800;
   }
 }
 
@@ -12775,3 +13687,134 @@ button.menu-metric[aria-pressed='true'] {
   }
 }
 
+.legal-footer {
+  border-top: 1px solid hsl(var(--border));
+  padding: 1rem;
+  color: hsl(var(--muted-foreground));
+  font-size: .75rem;
+  text-align: center;
+}
+
+.legal-footer nav { display: flex; flex-wrap: wrap; justify-content: center; gap: .75rem 1.25rem; }
+.legal-footer a:hover { color: hsl(var(--foreground)); text-decoration: underline; }
+.legal-page { min-height: calc(100svh - 3.5rem); padding: 2rem 1rem 4rem; background: hsl(var(--background)); }
+.legal-page article { max-width: 52rem; margin: 0 auto; color: hsl(var(--foreground)); }
+.legal-back-button { margin-bottom: 1rem; }
+.legal-page h1 { margin: .4rem 0; font-size: clamp(2rem, 6vw, 3.25rem); line-height: 1.05; }
+.legal-page h2 { margin: 2rem 0 .5rem; font-size: 1.15rem; }
+.legal-page p { margin: .5rem 0; line-height: 1.75; color: hsl(var(--muted-foreground)); }
+.legal-page a { color: hsl(var(--primary)); text-decoration: underline; text-underline-offset: 3px; }
+.legal-updated { font-size: .8rem; }
+
+/* Password visibility toggle: the control sits inside the field, so the input keeps room for its
+   own text rather than running underneath the button. */
+.password-input {
+  position: relative;
+  display: block;
+}
+
+.password-input > input {
+  padding-right: 42px;
+}
+
+.password-input-toggle {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.password-input-toggle:hover {
+  color: var(--foreground);
+  background: var(--subtle);
+}
+
+.password-input-toggle:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* The clashing labels, listed one per line: the person confirming has to be able to see which
+   word triggered it, or they cannot judge whether the label is right. */
+.dietary-conflict-list {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--danger);
+}
+
+/* What the other person changed, listed so the choice to overwrite is an informed one. Scrolls
+   rather than growing, because an item has enough fields to push the buttons off a short screen. */
+.menu-conflict-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+  font-size: 14px;
+  max-height: 40dvh;
+  overflow-y: auto;
+}
+
+.menu-conflict-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.menu-conflict-list li:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.menu-conflict-from {
+  color: var(--muted-foreground);
+  text-decoration: line-through;
+  overflow-wrap: anywhere;
+}
+
+.menu-conflict-to {
+  color: var(--foreground);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 560px) {
+  .menu-conflict-list li {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  /* The arrow only makes sense between two columns. */
+  .menu-conflict-list li > [aria-hidden='true'] {
+    display: none;
+  }
+}

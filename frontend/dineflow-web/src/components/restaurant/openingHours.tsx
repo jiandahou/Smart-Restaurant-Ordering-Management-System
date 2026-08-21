@@ -23,6 +23,8 @@ import {
 import { toast } from 'sonner'
 import { z } from 'zod'
 import {
+  describeError,
+  errorCodeOf,
   updateRestaurantOpeningHours,
   updateRestaurantOrderingStatus,
   updateRestaurantSpecialDays,
@@ -600,9 +602,12 @@ export function getStatusHeadline(availability: RestaurantAvailability) {
 export function OrderingPauseControl({
   restaurant,
   onRestaurantUpdated,
+  showRestaurantName = false,
 }: {
   restaurant: Restaurant
   onRestaurantUpdated: (restaurant: Restaurant) => void
+  /** Say which restaurant this closes, where the surrounding page is not about one. */
+  showRestaurantName?: boolean
 }) {
   const [busy, setBusy] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -633,7 +638,9 @@ export function OrderingPauseControl({
   return (
     <div className="restaurant-pause-control">
       <div>
-        <span className="restaurant-hours-field-label">Accepting orders</span>
+        <span className="restaurant-hours-field-label">
+          {showRestaurantName ? `Accepting orders — ${restaurant.name}` : 'Accepting orders'}
+        </span>
         <p>
           {isAccepting
             ? 'Close when the kitchen is overloaded. Opening hours still apply automatically.'
@@ -1066,14 +1073,16 @@ export function RestaurantOpeningHoursPanel({
       const response = await updateRestaurantOpeningHours(
         selectedRestaurant.id,
         serializeOpeningHours(openingHoursResult.data),
+        selectedRestaurant.updatedAt,
       )
 
       setDraftOpeningHoursState(null)
       onRestaurantUpdated(response.restaurant)
       toast.success('Opening hours updated', { description: response.message })
     } catch (error) {
-      toast.error('Could not update opening hours', {
-        description: error instanceof Error ? error.message : 'The request failed.',
+      const conflict = errorCodeOf(error) === 'schedule_conflict'
+      toast.error(conflict ? 'Saved by someone else' : 'Could not update opening hours', {
+        description: describeError(error, 'The request failed.').message,
       })
     } finally {
       setSaving(false)
@@ -1416,6 +1425,7 @@ export function RestaurantSpecialCalendarPanel({
       const response = await updateRestaurantSpecialDays(
         restaurant.id,
         serializeSpecialOpeningDays(validation.data),
+        restaurant.updatedAt,
       )
 
       specialWindowMemoryRef.current = Object.fromEntries(
@@ -1426,8 +1436,9 @@ export function RestaurantSpecialCalendarPanel({
       onRestaurantUpdated(response.restaurant)
       toast.success('Special calendar updated', { description: response.message })
     } catch (error) {
-      toast.error('Could not update special calendar', {
-        description: error instanceof Error ? error.message : 'The request failed.',
+      const conflict = errorCodeOf(error) === 'schedule_conflict'
+      toast.error(conflict ? 'Saved by someone else' : 'Could not update special calendar', {
+        description: describeError(error, 'The request failed.').message,
       })
     } finally {
       setSaving(false)

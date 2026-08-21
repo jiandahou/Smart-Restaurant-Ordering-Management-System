@@ -6,6 +6,36 @@ public class OrderResponse
 
     public Guid? RestaurantId { get; set; }
 
+    // Supplier details the customer's own receipt has to carry: an Australian proof of
+    // transaction needs the supplier's name and ABN, and a tax invoice needs the GST position.
+    public string? RestaurantName { get; set; }
+
+    public string? RestaurantLegalBusinessName { get; set; }
+
+    public string? RestaurantAbn { get; set; }
+
+    public bool RestaurantGstRegistered { get; set; }
+
+    /// <summary>Whether prices already include GST, for the receipt wording.</summary>
+    public bool RestaurantPricesIncludeGst { get; set; }
+
+    /// <summary>
+    /// Whether the restaurant allows settling at the counter, and whether it can take a card right
+    /// now. Sent so a page reached from an order alone — with no cart behind it — can still offer
+    /// the payment choices that actually exist.
+    /// </summary>
+    public string RestaurantPaymentPolicy { get; set; } = string.Empty;
+
+    public bool RestaurantOnlinePaymentsEnabled { get; set; }
+
+    public string? RestaurantAddress { get; set; }
+
+    public string? RestaurantPhone { get; set; }
+
+    public string? RestaurantRefundContactEmail { get; set; }
+
+    public string? RestaurantCustomerSurchargeNotice { get; set; }
+
     public Guid? TableId { get; set; }
 
     public string? TableNumber { get; set; }
@@ -40,11 +70,52 @@ public class OrderResponse
 
     public DateTime? UpdatedAt { get; set; }
 
+    /// When the payment settled. The clock the acceptance wait is measured against.
+    public DateTime? PaidAt { get; set; }
+
+    /// True once the customer may cancel this paid order themselves and be refunded.
+    public bool CanCancelForRefund { get; set; }
+
+    /// UTC instant that right becomes available, so the page can count down to it.
+    public DateTime? CancellableForRefundAt { get; set; }
+
+    /// <summary>
+    /// UTC instant an unpaid order releases the stock and pickup number it is holding, or null when
+    /// it holds nothing — already paid, already settled, or a payment attempt is in flight.
+    /// </summary>
+    public DateTime? UnpaidExpiresAt { get; set; }
+
+    /// <summary>
+    /// Why this order was rejected or cancelled, as whoever ended it recorded at the time.
+    /// </summary>
+    /// <remarks>
+    /// Staff already choose a reason when they turn an order away — "Item is unavailable",
+    /// "Duplicate order" — and it was written to the order's history and stopped there. The customer
+    /// saw their order become Rejected with nothing beside it, which is the moment they most need
+    /// telling: whether to reorder without that dish, or not to bother.
+    /// </remarks>
+    public OrderClosureReason? ClosureReason { get; set; }
+
     public CustomerRefundRequestResponse? LatestRefundRequest { get; set; }
 
     public OrderRefundBalance RefundBalance { get; set; } = new();
 
     public List<OrderItemResponse> OrderItems { get; set; } = new();
+}
+
+/// <summary>How an order came to be closed, in terms a customer can act on.</summary>
+public sealed class OrderClosureReason
+{
+    /// <summary>"Reject" or "Cancel" — who turned it away matters as much as why.</summary>
+    public string Action { get; set; } = string.Empty;
+
+    /// <summary>The restaurant's own wording, verbatim. Null when none was recorded.</summary>
+    public string? Reason { get; set; }
+
+    /// <summary>True when the customer ended the order themselves.</summary>
+    public bool EndedByCustomer { get; set; }
+
+    public DateTime At { get; set; }
 }
 
 public class OrderRefundBalance
@@ -71,6 +142,13 @@ public class OrderItemResponse
     public string MenuItemNameSnapshot { get; set; } = string.Empty;
 
     public decimal BasePriceSnapshot { get; set; }
+
+    /// <summary>The dish's allergen declaration as it read when the order was placed.</summary>
+    public string? AllergensSnapshot { get; set; }
+
+    public string? MayContainAllergensSnapshot { get; set; }
+
+    public string? CrossContactStatementSnapshot { get; set; }
 
     public string ItemNameSnapshot { get; set; } = string.Empty;
 
@@ -118,6 +196,13 @@ public class OrderItemOptionResponse
     public string OptionNameSnapshot { get; set; } = string.Empty;
 
     public decimal PriceAdjustmentSnapshot { get; set; }
+
+    /// <summary>The modifier's allergen declaration as it read when the order was placed.</summary>
+    public string? AllergensSnapshot { get; set; }
+
+    public string? MayContainAllergensSnapshot { get; set; }
+
+    public string? CrossContactStatementSnapshot { get; set; }
 
     public int Quantity { get; set; } = 1;
 }

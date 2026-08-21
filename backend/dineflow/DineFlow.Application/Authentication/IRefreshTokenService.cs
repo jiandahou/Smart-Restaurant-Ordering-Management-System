@@ -10,6 +10,19 @@ public enum RefreshTokenFailureReason
     /// distinct from <see cref="Reused"/> so the client can show "you're signed
     /// out" instead of the more alarming "this session was compromised".</summary>
     Revoked,
+
+    /// <summary>
+    /// The token was rotated away moments ago and is being presented again — two tabs of the same
+    /// browser waking together and both refreshing the token they share.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="Reused"/> because the response is the opposite: nothing is revoked,
+    /// and the client is told to read the token its sibling has by now written and try again. A till
+    /// signed out mid-service stops showing new orders, stops sounding, and stops printing — orders
+    /// are not lost from the database, but they are lost from anybody's attention, which is the same
+    /// thing to the customer waiting for food.
+    /// </remarks>
+    RotationRace,
 }
 
 public sealed record RefreshTokenRotationResult(
@@ -42,4 +55,10 @@ public interface IRefreshTokenService
         CancellationToken cancellationToken = default);
 
     Task RevokeAsync(string rawToken, string? ipAddress, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Ends every session for this account. Used when the account's identity changes underneath
+    /// sessions that were issued against the old one.
+    /// </summary>
+    Task RevokeAllForUserAsync(string userId, string? ipAddress, CancellationToken cancellationToken = default);
 }

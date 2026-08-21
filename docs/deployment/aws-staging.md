@@ -118,6 +118,26 @@ FRONTEND_S3_REGION=ap-southeast-2
 - Origin access: CloudFront OAC/private S3 bucket access
 - SPA fallback: configure `403` and `404` to return `/index.html` with HTTP `200`
 
+#### Required cache behaviours
+
+The frontend calls the API with relative `/api/...` paths on its own origin — there is no API base
+URL baked into the build. CloudFront therefore has to forward those paths to the backend, or the
+deployed site cannot reach the API at all.
+
+| Path pattern | Origin | Notes |
+|---|---|---|
+| `/api/*` | Backend ALB | Forward all headers, query strings and cookies; allow every HTTP method; caching disabled. Must also allow WebSocket upgrades — SignalR connects to `/api/hubs/carts` and `/api/hubs/orders` under this pattern. |
+| `/health*` | Backend ALB | Already configured. |
+| `Default (*)` | S3 bucket | The SPA, with the 403/404 fallback above. |
+
+Verify after any distribution change — a JSON body from `DineFlow.Api` means the behaviour is
+wired, an empty `404` or an HTML body means the request never left CloudFront:
+
+```bash
+curl -i https://<distribution-domain>/health/ready
+curl -i https://<distribution-domain>/api/public/ordering
+```
+
 Record these values:
 
 ```text
@@ -165,7 +185,43 @@ Stripe__CancelUrl=<frontend-staging-url>/payment/cancelled
 SeedOwner__Email=<staging-owner-email>
 SeedOwner__Password=<staging-owner-password>
 SeedOwner__FullName=DineFlow Owner
+
+Database__MigrateOnStartup=false
+Seed__DemoData=false
 ```
+
+For `ASPNETCORE_ENVIRONMENT=Production`, the API also refuses to start until external report
+retention is backed by named operational evidence:
+
+```text
+ReportRetention__ExternalMaintenanceEnabled=true
+ReportRetention__ScheduledJobReference=<eventbridge-rule-and-ecs-task-revision>
+ReportRetention__ArchiveDestination=<encrypted-s3-bucket-and-prefix>
+ReportRetention__LegalHoldRegister=<approved-register-reference>
+ReportRetention__LastRestoreDrillUtc=<ISO-8601-successful-drill-time-within-last-year>
+```
+
+Do not put the maintenance database password in the web task. The scheduled task must use a
+separate role, verify the archive manifest and current holds, and emit deletion/restore evidence.
+See `docs/reporting-retention-policy.md` before enabling the gate.
+
+## Database migrations
+
+The API does not migrate the database on startup outside Development: several tasks can boot at
+once, and an unreviewed migration must never reach a live database as a side effect of a deploy.
+Run migrations as a release task before rolling out the new task definition:
+
+```bash
+aws ecs run-task --cluster <cluster> --task-definition <new-revision> --overrides '{"containerOverrides":[{"name":"api","command":["dotnet","DineFlow.Api.dll","--migrate"]}]}'
+```
+
+The container applies pending migrations, seeds roles and the bootstrap owner, then exits without
+serving traffic. `Database__MigrateOnStartup=true` restores the old startup behaviour for
+environments where that is acceptable; it is ignored in Production.
+
+`Seed__DemoData` controls the demo restaurants, menus, orders and the shared-password
+`*@dineflow.test` accounts. It is refused outright in Production — set it to `false` anywhere the
+data is real.
 
 ## GitHub Secrets
 

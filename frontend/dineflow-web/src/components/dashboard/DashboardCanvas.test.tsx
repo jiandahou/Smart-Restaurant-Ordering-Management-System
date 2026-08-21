@@ -101,3 +101,55 @@ describe('DashboardCanvas customization', () => {
     expect(window.localStorage.getItem(dashboardStorageKey('owner-2'))).toBeNull()
   })
 })
+
+/**
+ * The schedule widgets only enter the registry once the restaurant list resolves, so the first
+ * render reconciles the stored layout against an incomplete set, drops them, and the mount effect
+ * writes that back. Hidden and size preferences for those widgets never survived a refresh.
+ */
+describe('a widget that has not registered yet', () => {
+  const scope = 'owner-1'
+  const key = dashboardStorageKey(scope)
+  const stored = [
+    { id: 'alpha', w: 1, h: 1, hidden: false },
+    { id: 'beta', w: 2, h: 1, hidden: true },
+    { id: 'opening-hours', w: 2, h: 2, hidden: true },
+  ]
+
+  beforeEach(() => {
+    window.localStorage.clear()
+    window.localStorage.setItem(key, JSON.stringify(stored))
+  })
+
+  afterEach(() => cleanup())
+
+  it('survives a render that happens before it exists', () => {
+    render(<DashboardCanvas widgets={widgets} storageScope={scope} />)
+
+    const saved = JSON.parse(window.localStorage.getItem(key)!)
+    expect(saved).toContainEqual({ id: 'opening-hours', w: 2, h: 2, hidden: true })
+  })
+
+  it('keeps its preference rather than reverting to a visible default', () => {
+    // Reappearing unhidden is what made this look like the widget "came back" on every reload.
+    const { unmount } = render(<DashboardCanvas widgets={widgets} storageScope={scope} />)
+    unmount()
+
+    render(<DashboardCanvas widgets={[...widgets, {
+      id: 'opening-hours',
+      title: 'Opening hours',
+      allowedSizes: [{ w: 2, h: 2 }],
+      render: () => <div data-slot="card">Hours</div>,
+    }]} storageScope={scope} />)
+
+    expect(screen.queryByText('Hours')).not.toBeInTheDocument()
+  })
+
+  it('still records what the visible widgets are doing', () => {
+    render(<DashboardCanvas widgets={widgets} storageScope={scope} />)
+
+    const saved = JSON.parse(window.localStorage.getItem(key)!)
+    expect(saved).toContainEqual({ id: 'alpha', w: 1, h: 1, hidden: false })
+    expect(saved).toContainEqual({ id: 'beta', w: 2, h: 1, hidden: true })
+  })
+})

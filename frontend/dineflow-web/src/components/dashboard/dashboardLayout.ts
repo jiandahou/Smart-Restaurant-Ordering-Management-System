@@ -110,23 +110,73 @@ export function reconcileLayout(
 
 export function loadStoredLayout(scope: string): DashboardLayout | null {
   try {
-    // Read the old unscoped preference once as a migration path for existing installations.
-    const raw = window.localStorage.getItem(dashboardStorageKey(scope))
-      ?? window.localStorage.getItem(legacyStorageKey)
-    if (!raw) {
+    const own = readLayout(dashboardStorageKey(scope))
+    if (own) {
+      return own
+    }
+
+    // The unscoped key predates per-account layouts. It belongs to whoever last used this browser,
+    // so it is claimed by the first account to read it and removed in the same breath — otherwise
+    // every subsequent account on a shared machine adopted the same stranger's layout and wrote it
+    // into their own key.
+    const legacy = readLayout(legacyStorageKey)
+    if (!legacy) {
       return null
     }
 
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) {
-      return null
-    }
+    saveLayout(scope, legacy)
+    removeItem(legacyStorageKey)
 
-    return parsed.filter(isWidgetPlacement)
+    return legacy
   } catch {
     // A corrupt or unavailable store just means "no preference yet".
     return null
   }
+}
+
+function readLayout(key: string): DashboardLayout | null {
+  const raw = window.localStorage.getItem(key)
+  if (!raw) {
+    return null
+  }
+
+  const parsed: unknown = JSON.parse(raw)
+  if (!Array.isArray(parsed)) {
+    return null
+  }
+
+  const placements = parsed.filter(isWidgetPlacement)
+
+  return placements.length > 0 ? placements : null
+}
+
+function removeItem(key: string) {
+  try {
+    window.localStorage.removeItem(key)
+  } catch {
+    // Ignored for the same reason as saveLayout.
+  }
+}
+
+/**
+ * The layout to persist, keeping entries for widgets that are not on the page right now.
+ *
+ * <p>The widget registry is not complete on first render — the schedule widgets only exist once the
+ * restaurant list has loaded — and reconciling drops ids it does not recognise. Saving the
+ * reconciled layout therefore erased the hidden and size preferences of every widget that had not
+ * registered yet, on every reload.</p>
+ */
+export function mergeForStorage(
+  layout: DashboardLayout,
+  stored: DashboardLayout | null,
+): DashboardLayout {
+  if (!stored || stored.length === 0) {
+    return layout
+  }
+
+  const present = new Set(layout.map((placement) => placement.id))
+
+  return [...layout, ...stored.filter((placement) => !present.has(placement.id))]
 }
 
 export function saveLayout(scope: string, layout: DashboardLayout) {

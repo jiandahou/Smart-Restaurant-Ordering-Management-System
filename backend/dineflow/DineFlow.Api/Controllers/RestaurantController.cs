@@ -123,14 +123,14 @@ public class RestaurantController : ControllerBase
         var search = request.Search?.Trim();
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var pattern = $"%{search}%";
+            var pattern = SearchPattern.Contains(search);
             query = query.Where(restaurant =>
-                EF.Functions.ILike(restaurant.Name, pattern) ||
-                EF.Functions.ILike(restaurant.Address, pattern) ||
-                EF.Functions.ILike(restaurant.Phone, pattern) ||
-                EF.Functions.ILike(restaurant.CountryCode, pattern) ||
-                EF.Functions.ILike(restaurant.Timezone, pattern) ||
-                EF.Functions.ILike(restaurant.Currency, pattern));
+                EF.Functions.ILike(restaurant.Name, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(restaurant.Address, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(restaurant.Phone, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(restaurant.CountryCode, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(restaurant.Timezone, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(restaurant.Currency, pattern, SearchPattern.EscapeCharacter));
         }
 
         var sortedQuery = ApplySorting(query, request.SortBy, request.IsDescending);
@@ -149,6 +149,13 @@ public class RestaurantController : ControllerBase
             Name = restaurant.Name,
             Address = restaurant.Address,
             Phone = restaurant.Phone,
+            LegalBusinessName = restaurant.LegalBusinessName,
+            Abn = restaurant.Abn,
+            GstRegistered = restaurant.GstRegistered,
+            PricesIncludeGst = restaurant.PricesIncludeGst,
+            BusinessContactEmail = restaurant.BusinessContactEmail,
+            RefundContactEmail = restaurant.RefundContactEmail,
+            CustomerSurchargeNotice = restaurant.CustomerSurchargeNotice,
             ImageUrl = restaurant.ImageUrl,
             CountryCode = restaurant.CountryCode,
             Timezone = restaurant.Timezone,
@@ -455,30 +462,16 @@ public class RestaurantController : ControllerBase
         }
         catch (StripeException exception)
         {
-            var providerMessage = exception.StripeError?.Message ?? exception.Message;
-            var connectSetupIncomplete = providerMessage.Contains(
-                "signed up for Connect",
-                StringComparison.OrdinalIgnoreCase);
+            var failure = StripeOnboardingFailure.Describe(exception, restaurant.CountryCode);
 
             _logger.LogWarning(
                 exception,
-                "Stripe rejected onboarding for restaurant {RestaurantId}. Error code: {StripeErrorCode}.",
+                "Stripe rejected onboarding for restaurant {RestaurantId} in {CountryCode}. Error code: {StripeErrorCode}.",
                 restaurant.Id,
+                restaurant.CountryCode,
                 exception.StripeError?.Code);
 
-            return StatusCode(
-                connectSetupIncomplete
-                    ? StatusCodes.Status409Conflict
-                    : StatusCodes.Status502BadGateway,
-                new
-                {
-                    message = connectSetupIncomplete
-                        ? "Stripe Connect platform setup is incomplete. Finish the business information section in the Stripe Connect setup guide, then try again."
-                        : "Stripe could not start restaurant onboarding. Please try again.",
-                    code = connectSetupIncomplete
-                        ? "stripe_connect_setup_incomplete"
-                        : "stripe_onboarding_failed"
-                });
+            return StatusCode(failure.StatusCode, new { message = failure.Message, code = failure.Code });
         }
     }
 
@@ -522,6 +515,91 @@ public class RestaurantController : ControllerBase
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(MapPaymentSettings(restaurant));
+    }
+
+    [HttpGet("{id:guid}/stripe/business-profile-import")]
+    public async Task<ActionResult<StripeBusinessProfileImportResponse>> PreviewStripeBusinessProfileImport(
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        if (!await CanAccessRestaurantAsync(id))
+        {
+            return Forbid();
+        }
+
+        if (string.IsNullOrWhiteSpace(_stripeOptions.SecretKey))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                message = "Stripe is not configured."
+            });
+        }
+
+        var restaurant = await _dbContext.Restaurants
+            .AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+
+        if (restaurant is null)
+        {
+            return NotFound(new { message = "Restaurant not found." });
+        }
+
+        if (string.IsNullOrWhiteSpace(restaurant.StripeAccountId))
+        {
+            return Conflict(new { message = "Connect this restaurant to Stripe before importing business details." });
+        }
+
+        try
+        {
+            var account = await new AccountService(_stripeClient).GetAsync(
+                restaurant.StripeAccountId,
+                cancellationToken: cancellationToken);
+            var accountTaxIds = await LoadConnectedAccountTaxIdsAsync(
+                restaurant.StripeAccountId,
+                cancellationToken);
+
+            return Ok(StripeBusinessProfileImportBuilder.Build(account, accountTaxIds));
+        }
+        catch (StripeException exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Stripe business profile import failed for restaurant {RestaurantId} and account {StripeAccountId}.",
+                restaurant.Id,
+                restaurant.StripeAccountId);
+            return StatusCode(StatusCodes.Status502BadGateway, new
+            {
+                message = "Stripe could not retrieve this connected account.",
+                code = exception.StripeError?.Code ?? "stripe_account_unreachable"
+            });
+        }
+    }
+
+    /// <summary>
+    /// Reads the connected account's own tax IDs (the only place Stripe exposes a full ABN).
+    /// Missing or restricted tax IDs are not an import failure, so the account details still import.
+    /// </summary>
+    private async Task<IReadOnlyList<TaxId>> LoadConnectedAccountTaxIdsAsync(
+        string stripeAccountId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var taxIds = await new TaxIdService(_stripeClient).ListAsync(
+                new TaxIdListOptions { Limit = 100 },
+                new RequestOptions { StripeAccount = stripeAccountId },
+                cancellationToken);
+
+            return taxIds?.Data ?? [];
+        }
+        catch (StripeException exception)
+        {
+            _logger.LogInformation(
+                exception,
+                "Stripe did not return account tax IDs for connected account {StripeAccountId}.",
+                stripeAccountId);
+            return [];
+        }
     }
 
     [HttpPost("{id:guid}/stripe/diagnostics")]
@@ -757,6 +835,13 @@ public class RestaurantController : ControllerBase
             Name = request.Name.Trim(),
             Address = request.Address.Trim(),
             Phone = request.Phone.Trim(),
+            LegalBusinessName = request.LegalBusinessName.Trim(),
+            Abn = AustralianBusinessNumber.Normalize(request.Abn),
+            GstRegistered = request.GstRegistered,
+            PricesIncludeGst = request.PricesIncludeGst,
+            BusinessContactEmail = request.BusinessContactEmail.Trim(),
+            RefundContactEmail = request.RefundContactEmail.Trim(),
+            CustomerSurchargeNotice = NormalizeOptionalValue(request.CustomerSurchargeNotice),
             ImageUrl = NormalizeOptionalValue(request.ImageUrl),
             CountryCode = NormalizeCountryCode(request.CountryCode),
             Timezone = request.Timezone.Trim(),
@@ -827,6 +912,13 @@ public class RestaurantController : ControllerBase
         restaurant.Name = request.Name.Trim();
         restaurant.Address = request.Address.Trim();
         restaurant.Phone = request.Phone.Trim();
+        restaurant.LegalBusinessName = request.LegalBusinessName.Trim();
+        restaurant.Abn = AustralianBusinessNumber.Normalize(request.Abn);
+        restaurant.GstRegistered = request.GstRegistered;
+        restaurant.PricesIncludeGst = request.PricesIncludeGst;
+        restaurant.BusinessContactEmail = request.BusinessContactEmail.Trim();
+        restaurant.RefundContactEmail = request.RefundContactEmail.Trim();
+        restaurant.CustomerSurchargeNotice = NormalizeOptionalValue(request.CustomerSurchargeNotice);
         restaurant.ImageUrl = NormalizeOptionalValue(request.ImageUrl);
         restaurant.CountryCode = NormalizeCountryCode(request.CountryCode);
         restaurant.Timezone = request.Timezone.Trim();
@@ -955,6 +1047,17 @@ public class RestaurantController : ControllerBase
             return NotFound(new { message = "Restaurant not found." });
         }
 
+        if (ScheduleWasChangedElsewhere(restaurant, request))
+        {
+            return Conflict(new
+            {
+                message = "Someone else saved this schedule while you were editing. Reload to see "
+                    + "their version before saving again.",
+                code = "schedule_conflict",
+                currentUpdatedAt = restaurant.UpdatedAt
+            });
+        }
+
         var beforeRestaurant = SnapshotRestaurant(restaurant);
         restaurant.OpeningHoursJson = openingHoursJson;
         restaurant.UpdatedAt = DateTime.UtcNow;
@@ -1001,6 +1104,17 @@ public class RestaurantController : ControllerBase
             return NotFound(new { message = "Restaurant not found." });
         }
 
+        if (ScheduleWasChangedElsewhere(restaurant, request))
+        {
+            return Conflict(new
+            {
+                message = "Someone else saved this schedule while you were editing. Reload to see "
+                    + "their version before saving again.",
+                code = "schedule_conflict",
+                currentUpdatedAt = restaurant.UpdatedAt
+            });
+        }
+
         var beforeRestaurant = SnapshotRestaurant(restaurant);
         restaurant.SpecialOpeningDaysJson = specialOpeningDaysJson;
         restaurant.UpdatedAt = DateTime.UtcNow;
@@ -1022,27 +1136,87 @@ public class RestaurantController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// True when the row has moved on since the editor loaded it. Compared to the millisecond
+    /// because a schedule save rewrites the whole document: the loser of a race does not lose a
+    /// field, they lose their entire calendar.
+    /// </summary>
+    private static bool ScheduleWasChangedElsewhere(
+        Restaurant restaurant,
+        IScheduleConcurrencyRequest request)
+    {
+        if (request.ExpectedUpdatedAt is not { } expected || restaurant.UpdatedAt is not { } current)
+        {
+            return false;
+        }
+
+        return Math.Abs((current - expected).TotalMilliseconds) > 1;
+    }
+
     [Authorize(Policy = AuthorizationPolicies.PlatformOwnerOnly)]
     [HttpDelete("{id:guid}")]
-    public async Task<IActionResult> DeleteRestaurant(Guid id)
+    public async Task<IActionResult> DeleteRestaurant(Guid id, CancellationToken cancellationToken)
     {
-        var restaurant = await _dbContext.Restaurants.FirstOrDefaultAsync(r => r.Id == id);
+        var restaurant = await _dbContext.Restaurants.FirstOrDefaultAsync(r => r.Id == id, cancellationToken);
 
         if (restaurant is null)
         {
             return NotFound(new { message = "Restaurant not found." });
         }
 
+        // Trading history is protected by RESTRICT foreign keys, so without this check the delete
+        // surfaces as an unhandled DbUpdateException — a 500 that tells the operator nothing about
+        // what is actually in the way.
+        var blockers = await RestaurantDeletionPolicy.FindBlockersAsync(_dbContext, id, cancellationToken);
+
+        if (blockers.Count > 0)
+        {
+            return Conflict(new
+            {
+                message = $"{restaurant.Name} still has {RestaurantDeletionPolicy.DescribeBlockers(blockers)}. "
+                    + "Deactivate the restaurant instead, or remove that data first.",
+                code = "restaurant_has_related_data",
+                blockers
+            });
+        }
+
         var deletedRestaurant = SnapshotRestaurant(restaurant);
-        _dbContext.Restaurants.Remove(restaurant);
-        _reportLogWriter.AddAudit(
-            "Restaurant.Deleted",
-            "Restaurant",
-            restaurant.Id.ToString(),
-            restaurant.Id,
-            $"Deleted restaurant {restaurant.Name}.",
-            deletedRestaurant);
-        await _dbContext.SaveChangesAsync();
+
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            await RestaurantDeletionPolicy.RemoveOwnedRecordsAsync(_dbContext, id, cancellationToken);
+
+            _dbContext.Restaurants.Remove(restaurant);
+            _reportLogWriter.AddAudit(
+                "Restaurant.Deleted",
+                "Restaurant",
+                restaurant.Id.ToString(),
+                restaurant.Id,
+                $"Deleted restaurant {restaurant.Name}.",
+                deletedRestaurant);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception)
+        {
+            // Something referenced the restaurant between the pre-flight check and the delete, or a
+            // relationship we do not count yet still points at it. Either way the operator gets a
+            // conflict they can act on, never a stack trace.
+            await transaction.RollbackAsync(cancellationToken);
+            _logger.LogWarning(
+                exception,
+                "Deleting restaurant {RestaurantId} failed because related data still references it.",
+                id);
+
+            return Conflict(new
+            {
+                message = $"{restaurant.Name} still has related data and cannot be deleted. "
+                    + "Deactivate the restaurant instead, or remove that data first.",
+                code = "restaurant_has_related_data"
+            });
+        }
 
         return Ok(new
         {
@@ -1096,6 +1270,25 @@ public class RestaurantController : ControllerBase
             return "Restaurant phone is required.";
         }
 
+        if (string.IsNullOrWhiteSpace(request.LegalBusinessName)) return "Legal business name is required.";
+
+        // Checked against the ABN checksum, not just the digit count: an eleven-digit placeholder
+        // like 12345678901 passes a length test and then prints on tax invoices as if it were the
+        // supplier's real identity.
+        var abn = AustralianBusinessNumber.Normalize(request.Abn);
+        var isAustralian = request.CountryCode.Equals("AU", StringComparison.OrdinalIgnoreCase);
+
+        if (isAustralian && abn is null)
+            return "An ABN is required for an Australian restaurant.";
+        if (abn is not null && !AustralianBusinessNumber.HasValidLength(abn))
+            return "ABN must contain 11 digits.";
+        if (abn is not null && !AustralianBusinessNumber.IsValid(abn))
+            return "That ABN is not valid — its check digits do not match. Confirm it on the Australian Business Register.";
+        if (string.IsNullOrWhiteSpace(request.BusinessContactEmail) || !new System.ComponentModel.DataAnnotations.EmailAddressAttribute().IsValid(request.BusinessContactEmail))
+            return "A valid business contact email is required.";
+        if (string.IsNullOrWhiteSpace(request.RefundContactEmail) || !new System.ComponentModel.DataAnnotations.EmailAddressAttribute().IsValid(request.RefundContactEmail))
+            return "A valid refund contact email is required.";
+
         var imageUrl = NormalizeOptionalValue(request.ImageUrl);
         if (imageUrl is not null)
         {
@@ -1147,6 +1340,13 @@ public class RestaurantController : ControllerBase
             Name = restaurant.Name,
             Address = restaurant.Address,
             Phone = restaurant.Phone,
+            LegalBusinessName = restaurant.LegalBusinessName,
+            Abn = restaurant.Abn,
+            GstRegistered = restaurant.GstRegistered,
+            PricesIncludeGst = restaurant.PricesIncludeGst,
+            BusinessContactEmail = restaurant.BusinessContactEmail,
+            RefundContactEmail = restaurant.RefundContactEmail,
+            CustomerSurchargeNotice = restaurant.CustomerSurchargeNotice,
             ImageUrl = restaurant.ImageUrl,
             CountryCode = restaurant.CountryCode,
             Timezone = restaurant.Timezone,
@@ -1245,7 +1445,10 @@ public class RestaurantController : ControllerBase
                 snapshot,
                 restaurant.StripeDetailsSubmitted,
                 restaurant.StripeChargesEnabled,
-                restaurant.StripePayoutsEnabled),
+                restaurant.StripePayoutsEnabled,
+                restaurant.Name,
+                restaurant.LegalBusinessName),
+            StripeBusinessProfileName = snapshot.BusinessProfileName,
             StripeCurrentDeadline = snapshot.CurrentDeadline,
             StripeConnectedAt = restaurant.StripeConnectedAt,
             StripeAccountUpdatedAt = restaurant.StripeAccountUpdatedAt,
@@ -1298,7 +1501,7 @@ public class RestaurantController : ControllerBase
         QueryHelpers.AddQueryString(url, "restaurantId", restaurantId.ToString());
 
     private static string AppendSessionId(string url) =>
-        QueryHelpers.AddQueryString(url, "session_id", "{CHECKOUT_SESSION_ID}");
+        StripeCheckoutReturnUrl.WithSessionId(url);
 
     private static string NormalizeCountryCode(string? countryCode)
     {

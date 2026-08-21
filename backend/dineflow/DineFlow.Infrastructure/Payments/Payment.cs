@@ -149,6 +149,27 @@ public class PaymentRefund
     public DateTime? FailedAt { get; set; }
 
     public Payment? Payment { get; set; }
+
+    /// Internal reconciliation lines for this provider refund. Stripe only stores the total;
+    /// these rows preserve which order items the restaurant actually refunded.
+    public ICollection<PaymentRefundItem> Items { get; set; } = [];
+}
+
+public class PaymentRefundItem
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public Guid PaymentRefundId { get; set; }
+
+    public Guid OrderItemId { get; set; }
+
+    public string MenuItemNameSnapshot { get; set; } = string.Empty;
+
+    public int Quantity { get; set; }
+
+    public long AmountCents { get; set; }
+
+    public PaymentRefund? PaymentRefund { get; set; }
 }
 
 public class PaymentRefundRequest

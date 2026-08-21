@@ -4,6 +4,7 @@ using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Common;
 using DineFlow.Api.Contracts.Reports;
 using DineFlow.Api.Extensions;
+using DineFlow.Api.Options;
 using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
@@ -13,6 +14,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace DineFlow.Api.Controllers;
 
@@ -26,15 +28,18 @@ public class AdminReportsController : ControllerBase
     private readonly AppDbContext _dbContext;
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly AdminActivityReportService _activityReportService;
+    private readonly ReportRetentionOptions _retentionOptions;
 
     public AdminReportsController(
         AppDbContext dbContext,
         UserManager<ApplicationUser> userManager,
-        AdminActivityReportService activityReportService)
+        AdminActivityReportService activityReportService,
+        IOptions<ReportRetentionOptions> retentionOptions)
     {
         _dbContext = dbContext;
         _userManager = userManager;
         _activityReportService = activityReportService;
+        _retentionOptions = retentionOptions.Value;
     }
 
     [HttpGet("activity")]
@@ -108,9 +113,8 @@ public class AdminReportsController : ControllerBase
         while (rows.Count < Math.Min(totalItems, MaxExportRows));
 
         var truncated = totalItems > MaxExportRows;
-        return BuildCsvFile(
-            "activity-report.csv",
-            [
+        var headers = new List<string>
+        {
                 "OccurredAt",
                 "Restaurant",
                 "Category",
@@ -125,44 +129,78 @@ public class AdminReportsController : ControllerBase
                 "PaymentId",
                 "Status",
                 "AmountCents",
-                "Currency",
-                "CorrelationId",
-                "TechnicalJson"
-            ],
-            rows.Take(MaxExportRows).Select(row => new object?[]
+                "Currency"
+        };
+        if (isPlatformOwner)
+        {
+            headers.Add("CorrelationId");
+            headers.Add("TechnicalJson");
+        }
+
+        return BuildCsvFile(
+            "activity-report.csv",
+            headers,
+            rows.Take(MaxExportRows).Select(row =>
             {
-                row.OccurredAt,
-                row.RestaurantName,
-                row.Category,
-                row.Severity,
-                row.ActorType,
-                row.ActorName,
-                row.ActorRoles,
-                row.Source,
-                row.ActionLabel,
-                row.Description,
-                row.OrderNumber,
-                row.PaymentId,
-                row.Status,
-                row.AmountCents,
-                row.Currency,
-                row.CorrelationId,
-                row.TechnicalJson
+                var values = new List<object?>
+                {
+                    row.OccurredAt,
+                    row.RestaurantName,
+                    row.Category,
+                    row.Severity,
+                    row.ActorType,
+                    row.ActorName,
+                    row.ActorRoles,
+                    row.Source,
+                    row.ActionLabel,
+                    row.Description,
+                    row.OrderNumber,
+                    row.PaymentId,
+                    row.Status,
+                    row.AmountCents,
+                    row.Currency
+                };
+                if (isPlatformOwner)
+                {
+                    values.Add(row.CorrelationId);
+                    values.Add(row.TechnicalJson);
+                }
+                return values.ToArray();
             }),
             truncated);
     }
 
     [HttpGet("policy")]
-    public ActionResult<ReportPolicyResponse> GetReportPolicy() =>
-        Ok(new ReportPolicyResponse
+    public ActionResult<ReportPolicyResponse> GetReportPolicy()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var retentionConfigured = _retentionOptions.IsOperationallyConfigured(now);
+        return Ok(new ReportPolicyResponse
         {
             MaxExportRows = MaxExportRows,
             AuditRetentionDays = AdminActivityReportService.AuditRetentionDays,
             OrderEventRetentionDays = AdminActivityReportService.OrderEventRetentionDays,
             PaymentEventRetentionDays = AdminActivityReportService.PaymentEventRetentionDays,
             LogsAreImmutable = true,
-            SensitiveTechnicalDetailsRequirePlatformOwner = true
+            SensitiveTechnicalDetailsRequirePlatformOwner = true,
+            RetentionEnforcementConfigured = retentionConfigured,
+            LegalHoldWorkflowConfigured = !string.IsNullOrWhiteSpace(_retentionOptions.LegalHoldRegister),
+            RestoreDrillCurrent = _retentionOptions.HasCurrentRestoreDrill(now),
+            RestoreDrillAgeDays = _retentionOptions.LastRestoreDrillUtc is { } drill
+                ? (int)Math.Floor((now - drill).TotalDays)
+                : null,
+            // "Verified" was too strong a word for what this knows. Nothing here checks that a job
+            // ran, that an archive was written, or that anything was ever deleted — the runtime
+            // deliberately holds none of those credentials. What it checks is that operations
+            // declared the five evidence references, which the retention policy is explicit about:
+            // "A configuration value without those artefacts is not acceptance evidence." Saying
+            // "verified" to an operator reading this screen, or to whoever reads an export of it,
+            // claims an assurance nobody performed.
+            RetentionStatus = retentionConfigured
+                ? "Declared by operations - evidence artefacts are attached to the release record, not checked here"
+                : "Policy only - production maintenance is not configured"
         });
+    }
 
     [HttpGet("audit")]
     public async Task<ActionResult<PagedResponse<AuditLogResponse>>> GetAuditLogs(
@@ -307,7 +345,6 @@ public class AdminReportsController : ControllerBase
             "ActorRoles",
             "ActorType",
             "Source",
-            "CorrelationId",
             "EntityType",
             "EntityId",
             "RestaurantId",
@@ -315,6 +352,7 @@ public class AdminReportsController : ControllerBase
         };
         if (includeSensitiveDetails)
         {
+            headers.Add("CorrelationId");
             headers.Add("BeforeJson");
             headers.Add("AfterJson");
             headers.Add("IpAddress");
@@ -334,7 +372,6 @@ public class AdminReportsController : ControllerBase
                     log.ActorRoles,
                     log.ActorType,
                     log.Source,
-                    log.CorrelationId,
                     log.EntityType,
                     log.EntityId,
                     log.RestaurantId,
@@ -342,6 +379,7 @@ public class AdminReportsController : ControllerBase
                 };
                 if (includeSensitiveDetails)
                 {
+                    values.Add(log.CorrelationId);
                     values.Add(log.BeforeJson);
                     values.Add(log.AfterJson);
                     values.Add(log.IpAddress);
@@ -375,36 +413,50 @@ public class AdminReportsController : ControllerBase
         var exportRows = await sortedQuery.Take(MaxExportRows + 1).ToListAsync(cancellationToken);
         var truncated = exportRows.Count > MaxExportRows;
         var rows = exportRows.Take(MaxExportRows).ToList();
+        var includeTechnicalDetails = User.IsInRole(ApplicationRoles.PlatformOwner);
+        var headers = new List<string>
+        {
+            "CreatedAt",
+            "EventType",
+            "OrderNumber",
+            "OrderId",
+            "RestaurantId",
+            "ActorDisplayName",
+            "ActorRoles",
+            "ActorType",
+            "Source",
+            "Message"
+        };
+        if (includeTechnicalDetails)
+        {
+            headers.Add("CorrelationId");
+            headers.Add("DataJson");
+        }
+
         return BuildCsvFile(
             "order-event-logs.csv",
-            [
-                "CreatedAt",
-                "EventType",
-                "OrderNumber",
-                "OrderId",
-                "RestaurantId",
-                "ActorDisplayName",
-                "ActorRoles",
-                "ActorType",
-                "Source",
-                "CorrelationId",
-                "Message",
-                "DataJson"
-            ],
-            rows.Select(log => new object?[]
+            headers,
+            rows.Select(log =>
             {
-                log.CreatedAt,
-                log.EventType,
-                log.OrderNumber,
-                log.OrderId,
-                log.RestaurantId,
-                log.ActorDisplayName,
-                log.ActorRoles,
-                log.ActorType,
-                log.Source,
-                log.CorrelationId,
-                log.Message,
-                User.IsInRole(ApplicationRoles.PlatformOwner) ? log.DataJson : null
+                var values = new List<object?>
+                {
+                    log.CreatedAt,
+                    log.EventType,
+                    log.OrderNumber,
+                    log.OrderId,
+                    log.RestaurantId,
+                    log.ActorDisplayName,
+                    log.ActorRoles,
+                    log.ActorType,
+                    log.Source,
+                    log.Message
+                };
+                if (includeTechnicalDetails)
+                {
+                    values.Add(log.CorrelationId);
+                    values.Add(log.DataJson);
+                }
+                return values.ToArray();
             }),
             truncated);
     }
@@ -432,46 +484,60 @@ public class AdminReportsController : ControllerBase
         var exportRows = await sortedQuery.Take(MaxExportRows + 1).ToListAsync(cancellationToken);
         var truncated = exportRows.Count > MaxExportRows;
         var rows = exportRows.Take(MaxExportRows).ToList();
+        var includeTechnicalDetails = User.IsInRole(ApplicationRoles.PlatformOwner);
+        var headers = new List<string>
+        {
+            "CreatedAt",
+            "EventType",
+            "Provider",
+            "ProviderEventId",
+            "Status",
+            "OrderNumber",
+            "OrderId",
+            "PaymentId",
+            "PaymentRefundId",
+            "RestaurantId",
+            "ActorDisplayName",
+            "ActorRoles",
+            "ActorType",
+            "Source",
+            "Message"
+        };
+        if (includeTechnicalDetails)
+        {
+            headers.Add("CorrelationId");
+            headers.Add("DataJson");
+        }
+
         return BuildCsvFile(
             "payment-event-logs.csv",
-            [
-                "CreatedAt",
-                "EventType",
-                "Provider",
-                "ProviderEventId",
-                "Status",
-                "OrderNumber",
-                "OrderId",
-                "PaymentId",
-                "PaymentRefundId",
-                "RestaurantId",
-                "ActorDisplayName",
-                "ActorRoles",
-                "ActorType",
-                "Source",
-                "CorrelationId",
-                "Message",
-                "DataJson"
-            ],
-            rows.Select(log => new object?[]
+            headers,
+            rows.Select(log =>
             {
-                log.CreatedAt,
-                log.EventType,
-                log.Provider,
-                log.ProviderEventId,
-                log.Status,
-                log.OrderNumber,
-                log.OrderId,
-                log.PaymentId,
-                log.PaymentRefundId,
-                log.RestaurantId,
-                log.ActorDisplayName,
-                log.ActorRoles,
-                log.ActorType,
-                log.Source,
-                log.CorrelationId,
-                log.Message,
-                User.IsInRole(ApplicationRoles.PlatformOwner) ? log.DataJson : null
+                var values = new List<object?>
+                {
+                    log.CreatedAt,
+                    log.EventType,
+                    log.Provider,
+                    log.ProviderEventId,
+                    log.Status,
+                    log.OrderNumber,
+                    log.OrderId,
+                    log.PaymentId,
+                    log.PaymentRefundId,
+                    log.RestaurantId,
+                    log.ActorDisplayName,
+                    log.ActorRoles,
+                    log.ActorType,
+                    log.Source,
+                    log.Message
+                };
+                if (includeTechnicalDetails)
+                {
+                    values.Add(log.CorrelationId);
+                    values.Add(log.DataJson);
+                }
+                return values.ToArray();
             }),
             truncated);
     }
@@ -595,13 +661,13 @@ public class AdminReportsController : ControllerBase
         var search = request.Search?.Trim();
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var pattern = $"%{search}%";
+            var pattern = SearchPattern.Contains(search);
             query = query.Where(log =>
-                EF.Functions.ILike(log.Action, pattern) ||
-                EF.Functions.ILike(log.EntityType, pattern) ||
-                (log.EntityId != null && EF.Functions.ILike(log.EntityId, pattern)) ||
-                (log.Summary != null && EF.Functions.ILike(log.Summary, pattern)) ||
-                (log.ActorEmail != null && EF.Functions.ILike(log.ActorEmail, pattern)));
+                EF.Functions.ILike(log.Action, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(log.EntityType, pattern, SearchPattern.EscapeCharacter) ||
+                (log.EntityId != null && EF.Functions.ILike(log.EntityId, pattern, SearchPattern.EscapeCharacter)) ||
+                (log.Summary != null && EF.Functions.ILike(log.Summary, pattern, SearchPattern.EscapeCharacter)) ||
+                (log.ActorEmail != null && EF.Functions.ILike(log.ActorEmail, pattern, SearchPattern.EscapeCharacter)));
         }
 
         return query;
@@ -629,12 +695,12 @@ public class AdminReportsController : ControllerBase
         var search = request.Search?.Trim();
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var pattern = $"%{search}%";
+            var pattern = SearchPattern.Contains(search);
             query = query.Where(log =>
-                EF.Functions.ILike(log.EventType, pattern) ||
-                EF.Functions.ILike(log.Message, pattern) ||
-                EF.Functions.ILike(log.OrderNumber, pattern) ||
-                (log.ActorDisplayName != null && EF.Functions.ILike(log.ActorDisplayName, pattern)));
+                EF.Functions.ILike(log.EventType, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(log.Message, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(log.OrderNumber, pattern, SearchPattern.EscapeCharacter) ||
+                (log.ActorDisplayName != null && EF.Functions.ILike(log.ActorDisplayName, pattern, SearchPattern.EscapeCharacter)));
         }
 
         return query;
@@ -667,14 +733,14 @@ public class AdminReportsController : ControllerBase
         var search = request.Search?.Trim();
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var pattern = $"%{search}%";
+            var pattern = SearchPattern.Contains(search);
             query = query.Where(log =>
-                EF.Functions.ILike(log.EventType, pattern) ||
-                EF.Functions.ILike(log.Message, pattern) ||
-                EF.Functions.ILike(log.Provider, pattern) ||
-                (log.Status != null && EF.Functions.ILike(log.Status, pattern)) ||
-                (log.OrderNumber != null && EF.Functions.ILike(log.OrderNumber, pattern)) ||
-                (log.ProviderEventId != null && EF.Functions.ILike(log.ProviderEventId, pattern)));
+                EF.Functions.ILike(log.EventType, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(log.Message, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(log.Provider, pattern, SearchPattern.EscapeCharacter) ||
+                (log.Status != null && EF.Functions.ILike(log.Status, pattern, SearchPattern.EscapeCharacter)) ||
+                (log.OrderNumber != null && EF.Functions.ILike(log.OrderNumber, pattern, SearchPattern.EscapeCharacter)) ||
+                (log.ProviderEventId != null && EF.Functions.ILike(log.ProviderEventId, pattern, SearchPattern.EscapeCharacter)));
         }
 
         return query;
@@ -778,13 +844,13 @@ public class AdminReportsController : ControllerBase
             ActorRoles = log.ActorRoles,
             ActorType = log.ActorType,
             Source = log.Source,
-            CorrelationId = log.CorrelationId,
+            CorrelationId = includeSensitiveDetails ? log.CorrelationId : null,
             Action = log.Action,
             EntityType = log.EntityType,
             EntityId = log.EntityId,
             Summary = log.Summary,
-            BeforeJson = log.BeforeJson,
-            AfterJson = log.AfterJson,
+            BeforeJson = includeSensitiveDetails ? log.BeforeJson : null,
+            AfterJson = includeSensitiveDetails ? log.AfterJson : null,
             IpAddress = includeSensitiveDetails ? log.IpAddress : null,
             UserAgent = includeSensitiveDetails ? log.UserAgent : null,
             CreatedAt = log.CreatedAt
@@ -802,7 +868,7 @@ public class AdminReportsController : ControllerBase
             ActorRoles = log.ActorRoles,
             ActorType = log.ActorType,
             Source = log.Source,
-            CorrelationId = log.CorrelationId,
+            CorrelationId = includeTechnicalDetails ? log.CorrelationId : null,
             EventType = log.EventType,
             Message = log.Message,
             DataJson = includeTechnicalDetails ? log.DataJson : null,
@@ -829,7 +895,7 @@ public class AdminReportsController : ControllerBase
             ActorRoles = log.ActorRoles,
             ActorType = log.ActorType,
             Source = log.Source,
-            CorrelationId = log.CorrelationId,
+            CorrelationId = includeTechnicalDetails ? log.CorrelationId : null,
             CreatedAt = log.CreatedAt
         };
 }

@@ -28,6 +28,7 @@ import {
   getAdminOrderSummary,
   getAdminOrderStatusHistory,
   getAdminOrders,
+  getPaymentEnvironment,
   getRestaurants,
   recordCounterPayment,
   refundAdminOrder,
@@ -36,13 +37,17 @@ import {
   type AdminOrderSummary,
   type AdminOrderStatusHistory,
   type OrderTransitionAction,
+  type PaymentEnvironment,
+  type RefundOrderRequest,
   type Restaurant,
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { OrderStatusBadge, getOrderStatusLabel, orderStatusOptions } from '../components/orders/OrderStatusBadge'
+import { AcceptanceWaitBadge } from '../components/orders/AcceptanceWaitBadge'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
 import { OrderRefundDialog, type RefundMode } from '../components/orders/OrderRefundDialog'
-import { parseRefundAmountCents } from '../components/orders/refundAmount'
+import { RefundRequestReviewDialog } from '../components/orders/RefundRequestReviewDialog'
+import { useRefundRequestReview } from '../components/orders/useRefundRequestReview'
 import { OrderStatusHistoryList } from '../components/orders/OrderStatusHistoryList'
 import { OrderTransitionReasonField } from '../components/orders/OrderTransitionReasonField'
 import { PaymentRefundHistory } from '../components/orders/PaymentRefundHistory'
@@ -89,7 +94,9 @@ import {
   type AdminOrderSortKey,
 } from '../lib/adminOrderManagement'
 import { canRefundOrder } from '../lib/paymentRefunds'
+import { buildPendingRefundNotice } from '../lib/pendingRefundNotice'
 import { useRestaurantPrinting } from '../printing/RestaurantPrintingContext'
+import { canSettleAtCounter } from '@/lib/orderStats'
 
 const orderTypeLabels: Record<string, string> = {
   DineIn: 'Dine in',
@@ -272,7 +279,7 @@ export function AdminOrdersPage() {
     pendingPayment: 0,
     failedPayment: 0,
     payable: 0,
-    revenue: 0,
+    revenue: [],
   })
   const [initialLoading, setInitialLoading] = useState(true)
   const [isFetching, setIsFetching] = useState(false)
@@ -297,6 +304,7 @@ export function AdminOrdersPage() {
   const [refundReason, setRefundReason] = useState('')
   const [refundMode, setRefundMode] = useState<RefundMode>('full')
   const [refundAmount, setRefundAmount] = useState('')
+  const [paymentEnvironment, setPaymentEnvironment] = useState<PaymentEnvironment | null>(null)
   const [statusHistoryByOrderId, setStatusHistoryByOrderId] = useState<Record<string, AdminOrderStatusHistory[]>>({})
   const [statusHistoryLoadingId, setStatusHistoryLoadingId] = useState<string | null>(null)
   const [search, setSearch] = useState(urlSearch)
@@ -313,6 +321,16 @@ export function AdminOrdersPage() {
     ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff'].includes(role),
   ) ?? false
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
+
+  useEffect(() => {
+    void getPaymentEnvironment()
+      .then(setPaymentEnvironment)
+      .catch(() => setPaymentEnvironment({
+        provider: 'Stripe',
+        mode: 'Unconfigured',
+        destructiveActionsRequireConfirmation: true,
+      }))
+  }, [])
 
   const updateOrderParams = useCallback((
     updates: Record<string, string | null>,
@@ -442,6 +460,10 @@ export function AdminOrdersPage() {
     urlSearch,
   ])
 
+  // The decision lives with the dialog, so every screen that can answer a request answers it the
+  // same way. See useRefundRequestReview.
+  const refundReview = useRefundRequestReview(() => loadOrders())
+
   const loadRestaurantOptions = useCallback(async (showToast = false) => {
     if (!isPlatformOwner) {
       return
@@ -516,17 +538,14 @@ export function AdminOrdersPage() {
     })
   }
 
-  const submitRefund = async () => {
+  const submitRefund = async (payload: RefundOrderRequest) => {
     if (!pendingRefundOrder) {
       return
     }
 
     setRefundingOrderId(pendingRefundOrder.id)
     try {
-      const updatedOrder = await refundAdminOrder(pendingRefundOrder.id, {
-        reason: refundReason.trim() || undefined,
-        amountCents: refundMode === 'full' ? undefined : (parseRefundAmountCents(refundAmount) ?? undefined),
-      })
+      const updatedOrder = await refundAdminOrder(pendingRefundOrder.id, payload)
       setOrders((current) => current.map((item) => item.id === updatedOrder.id ? updatedOrder : item))
       toast.success('Refund created', {
         description: `${pendingRefundOrder.orderNumber} is now ${updatedOrder.paymentStatus}.`,
@@ -697,7 +716,7 @@ export function AdminOrdersPage() {
 
     return (
       <div className="admin-order-actions" onClick={(event) => event.stopPropagation()}>
-        {order.paymentMethod === 'PayAtCounter' && order.paymentStatus !== 'Paid' ? (
+        {canSettleAtCounter(order) ? (
           <Button
             type="button"
             variant="outline"
@@ -753,7 +772,7 @@ export function AdminOrdersPage() {
           onAction={(action) => handleTransition(order, action)}
         />
         {(order.availableActions ?? []).length === 0 &&
-        !(order.paymentMethod === 'PayAtCounter' && order.paymentStatus !== 'Paid') &&
+        !canSettleAtCounter(order) &&
         !refundable ? (
           <Badge variant={order.canProcess ? 'secondary' : 'outline'}>
             {order.status === 'Completed' ? 'Completed' : order.canProcess ? 'No action' : 'Awaiting payment'}
@@ -785,7 +804,7 @@ export function AdminOrdersPage() {
                 <span>
                   {item.quantity} x {formatMoney(item.unitPrice, order.currency)}
                 </span>
-                <OrderItemOptionBadges options={item.selectedOptions} currency={order.currency} />
+                <OrderItemOptionBadges item={item} options={item.selectedOptions} currency={order.currency} />
                 {item.note && <small>{item.note}</small>}
               </div>
               <strong>{formatMoney(item.totalPrice, order.currency)}</strong>
@@ -1214,11 +1233,13 @@ export function AdminOrdersPage() {
                 <tbody>
                   {filteredOrders.map((order) => {
                     const isExpanded = expandedOrderId === order.id
+                    const rowRefundNotice = buildPendingRefundNotice(order.pendingRefundRequest)
 
                     return (
                       <Fragment key={order.id}>
                         <tr
-                          className="expandable-table-row"
+                          className={`expandable-table-row${
+                            rowRefundNotice ? ' admin-order-row-refund-requested' : ''}`}
                           aria-expanded={isExpanded}
                           onClick={() => toggleOrderExpansion(order)}
                         >
@@ -1249,7 +1270,26 @@ export function AdminOrdersPage() {
                             <span className="table-subtext">{getOrderTypeLabel(order.orderType)}</span>
                           </td>
                           <td>
-                            <OrderStatusBadge status={order.status} />
+                            <OrderStatusBadge status={order.status} paymentStatus={order.paymentStatus} />
+                              <AcceptanceWaitBadge order={order} />
+                            {/* The table is the view most staff work from, so the request has to be
+                                answerable here and not only on the narrow-screen cards. */}
+                            {rowRefundNotice ? (
+                              <button
+                                type="button"
+                                className="admin-order-row-refund-button"
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  refundReview.open(order)
+                                }}
+                                title={rowRefundNotice.summary}
+                              >
+                                <Undo2 size={13} />
+                                {rowRefundNotice.badge}
+                                <span className="admin-order-row-refund-cta">Review</span>
+                                <ChevronRight size={13} />
+                              </button>
+                            ) : null}
                           </td>
                           <td>
                             <PaymentStatusBadge status={order.paymentStatus} />
@@ -1311,6 +1351,7 @@ export function AdminOrdersPage() {
           <div className="restaurant-mobile-list admin-order-mobile-list" aria-label="Orders">
             {filteredOrders.map((order) => {
               const isExpanded = expandedOrderId === order.id
+              const refundNotice = buildPendingRefundNotice(order.pendingRefundRequest)
               const customerLabel = order.customerName || order.customerEmail || 'Guest / unknown'
               const paymentAttemptLabel = order.paymentMethod === 'PayAtCounter'
                 ? 'Pay at counter'
@@ -1320,10 +1361,35 @@ export function AdminOrdersPage() {
 
               return (
                 <article
-                  className="restaurant-mobile-card admin-order-mobile-card"
+                  className={`restaurant-mobile-card admin-order-mobile-card${
+                    refundNotice ? ' admin-order-card-refund-requested' : ''}`}
                   key={order.id}
                   aria-labelledby={`admin-order-${order.id}`}
                 >
+                  {/* Above everything else on the card: during service this is the one thing that
+                      changes what staff should do next, and it used to live on another screen. */}
+                  {refundNotice ? (
+                    <button
+                      type="button"
+                      className="admin-order-refund-request"
+                      onClick={() => refundReview.open(order)}
+                    >
+                      <Undo2 size={16} />
+                      <span>
+                        <strong>{refundNotice.badge}</strong>
+                        <span className="admin-order-refund-request-summary">{refundNotice.summary}</span>
+                        {refundNotice.warnsOrderWouldBeCancelled ? (
+                          <span className="admin-order-refund-request-warning">
+                            Approving in full will cancel this order.
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="admin-order-refund-request-cta">
+                        Review
+                        <ChevronRight size={14} />
+                      </span>
+                    </button>
+                  ) : null}
                   <header className="restaurant-mobile-card-header admin-order-mobile-card-header">
                     <span className="restaurant-mobile-avatar">
                       <ClipboardList size={18} />
@@ -1349,7 +1415,8 @@ export function AdminOrdersPage() {
 
                   <div className="admin-order-mobile-status-row">
                     <div>
-                      <OrderStatusBadge status={order.status} />
+                      <OrderStatusBadge status={order.status} paymentStatus={order.paymentStatus} />
+                              <AcceptanceWaitBadge order={order} />
                       <PaymentStatusBadge status={order.paymentStatus} />
                     </div>
                     <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
@@ -1513,8 +1580,20 @@ export function AdminOrdersPage() {
         </AlertDialogContent>
       </AlertDialog>
 
+      <RefundRequestReviewDialog
+        order={refundReview.order}
+        submitting={refundReview.submitting}
+        note={refundReview.note}
+        onNoteChange={refundReview.setNote}
+        amount={refundReview.amount}
+        onAmountChange={refundReview.setAmount}
+        onClose={refundReview.close}
+        onDecide={(decision, note, approvedCents) => void refundReview.decide(decision, note, approvedCents)}
+      />
+
       <OrderRefundDialog
         order={pendingRefundOrder}
+        environmentMode={paymentEnvironment?.mode ?? null}
         reason={refundReason}
         mode={refundMode}
         amount={refundAmount}
@@ -1530,7 +1609,7 @@ export function AdminOrdersPage() {
             setRefundAmount('')
           }
         }}
-        onConfirm={() => void submitRefund()}
+        onConfirm={(payload) => void submitRefund(payload)}
       />
 
       <Dialog

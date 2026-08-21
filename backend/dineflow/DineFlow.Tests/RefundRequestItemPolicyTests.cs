@@ -91,4 +91,46 @@ public class RefundRequestItemPolicyTests
 
         Assert.Empty(result);
     }
+
+    [Fact]
+    public void AllocateApprovedRefund_PrOratesAdjustedMultiItemApprovalToTheCent()
+    {
+        var firstId = Guid.Parse("00000000-0000-0000-0000-000000000001");
+        var secondId = Guid.Parse("00000000-0000-0000-0000-000000000002");
+
+        var result = RefundRequestItemPolicy.AllocateApprovedRefund(
+            1_001,
+            [
+                new RefundItemAllocation(firstId, "First", 1, 1_500),
+                new RefundItemAllocation(secondId, "Second", 1, 500)
+            ]);
+
+        Assert.Equal(1_001, result.Sum(item => item.AmountCents));
+        Assert.Equal(751, result.Single(item => item.OrderItemId == firstId).AmountCents);
+        Assert.Equal(250, result.Single(item => item.OrderItemId == secondId).AmountCents);
+    }
+
+    [Fact]
+    public void AllocateApprovedRefund_PreservesEnteredLinesWhenFullyApproved()
+    {
+        var requested = new[]
+        {
+            new RefundItemAllocation(Guid.NewGuid(), "First", 2, 1_500),
+            new RefundItemAllocation(Guid.NewGuid(), "Second", 1, 500)
+        };
+
+        var result = RefundRequestItemPolicy.AllocateApprovedRefund(2_000, requested);
+
+        Assert.Equal(requested, result);
+    }
+
+    [Fact]
+    public void AllocateApprovedRefund_RejectsAmountAboveSelectedItems()
+    {
+        var result = RefundRequestItemPolicy.AllocateApprovedRefund(
+            501,
+            [new RefundItemAllocation(Guid.NewGuid(), "Item", 1, 500)]);
+
+        Assert.Empty(result);
+    }
 }

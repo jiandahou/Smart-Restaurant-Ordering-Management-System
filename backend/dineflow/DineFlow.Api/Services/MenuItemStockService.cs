@@ -62,6 +62,82 @@ public sealed class MenuItemStockService(AppDbContext dbContext)
     }
 
     /// <summary>
+    /// Reserves modifier stock, in units of the modifier.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A limited-supply extra — the last of the day's truffle, a sauce made in one batch — runs out
+    /// like a dish does, and only the dish was counted. The kitchen found out at the pass, one
+    /// ticket at a time.
+    /// </para>
+    /// <para>
+    /// The quantities passed in are already multiplied out: two spring rolls each taking three extra
+    /// rolls is six, not two and not three. Getting that wrong is how a tracked extra oversells while
+    /// every line on the order looks correct on its own.
+    /// </para>
+    /// <para>
+    /// Same guarded single statement as the dish, and for the same reason: two customers checking
+    /// out at once would otherwise both be sold the last portion.
+    /// </para>
+    /// </remarks>
+    public async Task<IReadOnlyList<Guid>> TryReserveOptionsAsync(
+        IReadOnlyDictionary<Guid, int> quantitiesByOptionId,
+        CancellationToken cancellationToken)
+    {
+        var unavailable = new List<Guid>();
+
+        foreach (var (optionId, quantity) in quantitiesByOptionId)
+        {
+            if (quantity <= 0)
+            {
+                continue;
+            }
+
+            var affected = await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                UPDATE "MenuItemOptions"
+                SET "StockQuantity" = CASE
+                        WHEN "StockQuantity" IS NULL THEN NULL
+                        ELSE "StockQuantity" - {quantity}
+                    END
+                WHERE "Id" = {optionId}
+                  AND ("StockQuantity" IS NULL OR "StockQuantity" >= {quantity})
+                """,
+                cancellationToken);
+
+            if (affected == 0)
+            {
+                unavailable.Add(optionId);
+            }
+        }
+
+        return unavailable;
+    }
+
+    /// <summary>Returns modifier stock, alongside the dish it was ordered with.</summary>
+    public async Task ReleaseOptionsAsync(
+        IReadOnlyDictionary<Guid, int> quantitiesByOptionId,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (optionId, quantity) in quantitiesByOptionId)
+        {
+            if (quantity <= 0)
+            {
+                continue;
+            }
+
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                UPDATE "MenuItemOptions"
+                SET "StockQuantity" = "StockQuantity" + {quantity}
+                WHERE "Id" = {optionId}
+                  AND "StockQuantity" IS NOT NULL
+                """,
+                cancellationToken);
+        }
+    }
+
+    /// <summary>
     /// Returns stock to tracked items, for example when an order is cancelled or rejected. Items
     /// that come back above zero stop being sold out.
     /// </summary>

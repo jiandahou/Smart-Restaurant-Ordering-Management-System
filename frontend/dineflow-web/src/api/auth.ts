@@ -1,3 +1,4 @@
+import type { OrderClosure } from '@/lib/orderClosureNotice'
 export type AuthUser = {
   id: string
   email: string | null
@@ -30,6 +31,8 @@ export type RegisterCustomerRequest = {
   email: string
   password: string
   fullName: string
+  acceptedCustomerTermsVersion: string
+  acknowledgedPrivacyPolicyVersion: string
 }
 
 export type RegisterCustomerResponse = {
@@ -87,6 +90,8 @@ export type UpdateCurrentUserRequest = {
 export type RequestEmailChangeRequest = {
   newEmail: string
   currentPassword: string
+  /** Second factor, when the account requires one for sensitive actions. */
+  verification?: MfaVerification
 }
 
 export type ConfirmEmailChangeRequest = {
@@ -97,6 +102,17 @@ export type ConfirmEmailChangeRequest = {
 
 export type AuthMessageResponse = {
   message: string
+}
+
+export type PrivacyRequestType = 'Access' | 'Correction' | 'Deletion' | 'Complaint'
+export type PrivacyRequestRecord = {
+  id: string
+  requestType: PrivacyRequestType
+  details: string
+  status: string
+  createdAt: string
+  updatedAt: string | null
+  completedAt: string | null
 }
 
 export type ConfirmEmailResponse = AuthMessageResponse & Partial<LoginResponse>
@@ -188,6 +204,13 @@ export type Restaurant = {
   name: string
   address: string
   phone: string
+  legalBusinessName: string
+  abn: string | null
+  gstRegistered: boolean
+  pricesIncludeGst: boolean
+  businessContactEmail: string
+  refundContactEmail: string
+  customerSurchargeNotice: string | null
   imageUrl: string | null
   countryCode: string
   timezone: string
@@ -257,6 +280,38 @@ export type StripeConnectDiagnostic = {
   checks: StripeConnectDiagnosticCheck[]
 }
 
+export type StripeBusinessProfileImportField =
+  | 'name'
+  | 'legalBusinessName'
+  | 'abn'
+  | 'address'
+  | 'phone'
+  | 'businessContactEmail'
+  | 'refundContactEmail'
+  | 'countryCode'
+  | 'currency'
+
+/**
+ * 'Imported' — Stripe returned a readable ABN.
+ * 'ProvidedButHidden' — Stripe confirms a business tax ID exists but does not expose it.
+ * 'Missing' — the connected account has no business tax ID.
+ */
+export type StripeBusinessTaxIdStatus = 'Imported' | 'ProvidedButHidden' | 'Missing'
+
+export type StripeBusinessProfileSuggestion = {
+  field: StripeBusinessProfileImportField
+  label: string
+  value: string
+  source: string
+}
+
+export type StripeBusinessProfileImport = {
+  retrievedAt: string
+  taxIdProvided: boolean
+  taxIdStatus: StripeBusinessTaxIdStatus
+  suggestions: StripeBusinessProfileSuggestion[]
+}
+
 export type StripeActionLinkResponse = {
   message: string
   url: string | null
@@ -307,6 +362,8 @@ export type RestaurantOperations = {
   id: string
   name: string
   autoAcceptOrders: boolean
+  stripeConnectStatus: StripeConnectStatus
+  onlinePaymentsEnabled: boolean
 }
 
 export type RestaurantListParams = {
@@ -324,6 +381,13 @@ export type RestaurantRequest = {
   name: string
   address: string
   phone: string
+  legalBusinessName: string
+  abn?: string | null
+  gstRegistered: boolean
+  pricesIncludeGst: boolean
+  businessContactEmail: string
+  refundContactEmail: string
+  customerSurchargeNotice?: string | null
   imageUrl?: string | null
   countryCode: string
   timezone: string
@@ -415,6 +479,9 @@ export type MenuOption = {
   name: string
   priceAdjustment: number
   adjustmentType: 0 | 1 | 2
+  allergens?: string | null
+  mayContainAllergens?: string | null
+  crossContactStatement?: string | null
   maxQuantity: number
   displayOrder: number
   isAvailable: boolean
@@ -452,6 +519,9 @@ export type CreateMenuOptionRequest = {
   name: string
   priceAdjustment: number
   adjustmentType: 0 | 1 | 2
+  allergens?: string | null
+  mayContainAllergens?: string | null
+  crossContactStatement?: string | null
   maxQuantity: number
   displayOrder: number
 }
@@ -480,6 +550,9 @@ export type MenuItem = {
   isGlutenFree: boolean
   isHalal: boolean
   allergens: string | null
+  mayContainAllergens?: string | null
+  crossContactStatement?: string | null
+  allergenInfoLastVerifiedAt?: string | null
   spiceLevel: number
   servingSize: string | null
   calories: number | null
@@ -504,6 +577,8 @@ export type WatchedMenuItem = {
 }
 
 export type CreateMenuItemRequest = {
+  /** The person saving confirmed that contradicting dietary labels are correct. */
+  acknowledgeDietaryConflicts?: boolean
   restaurantId: string
   categoryId: string
   name: string
@@ -517,6 +592,8 @@ export type CreateMenuItemRequest = {
   isGlutenFree: boolean
   isHalal: boolean
   allergens?: string | null
+  mayContainAllergens?: string | null
+  crossContactStatement?: string | null
   spiceLevel: number
   servingSize?: string | null
   calories?: number | null
@@ -525,7 +602,16 @@ export type CreateMenuItemRequest = {
   displayOrder: number
 }
 
-export type UpdateMenuItemRequest = Omit<CreateMenuItemRequest, 'restaurantId'>
+export type UpdateMenuItemRequest = Omit<CreateMenuItemRequest, 'restaurantId'> & {
+  /**
+   * The item's `updatedAt` as it stood when the form was opened. An update sends every field, so
+   * without this a second person saving from an older copy quietly restores the first person's
+   * fields to what they were. Required by the server.
+   */
+  expectedUpdatedAt: string
+  /** Save despite the conflict, having been shown what the other person changed. */
+  overwriteConflict?: boolean
+}
 
 export type MenuItemMutationResponse = {
   message: string
@@ -634,8 +720,18 @@ export type AdminOrderItem = {
   menuItemId: string | null
   itemNameSnapshot: string
   quantity: number
+  /** Menu price for one unit before option adjustments. */
+  basePriceSnapshot: number
+  /** The dish's allergen declaration as it read when the order was placed. */
+  allergensSnapshot?: string | null
+  mayContainAllergensSnapshot?: string | null
+  crossContactStatementSnapshot?: string | null
   unitPrice: number
   totalPrice: number
+  refundedAmountCents: number
+  refundableAmountCents: number
+  refundedQuantity: number
+  refundableQuantity: number
   note: string | null
   selectedOptions: AdminOrderItemOption[]
 }
@@ -646,6 +742,9 @@ export type AdminOrderItemOption = {
   groupNameSnapshot: string
   optionNameSnapshot: string
   priceAdjustmentSnapshot: number
+  allergensSnapshot?: string | null
+  mayContainAllergensSnapshot?: string | null
+  crossContactStatementSnapshot?: string | null
   quantity: number
 }
 
@@ -697,16 +796,46 @@ export type AdminPaymentRefund = {
   reason: string | null
   failureReason: string | null
   requestedByUserId: string | null
+  unattributedAmountCents: number
+  items: AdminPaymentRefundItem[]
   createdAt: string
   updatedAt: string | null
   refundedAt: string | null
   failedAt: string | null
 }
 
+export type AdminPaymentRefundItem = {
+  orderItemId: string
+  menuItemNameSnapshot: string
+  quantity: number
+  amountCents: number
+}
+
+/** A refund the customer is waiting on an answer to, surfaced on the order itself. */
+export type AdminOrderPendingRefundRequest = {
+  id: string
+  requestedAmountCents: number
+  currency: string
+  /** The customer's own words, shown verbatim: it is why they are asking. */
+  reason: string | null
+  createdAt: string
+  /** True when granting it in full calls the order off, so the screen can warn before the click. */
+  fullRefundWouldCancelOrder: boolean
+}
+
 export type AdminOrder = {
   id: string
+  pendingRefundRequest: AdminOrderPendingRefundRequest | null
   restaurantId: string | null
   restaurantName: string | null
+  restaurantLegalBusinessName?: string | null
+  restaurantAbn?: string | null
+  restaurantGstRegistered?: boolean
+  restaurantPricesIncludeGst?: boolean
+  restaurantAddress?: string | null
+  restaurantPhone?: string | null
+  restaurantRefundContactEmail?: string | null
+  restaurantCustomerSurchargeNotice?: string | null
   currency: string
   tableId: string | null
   tableNumber: string | null
@@ -740,6 +869,14 @@ export type FrontCounterListParams = {
   pageSize?: number
 }
 
+export type FrontCounterRecentPaymentsResponse = {
+  generatedAt: string
+  /** How far back the list reaches, so the screen can say so rather than imply "everything". */
+  windowHours: number
+  totalOrders: number
+  orders: AdminOrder[]
+}
+
 export type FrontCounterTakeawayResponse = {
   generatedAt: string
   /** The restaurant's current business day (YYYY-MM-DD). Pickup numbers reset on this boundary. */
@@ -761,6 +898,14 @@ export type FrontCounterTablesResponse = {
 export type FrontCounterTableSummary = {
   restaurantId: string
   restaurantName: string
+  restaurantLegalBusinessName: string
+  restaurantAbn: string | null
+  restaurantGstRegistered: boolean
+  restaurantPricesIncludeGst: boolean
+  restaurantAddress: string
+  restaurantPhone: string
+  restaurantRefundContactEmail: string
+  restaurantCustomerSurchargeNotice: string | null
   tableId: string
   tableNumber: string
   capacity: number
@@ -802,6 +947,12 @@ export type FrontCounterTableSessionSummary = {
 
 export type FrontCounterMergedItem = {
   itemName: string
+  /** Menu price for one unit before option adjustments. */
+  basePriceSnapshot: number
+  /** The dish's allergen declaration as it read when the order was placed. */
+  allergensSnapshot?: string | null
+  mayContainAllergensSnapshot?: string | null
+  crossContactStatementSnapshot?: string | null
   quantity: number
   unitPrice: number
   totalPrice: number
@@ -848,6 +999,12 @@ export type CustomerOrderItem = {
   refundedQuantity: number
   refundedAmountCents: number
   refundableAmountCents: number
+  /** Menu price for one unit before option adjustments. */
+  basePriceSnapshot: number
+  /** The dish's allergen declaration as it read when the order was placed. */
+  allergensSnapshot?: string | null
+  mayContainAllergensSnapshot?: string | null
+  crossContactStatementSnapshot?: string | null
   unitPrice: number
   totalPrice: number
   note: string | null
@@ -862,12 +1019,29 @@ export type CustomerOrderItemOption = {
   groupNameSnapshot: string
   optionNameSnapshot: string
   priceAdjustmentSnapshot: number
+  allergensSnapshot?: string | null
+  mayContainAllergensSnapshot?: string | null
+  crossContactStatementSnapshot?: string | null
   quantity: number
 }
+
+export type { OrderClosure } from '@/lib/orderClosureNotice'
 
 export type CustomerOrder = {
   id: string
   restaurantId: string | null
+  restaurantName: string | null
+  restaurantLegalBusinessName: string | null
+  restaurantAbn: string | null
+  restaurantGstRegistered: boolean
+  restaurantPricesIncludeGst: boolean
+  /** What the restaurant allows, and whether it can take a card right now. */
+  restaurantPaymentPolicy: RestaurantPaymentPolicy
+  restaurantOnlinePaymentsEnabled: boolean
+  restaurantAddress: string | null
+  restaurantPhone: string | null
+  restaurantRefundContactEmail: string | null
+  restaurantCustomerSurchargeNotice: string | null
   tableId: string | null
   tableNumber: string | null
   customerId: string | null
@@ -885,6 +1059,19 @@ export type CustomerOrder = {
   scheduledTime: string | null
   createdAt: string
   updatedAt: string | null
+  /** When the payment settled — the clock the acceptance wait is measured against. */
+  paidAt: string | null
+  /** True once the customer may cancel this paid, unaccepted order and be refunded. */
+  canCancelForRefund: boolean
+  /** UTC instant that right becomes available, so the page can count down to it. */
+  cancellableForRefundAt: string | null
+  /**
+   * UTC instant an unpaid order releases the stock and pickup number it reserved, or null when it
+   * holds nothing. Sent by the server so the deadline shown is the one actually enforced.
+   */
+  unpaidExpiresAt: string | null
+  /** Why the order was turned away, when it was. See `buildOrderClosureNotice`. */
+  closureReason: OrderClosure | null
   latestRefundRequest: CustomerRefundRequest | null
   refundBalance: OrderRefundBalance
   orderItems: CustomerOrderItem[]
@@ -1001,6 +1188,10 @@ export type ActivitySummary = {
   failedPaymentsToday: number
   paymentsReceivedToday: ActivityMoneyTotal[]
   refundsSucceededToday: ActivityMoneyTotal[]
+  /** Paid orders the restaurant has not accepted yet — a live figure, not a daily total. */
+  ordersAwaitingAcceptance: number
+  ordersOverdueForAcceptance: number
+  longestAcceptanceWaitMinutes: number | null
 }
 
 export type ReportPolicy = {
@@ -1010,6 +1201,12 @@ export type ReportPolicy = {
   paymentEventRetentionDays: number
   logsAreImmutable: boolean
   sensitiveTechnicalDetailsRequirePlatformOwner: boolean
+  retentionEnforcementConfigured: boolean
+  legalHoldWorkflowConfigured: boolean
+  restoreDrillCurrent: boolean
+  /** How long ago the last restore drill was declared, or null when none has been. */
+  restoreDrillAgeDays: number | null
+  retentionStatus: string
 }
 
 export type AuditLog = {
@@ -1071,7 +1268,36 @@ export type PaymentEventLog = {
   createdAt: string
 }
 
+/**
+ * The queues the staff order screen divides its work into. Named on the server, which decides
+ * membership, so the two cannot disagree about what "active" means.
+ */
+export type StaffOrderQueue =
+  | 'active'
+  | 'new'
+  | 'kitchen'
+  | 'ready'
+  | 'late'
+  | 'payment'
+  | 'carried'
+  | 'closed'
+
+/**
+ * A page of orders together with how much work every queue holds.
+ *
+ * <p>
+ * The counts come from everything the filters match rather than from the rows on this page. Counted
+ * here from a page, they moved when the sort did — 402 orders, "Active" reading 14 newest-first and
+ * 26 oldest-first — which on a kitchen screen can read as no work waiting.
+ * </p>
+ */
+export type StaffOrderPage = PagedResponse<AdminOrder> & {
+  queueCounts: Record<StaffOrderQueue, number>
+}
+
 export type AdminOrderListParams = {
+  /** Restrict the rows to one queue. The counts still describe every queue. */
+  queue?: StaffOrderQueue
   page?: number
   pageSize?: number
   search?: string
@@ -1182,6 +1408,13 @@ export type AdminRefundRequestItem = {
   amountCents: number
 }
 
+/** One paid total, in the currency it was taken in. */
+export type AdminOrderRevenue = {
+  currency: string
+  amount: number
+  orders: number
+}
+
 export type AdminOrderSummary = {
   total: number
   activeKitchen: number
@@ -1189,7 +1422,12 @@ export type AdminOrderSummary = {
   pendingPayment: number
   failedPayment: number
   payable: number
-  revenue: number
+  /**
+   * One entry per currency. There is no combined figure because there is no exchange rate: adding
+   * AUD, INR and NPR together produced a number that was then labelled with whichever currency the
+   * first active restaurant happened to use.
+   */
+  revenue: AdminOrderRevenue[]
 }
 
 export type AdminRefundCurrencySummary = {
@@ -1220,6 +1458,8 @@ export type AdminOrderStatusHistory = {
 export type CreateOrderCheckoutSessionRequest = {
   orderId: string
   returnTo?: string
+  /** Proof that a guest owns this order. Staff and signed-in customers are identified without it. */
+  guestAccessToken?: string
 }
 
 export type CreateCheckoutSessionResponse = {
@@ -1230,9 +1470,17 @@ export type CreateCheckoutSessionResponse = {
   paymentId: string
 }
 
+export type ConfirmCheckoutSessionResponse = {
+  paymentStatus: string
+  confirmed: boolean
+  message: string
+}
+
 export type RefundOrderRequest = {
   reason?: string
   amountCents?: number
+  generalAdjustmentAmountCents?: number
+  items?: CreateRefundRequestItemInput[]
 }
 
 export type CreateCustomerRefundRequest = {
@@ -1276,7 +1524,7 @@ type PublicKeyCredentialCreationOptionsJson = Omit<
   }
 }
 
-type PublicKeyCredentialRequestOptionsJson = Omit<
+export type PublicKeyCredentialRequestOptionsJson = Omit<
   PublicKeyCredentialRequestOptions,
   'allowCredentials' | 'challenge'
 > & {
@@ -1319,7 +1567,6 @@ export type MfaSettings = {
   preferredMethod: string
   requiredFor: {
     login: boolean
-    payment: boolean
     sensitiveActions: boolean
   }
   totp: {
@@ -1362,7 +1609,6 @@ export type VerifyMfaLoginRequest = {
 
 export type UpdateMfaSettingsRequest = {
   requireForLogin: boolean
-  requireForPayment: boolean
   requireForSensitiveActions: boolean
 }
 
@@ -1413,6 +1659,13 @@ let refreshInFlight: Promise<boolean> | null = null
  * that need a guaranteed-fresh token before an operation that cannot itself
  * retry. Clears both tokens on failure so the app falls back to a real login.
  */
+/**
+ * How hard to try when a sibling tab beat us to rotating the token we share. Two short attempts:
+ * the sibling has either stored its replacement by then or is not going to.
+ */
+const rotationRaceRetries = 2
+const rotationRaceRetryDelayMs = 250
+
 export function refreshAccessToken(): Promise<boolean> {
   if (!refreshInFlight) {
     refreshInFlight = performTokenRefresh().finally(() => {
@@ -1422,7 +1675,7 @@ export function refreshAccessToken(): Promise<boolean> {
   return refreshInFlight
 }
 
-async function performTokenRefresh(): Promise<boolean> {
+async function performTokenRefresh(attempt = 0): Promise<boolean> {
   const refreshToken = getStoredRefreshToken()
   if (!refreshToken) {
     return false
@@ -1434,6 +1687,17 @@ async function performTokenRefresh(): Promise<boolean> {
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ refreshToken }),
     })
+
+    // Another tab of this browser rotated the token we share, moments ago. Nothing is wrong with
+    // the session: its replacement is already in local storage, so read it and go again. Clearing
+    // here is what used to sign a restaurant's till out in the middle of service.
+    if (response.status === 409 && attempt < rotationRaceRetries) {
+      await new Promise((resolve) => setTimeout(resolve, rotationRaceRetryDelayMs))
+
+      // Only worth retrying if the sibling actually wrote one; otherwise we would replay the same
+      // token and land right back here.
+      return getStoredRefreshToken() === refreshToken ? false : performTokenRefresh(attempt + 1)
+    }
 
     if (!response.ok) {
       clearStoredToken()
@@ -1474,6 +1738,31 @@ const authRetryExemptPaths = ['/api/auth/refresh', '/api/auth/login']
 
 function isAuthRetryExempt(path: string) {
   return authRetryExemptPaths.some((exempt) => path.startsWith(exempt))
+}
+
+/**
+ * A failed API response, keeping the pieces a caller may need to branch on. The server's
+ * machine-readable `code` used to be dropped on the floor, leaving callers to match on the
+ * human-readable message — which then cannot be reworded without breaking behaviour.
+ */
+export class ApiError extends Error {
+  readonly status: number
+  readonly code?: string
+  /**
+   * The parsed response body. Some rejections carry more than a sentence — the dietary-conflict
+   * check lists exactly which words clash, and the dialog cannot ask for confirmation without them.
+   */
+  readonly details?: unknown
+
+  // Written out rather than as constructor parameter properties: this project builds with
+  // `erasableSyntaxOnly`, which rules those out.
+  constructor(message: string, status: number, code?: string, details?: unknown) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+    this.details = details
+  }
 }
 
 export async function request<T>(path: string, options: RequestInit = {}) {
@@ -1519,11 +1808,22 @@ export async function request<T>(path: string, options: RequestInit = {}) {
         .filter(Boolean)
         .join(' ')
       : ''
-    const message = [errorBody?.message, errorBody?.detail, errorDetails || undefined]
+    // Development ProblemDetails may contain a full exception stack in `detail`. It is useful in
+    // server logs and developer tools, but must never become user-facing copy (for example in a
+    // toast). Keep non-5xx validation details while suppressing unexpected-server-error details.
+    const safeDetail = response.status < 500 ? errorBody?.detail : undefined
+    const message = [errorBody?.message, safeDetail, errorDetails || undefined]
       .filter(Boolean)
       .join(' ')
-      || `Request failed with HTTP ${response.status}`
-    throw new Error(message)
+      || (response.status >= 500
+        ? 'The service encountered an unexpected error. Please try again.'
+        : `Request failed with HTTP ${response.status}`)
+    throw new ApiError(
+      message,
+      response.status,
+      typeof errorBody?.code === 'string' ? errorBody.code : undefined,
+      errorBody,
+    )
   }
 
   if (response.status === 204) {
@@ -1594,6 +1894,52 @@ export function registerCustomer(payload: RegisterCustomerRequest) {
   })
 }
 
+export function createPrivacyRequest(requestType: PrivacyRequestType, details: string) {
+  return request<PrivacyRequestRecord>('/api/privacy/requests', {
+    method: 'POST', body: JSON.stringify({ requestType, details }),
+  })
+}
+
+export function getMyPrivacyRequests() {
+  return request<PrivacyRequestRecord[]>('/api/privacy/requests/mine')
+}
+
+/**
+ * A privacy request as the person who has to answer it needs to see it.
+ *
+ * <p>
+ * Carries who filed it and how long is left. The clock is the point: an access or correction request
+ * carries a thirty-day deadline that starts the day it is filed, and nothing was showing these to
+ * anyone at all.
+ * </p>
+ */
+export type AdminPrivacyRequestRecord = PrivacyRequestRecord & {
+  requesterEmail: string | null
+  requesterName: string | null
+  /** Negative once the deadline has passed, null once the request has been answered. */
+  daysRemaining: number | null
+  isOverdue: boolean
+}
+
+export type PrivacyRequestStatus = 'Received' | 'InProgress' | 'Completed' | 'Declined'
+
+export function getAllPrivacyRequests(openOnly = false) {
+  return request<AdminPrivacyRequestRecord[]>(
+    `/api/privacy/requests${openOnly ? '?openOnly=true' : ''}`,
+  )
+}
+
+export function updatePrivacyRequestStatus(
+  id: string,
+  status: PrivacyRequestStatus,
+  note?: string,
+) {
+  return request<AdminPrivacyRequestRecord>(`/api/privacy/requests/${id}/status`, {
+    method: 'POST',
+    body: JSON.stringify({ status, note }),
+  })
+}
+
 export function confirmEmail(payload: ConfirmEmailRequest) {
   return request<ConfirmEmailResponse>('/api/auth/confirm-email', {
     method: 'POST',
@@ -1616,14 +1962,15 @@ export function requestMagicLink(payload: RequestMagicLinkRequest) {
 }
 
 export function magicLinkLogin(payload: MagicLinkLoginRequest) {
-  return request<LoginResponse>('/api/auth/magic-link-login', {
+  return request<PasswordLoginResponse>('/api/auth/magic-link-login', {
     method: 'POST',
     body: JSON.stringify(payload),
   })
 }
 
 export function exchangeOAuthCode(payload: ExchangeOAuthCodeRequest) {
-  return request<LoginResponse>('/api/auth/oauth/exchange', {
+  // Social sign-in runs the same MFA gate as a password, so it can come back as a challenge.
+  return request<PasswordLoginResponse>('/api/auth/oauth/exchange', {
     method: 'POST',
     body: JSON.stringify(payload),
   })
@@ -1853,17 +2200,27 @@ export function updateRestaurantOrderingStatus(
  * Scoped writes: these touch only their own column, so the hours editor and the special calendar
  * can no longer overwrite each other with a stale copy of the whole restaurant.
  */
-export function updateRestaurantOpeningHours(restaurantId: string, openingHoursJson: string) {
+export function updateRestaurantOpeningHours(
+  restaurantId: string,
+  openingHoursJson: string,
+  expectedUpdatedAt?: string | null,
+) {
   return request<UpdateRestaurantResponse>(`/api/restaurant/${restaurantId}/opening-hours`, {
     method: 'PUT',
-    body: JSON.stringify({ openingHoursJson }),
+    body: JSON.stringify({ openingHoursJson, expectedUpdatedAt }),
   })
 }
 
-export function updateRestaurantSpecialDays(restaurantId: string, specialOpeningDaysJson: string) {
+export function updateRestaurantSpecialDays(
+  restaurantId: string,
+  specialOpeningDaysJson: string,
+  // Each save replaces the whole calendar, so losing a race loses everything the other person
+  // wrote. Sending the version this editor loaded turns that into a 409 it can report.
+  expectedUpdatedAt?: string | null,
+) {
   return request<UpdateRestaurantResponse>(`/api/restaurant/${restaurantId}/special-days`, {
     method: 'PUT',
-    body: JSON.stringify({ specialOpeningDaysJson }),
+    body: JSON.stringify({ specialOpeningDaysJson, expectedUpdatedAt }),
   })
 }
 
@@ -2007,6 +2364,10 @@ export function refreshRestaurantStripeStatus(restaurantId: string) {
   })
 }
 
+export function previewStripeBusinessProfileImport(restaurantId: string) {
+  return request<StripeBusinessProfileImport>(`/api/restaurant/${restaurantId}/stripe/business-profile-import`)
+}
+
 export function runRestaurantStripeDiagnostics(restaurantId: string) {
   return request<StripeConnectDiagnostic>(`/api/restaurant/${restaurantId}/stripe/diagnostics`, {
     method: 'POST',
@@ -2045,10 +2406,26 @@ export function updateMenuItemWatch(itemId: string, isWatched: boolean) {
 }
 
 /** Pass null to stop tracking stock, which makes the item unlimited again. */
+type MenuItemStockResponse = { message: string; itemId: string; stockQuantity: number | null; isSoldOut: boolean }
+
 export function updateMenuItemStock(itemId: string, stockQuantity: number | null) {
-  return request<{ message: string; itemId: string; stockQuantity: number | null; isSoldOut: boolean }>(
+  return request<MenuItemStockResponse>(
     `/api/admin/menu/items/${itemId}/stock`,
     { method: 'PATCH', body: JSON.stringify({ stockQuantity }) },
+  )
+}
+
+/**
+ * Changes the count by a delta the database applies to the current row.
+ *
+ * <p>Sending an absolute value computed from a number read earlier loses one of two concurrent
+ * adjustments — both callers read the same count, both write the same result, and both are told it
+ * worked.</p>
+ */
+export function adjustMenuItemStock(itemId: string, adjustBy: number) {
+  return request<MenuItemStockResponse>(
+    `/api/admin/menu/items/${itemId}/stock`,
+    { method: 'PATCH', body: JSON.stringify({ adjustBy }) },
   )
 }
 
@@ -2193,15 +2570,31 @@ export function getAdminOrders(
   params: AdminOrderListParams = {},
   options: Pick<RequestInit, 'signal'> = {},
 ) {
-  return request<PagedResponse<AdminOrder>>(`/api/admin/orders${toQueryString(params)}`, options)
+  return request<StaffOrderPage>(`/api/admin/orders${toQueryString(params)}`, options)
 }
 
 export function getStaffOrders(params: AdminOrderListParams = {}) {
-  return request<PagedResponse<AdminOrder>>(`/api/staff/orders${toQueryString(params)}`)
+  return request<StaffOrderPage>(`/api/staff/orders${toQueryString(params)}`)
 }
 
 export function getFrontCounterTakeaway(params: FrontCounterListParams = {}) {
   return request<FrontCounterTakeawayResponse>(`/api/staff/front-counter/takeaway${toQueryString(params)}`)
+}
+
+/**
+ * Counter payments recent enough to still be put right, finished pickups included.
+ *
+ * <p>
+ * Completing an order takes it out of the counter's working lists, and the void and refund controls
+ * live on those lists — so a payment stopped being reachable at the moment the customer was most
+ * likely to come back about it. The endpoints never cared about the order's state; nothing led to
+ * them.
+ * </p>
+ */
+export function getFrontCounterRecentPayments(params: FrontCounterListParams = {}) {
+  return request<FrontCounterRecentPaymentsResponse>(
+    `/api/staff/front-counter/recent-payments${toQueryString(params)}`,
+  )
 }
 
 export function getFrontCounterTableSessions(params: FrontCounterListParams = {}) {
@@ -2448,10 +2841,37 @@ export function rejectAdminRefundRequest(requestId: string, payload: ReviewRefun
   })
 }
 
+/**
+ * Changes how an unpaid order will be settled, addressed by order rather than by cart.
+ *
+ * <p>
+ * The cart route needs a participant token that is usually gone by the time somebody returns to an
+ * order, which is why My Orders had no way to offer the counter when online payment was refused.
+ * </p>
+ */
+export function changeOrderPaymentMethod(
+  orderId: string,
+  paymentMethod: 'Online' | 'PayAtCounter',
+  guestAccessToken?: string | null,
+) {
+  return request<CustomerOrder>(`/api/order/${encodeURIComponent(orderId)}/payment-method`, {
+    method: 'PUT',
+    body: JSON.stringify({ paymentMethod, guestAccessToken: guestAccessToken ?? undefined }),
+  })
+}
+
 export function createOrderCheckoutSession(payload: CreateOrderCheckoutSessionRequest) {
   return request<CreateCheckoutSessionResponse>('/api/payments/checkout-session/order', {
     method: 'POST',
     body: JSON.stringify(payload),
+  })
+}
+
+/** Customer return-path recovery when the webhook has not updated the local order yet. */
+export function confirmStripeCheckoutSession(sessionId: string) {
+  return request<ConfirmCheckoutSessionResponse>('/api/payments/stripe/checkout-session/confirm', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId }),
   })
 }
 
@@ -2539,9 +2959,20 @@ export async function registerPasskey(deviceName?: string, verification?: MfaVer
     method: 'POST',
     body: JSON.stringify({ verification }),
   })
-  const credential = await navigator.credentials.create({
-    publicKey: toPublicKeyCredentialCreationOptions(options),
-  })
+  // Creating a passkey needs the same focused document as using one. Someone adding their first
+  // passkey has no reason to suspect a silent refusal is about the window rather than the feature,
+  // and this is the only way in — a failure here is one they may never come back from.
+  const { result, diagnostics } = whenDocumentFocused(() =>
+    navigator.credentials.create({ publicKey: toPublicKeyCredentialCreationOptions(options) }))
+
+  let credential: Credential | null
+  try {
+    credential = await result
+  } catch (error) {
+    const { name, message } = describeError(error, 'Passkey registration failed.')
+    console.warn('[passkey] registration failed', { name, message, focus: await diagnostics })
+    throw new Error(describePasskeyFailure(name, message), { cause: error })
+  }
 
   if (!credential || credential.type !== 'public-key') {
     throw new Error('Passkey registration was cancelled.')
@@ -2569,17 +3000,205 @@ export async function registerPasskey(deviceName?: string, verification?: MfaVer
   })
 }
 
-export async function passkeyLogin() {
-  if (!window.PublicKeyCredential || !navigator.credentials?.get) {
-    throw new Error('Passkeys are not supported by this browser.')
+/**
+ * The name and message of a failure, whichever shape it arrives in.
+ *
+ * <p>Redux Toolkit's `createAsyncThunk` replaces a rejection with a plain `SerializedError`, so an
+ * `instanceof Error` check fails and the real reason — for passkeys, the part that says *why* the
+ * platform refused — was being swallowed and replaced with generic copy.</p>
+ */
+/**
+ * The failure code, whether this came back as an ApiError or as the plain object a Redux thunk
+ * hands over from `.unwrap()`. `instanceof` is false for the second, which is how a sign-in on an
+ * unconfirmed account lost its `email_not_confirmed` code and showed generic failure copy instead
+ * of the page offering to resend the confirmation.
+ */
+export function errorCodeOf(error: unknown): string | undefined {
+  if (error && typeof error === 'object' && 'code' in error) {
+    const { code } = error as { code?: unknown }
+    return typeof code === 'string' && code ? code : undefined
   }
 
-  const options = await request<PublicKeyCredentialRequestOptionsJson>('/api/auth/passkeys/login/options', {
+  return undefined
+}
+
+export function describeError(error: unknown, fallback: string): { name: string; message: string } {
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message }
+  }
+
+  if (error && typeof error === 'object') {
+    const serialized = error as { name?: unknown; message?: unknown }
+    if (typeof serialized.message === 'string' && serialized.message) {
+      return {
+        name: typeof serialized.name === 'string' && serialized.name ? serialized.name : 'Error',
+        message: serialized.message,
+      }
+    }
+  }
+
+  return { name: 'Error', message: fallback }
+}
+
+export function isPasskeySupported(): boolean {
+  return Boolean(window.PublicKeyCredential && navigator.credentials?.get)
+}
+
+export function requestPasskeyLoginOptions() {
+  return request<PublicKeyCredentialRequestOptionsJson>('/api/auth/passkeys/login/options', {
     method: 'POST',
   })
-  const credential = await navigator.credentials.get({
-    publicKey: toPublicKeyCredentialRequestOptions(options),
+}
+
+/**
+ * What the document's focus looked like around the ceremony. Safari's refusal is invisible
+ * otherwise: the same `NotAllowedError` is thrown whether focus never arrived or arrived and was
+ * refused anyway, and only one of those is worth waiting for.
+ */
+export type PasskeyCeremonyDiagnostics = {
+  focusedAtClick: boolean
+  /** 'focus-event' means the click's own focus landed; 'timeout' means it never did. */
+  resolvedBy: 'already-focused' | 'focus-event' | 'timeout'
+  focusedAtCall: boolean
+  waitedMs: number
+  /** A framed document never holds focus itself, which would explain a refusal on its own. */
+  framed: boolean
+}
+
+/** A challenge together with the assertion already being collected for it. */
+export type PasskeyAssertionAttempt = {
+  options: PublicKeyCredentialRequestOptionsJson
+  credential: Promise<Credential | null>
+  /** Settles when the ceremony is actually invoked, never rejects. */
+  diagnostics: Promise<PasskeyCeremonyDiagnostics>
+}
+
+/**
+ * How long to wait for the click's own focus to land before giving up and calling anyway. Kept
+ * inside Safari's transient activation window (about five seconds) so a late focus still gets a
+ * working ceremony rather than a second refusal.
+ */
+const documentFocusTimeoutMs = 3_000
+
+/** Cross-origin framing throws on the comparison, which is itself the answer. */
+function isFramed(): boolean {
+  try {
+    return window.top !== window.self
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Resolves once the document is focused. Safari refuses a passkey ceremony with
+ * `NotAllowedError: The document is not focused.` — which is what happens when the gesture that
+ * reached the button left focus in the browser's own furniture (a sidebar, the address bar, the
+ * inspector) rather than in the page. Focus often lands a moment later from that same gesture, so
+ * waiting for it costs nothing and stays inside the transient activation window.
+ */
+function waitForDocumentFocus(): Promise<'focus-event' | 'timeout'> {
+  return new Promise((resolve) => {
+    const finish = (reason: 'focus-event' | 'timeout') => {
+      window.removeEventListener('focus', onFocus)
+      window.clearTimeout(timer)
+      resolve(reason)
+    }
+
+    const onFocus = () => finish('focus-event')
+
+    // Calling anyway after the timeout is better than hanging: the browser's own error is a more
+    // useful outcome than a button that never does anything.
+    const timer = window.setTimeout(() => finish('timeout'), documentFocusTimeoutMs)
+    window.addEventListener('focus', onFocus)
+
+    // Ask for focus rather than only waiting for it. Browsers honour this during a user gesture,
+    // and it is the difference between the page taking focus from a devtools window and not.
+    window.focus()
+
+    // The gesture may have already focused the page before this ran, in which case no event is
+    // coming and the timeout would be a pointless second of delay.
+    if (document.hasFocus()) {
+      finish('focus-event')
+    }
   })
+}
+
+/**
+ * Invokes a passkey ceremony at the first moment the browser will allow one.
+ *
+ * <p>Stays synchronous when the document already holds focus, so the gesture's transient user
+ * activation is still live — that is the common path and it must not cost a microtask. Only an
+ * unfocused document, which Safari refuses outright, waits.</p>
+ */
+function whenDocumentFocused<T>(invoke: () => Promise<T>): {
+  result: Promise<T>
+  diagnostics: Promise<PasskeyCeremonyDiagnostics>
+} {
+  const focusedAtClick = document.hasFocus()
+  const startedAt = Date.now()
+
+  if (focusedAtClick) {
+    return {
+      result: invoke(),
+      diagnostics: Promise.resolve({
+        focusedAtClick,
+        resolvedBy: 'already-focused' as const,
+        focusedAtCall: true,
+        waitedMs: 0,
+        framed: isFramed(),
+      }),
+    }
+  }
+
+  let report: (diagnostics: PasskeyCeremonyDiagnostics) => void = () => {}
+  const diagnostics = new Promise<PasskeyCeremonyDiagnostics>((resolve) => {
+    report = resolve
+  })
+
+  const result = waitForDocumentFocus().then((resolvedBy) => {
+    report({
+      focusedAtClick,
+      resolvedBy,
+      focusedAtCall: document.hasFocus(),
+      waitedMs: Date.now() - startedAt,
+      framed: isFramed(),
+    })
+    return invoke()
+  })
+
+  return { result, diagnostics }
+}
+
+/**
+ * Opens the platform's passkey prompt for signing in.
+ *
+ * <p>The challenge is prefetched rather than awaited here, so nothing stands between the click and
+ * the prompt.</p>
+ */
+export function startPasskeyAssertion(
+  options: PublicKeyCredentialRequestOptionsJson,
+): PasskeyAssertionAttempt {
+  const publicKey = toPublicKeyCredentialRequestOptions(options)
+  const { result, diagnostics } = whenDocumentFocused(() => navigator.credentials.get({ publicKey }))
+
+  return { options, credential: result, diagnostics }
+}
+
+/**
+ * Turns a browser refusal into something the person can act on. `NotAllowedError` covers both a
+ * cancelled prompt and a document the browser would not let open one; only the second has a remedy,
+ * and quoting the raw message leaves the reader guessing which they hit.
+ */
+export function describePasskeyFailure(name: string, message: string): string {
+  if (name === 'NotAllowedError' && /not focused/i.test(message)) {
+    return 'Your browser would not open the passkey prompt because this window was not in front. Click anywhere on the page, then try again.'
+  }
+
+  return message
+}
+
+export async function finishPasskeyLogin(attempt: PasskeyAssertionAttempt) {
+  const credential = await attempt.credential
 
   if (!credential || credential.type !== 'public-key') {
     throw new Error('Passkey sign-in was cancelled.')
@@ -2591,7 +3210,7 @@ export async function passkeyLogin() {
   return request<LoginResponse>('/api/auth/passkeys/login/complete', {
     method: 'POST',
     body: JSON.stringify({
-      challenge: options.challenge,
+      challenge: attempt.options.challenge,
       assertionResponse: {
         id: publicKeyCredential.id,
         rawId: arrayBufferToBase64Url(publicKeyCredential.rawId),
@@ -2606,6 +3225,18 @@ export async function passkeyLogin() {
       },
     }),
   })
+}
+
+/**
+ * Whole flow in one call. Pass an attempt started in the click handler; without one this falls
+ * back to fetching the challenge first, which is the path that can lose the user activation.
+ */
+export async function passkeyLogin(attempt?: PasskeyAssertionAttempt) {
+  if (!isPasskeySupported()) {
+    throw new Error('Passkeys are not supported by this browser.')
+  }
+
+  return finishPasskeyLogin(attempt ?? startPasskeyAssertion(await requestPasskeyLoginOptions()))
 }
 
 function toPublicKeyCredentialCreationOptions(
@@ -2628,14 +3259,27 @@ function toPublicKeyCredentialCreationOptions(
 function toPublicKeyCredentialRequestOptions(
   options: PublicKeyCredentialRequestOptionsJson,
 ): PublicKeyCredentialRequestOptions {
-  return {
-    ...options,
+  const { allowCredentials, ...rest } = options as PublicKeyCredentialRequestOptionsJson &
+    Record<string, unknown>
+
+  // The server sends `allowCredentials: []` and `hints: []` for the usernameless flow. An empty
+  // list is not the same thing as an absent one to every platform authenticator, and an empty
+  // hints array carries no meaning at all, so neither is forwarded.
+  delete rest.hints
+
+  const converted: PublicKeyCredentialRequestOptions = {
+    ...(rest as Omit<PublicKeyCredentialRequestOptionsJson, 'allowCredentials'>),
     challenge: base64UrlToArrayBuffer(options.challenge),
-    allowCredentials: options.allowCredentials?.map((credential) => ({
+  }
+
+  if (allowCredentials?.length) {
+    converted.allowCredentials = allowCredentials.map((credential) => ({
       ...credential,
       id: base64UrlToArrayBuffer(credential.id),
-    })),
+    }))
   }
+
+  return converted
 }
 
 function base64UrlToArrayBuffer(value: string) {

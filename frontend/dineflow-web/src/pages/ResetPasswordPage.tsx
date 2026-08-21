@@ -8,17 +8,13 @@ import { resetPassword } from '../api/auth'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '../components/ui/form'
-import { Input } from '../components/ui/input'
+import { PasswordInput } from '../components/auth/PasswordInput'
+import { PasswordRequirements } from '../components/auth/PasswordRequirements'
+import { passwordSchema } from '../lib/passwordPolicy'
 
 const resetPasswordSchema = z
   .object({
-    password: z
-      .string()
-      .min(6, 'Password must be at least 6 characters.')
-      .regex(/[0-9]/, 'Password must include a number.')
-      .regex(/[a-z]/, 'Password must include a lowercase letter.')
-      .regex(/[A-Z]/, 'Password must include an uppercase letter.')
-      .regex(/[^a-zA-Z0-9]/, 'Password must include a symbol.'),
+    password: passwordSchema,
     confirmPassword: z.string().min(1, 'Confirm your new password.'),
   })
   .refine((values) => values.password === values.confirmPassword, {
@@ -73,7 +69,7 @@ export function ResetPasswordPage() {
       <Card className="login-card">
         <CardHeader>
           <p className="eyebrow">DineFlow</p>
-          <CardTitle>Set new password</CardTitle>
+          <CardTitle asChild><h1>Set new password</h1></CardTitle>
           <CardDescription>
             {hasLinkData ? 'Choose a new customer account password.' : 'Password reset link is invalid.'}
           </CardDescription>
@@ -89,8 +85,9 @@ export function ResetPasswordPage() {
                     <FormItem>
                       <FormLabel>New password</FormLabel>
                       <FormControl>
-                        <Input type="password" autoComplete="new-password" placeholder="ChangeMe123!" {...field} />
+                        <PasswordInput autoComplete="new-password" placeholder="At least 8 characters" {...field} />
                       </FormControl>
+                      <PasswordRequirements password={field.value} />
                       <FormMessage />
                     </FormItem>
                   )}
@@ -102,7 +99,7 @@ export function ResetPasswordPage() {
                     <FormItem>
                       <FormLabel>Confirm password</FormLabel>
                       <FormControl>
-                        <Input type="password" autoComplete="new-password" {...field} />
+                        <PasswordInput autoComplete="new-password" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>

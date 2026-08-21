@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties} from 'react'
 import {
   closestCenter,
   DndContext,
@@ -51,6 +51,7 @@ import {
 import {
   createDefaultLayout,
   loadStoredLayout,
+  mergeForStorage,
   moveVisibleWidget,
   reconcileLayout,
   reorderLayout,
@@ -243,9 +244,11 @@ export function DashboardCanvas({
   widgets: DashboardWidget[]
   storageScope: string
 }) {
-  const [layout, setLayout] = useState<DashboardLayout>(
-    () => reconcileLayout(widgets, loadStoredLayout(storageScope)),
-  )
+  // Read once, and kept as it was read rather than as it was reconciled: reconciling is a rendering
+  // concern, and applying it to the stored value discards every widget that has not registered yet.
+  const initialStored = useMemo(() => loadStoredLayout(storageScope), [storageScope])
+  const storedRef = useRef<DashboardLayout | null>(initialStored)
+  const [layout, setLayout] = useState<DashboardLayout>(() => reconcileLayout(widgets, initialStored))
   const [draftLayout, setDraftLayout] = useState<DashboardLayout | null>(null)
   const [undoStack, setUndoStack] = useState<DashboardLayout[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -274,7 +277,9 @@ export function DashboardCanvas({
   )
 
   useEffect(() => {
-    saveLayout(storageScope, layout)
+    const merged = mergeForStorage(layout, storedRef.current)
+    storedRef.current = merged
+    saveLayout(storageScope, merged)
   }, [layout, storageScope])
 
   const updateDraft = useCallback((

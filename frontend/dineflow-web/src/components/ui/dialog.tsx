@@ -59,7 +59,17 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          // max-h + overflow: the dialog is centred and pulled up by half its own height, so anything
+          // taller than the viewport used to hang off both ends with nothing to scroll — the footer,
+          // and therefore Save and Cancel, could not be reached at all. dvh rather than vh so a
+          // mobile browser's collapsing toolbar does not hide the actions again.
+          // pb-0 when there is a footer: the footer runs edge to edge and provides its own padding,
+          // so the box must end where it does. It used to reach the edge by way of a negative
+          // bottom margin instead, which fought `sticky bottom-0` — sticky honours the margin box,
+          // so the footer was pulled a padding's worth up the dialog and sat on top of the last
+          // field. Whatever was there, an input or the final row of a form, lost its bottom edge
+          // under a translucent bar.
+          "fixed top-1/2 left-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none has-[[data-slot=dialog-footer]]:pb-0 sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
         {...props}
@@ -105,7 +115,12 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "-mx-4 -mb-4 flex flex-col-reverse gap-2 rounded-b-xl border-t bg-muted/50 p-4 sm:flex-row sm:justify-end",
+        // Sticky so the actions stay put while a long form scrolls past them. Two things that
+        // follow from that: no negative bottom margin (sticky positions the margin box, so it
+        // would lift the whole bar over the content — DialogContent drops its bottom padding
+        // instead), and an opaque background, because a form scrolling underneath a half
+        // transparent bar shows straight through it.
+        "sticky bottom-0 z-10 -mx-4 flex flex-col-reverse gap-2 rounded-b-xl border-t bg-muted p-4 sm:flex-row sm:justify-end",
         className
       )}
       {...props}

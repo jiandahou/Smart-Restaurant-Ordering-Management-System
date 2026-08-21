@@ -1,5 +1,6 @@
 using Amazon.S3;
 using Amazon.S3.Model;
+using System.Linq.Expressions;
 using System.Security.Claims;
 using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Menu;
@@ -42,6 +43,7 @@ public class AdminMenuItemsController : ControllerBase
     private readonly IAmazonS3 _s3Client;
     private readonly ILogger<AdminMenuItemsController> _logger;
     private readonly ReportLogWriter _reportLogWriter;
+    private readonly StoredImageVerifier _storedImageVerifier;
 
     public AdminMenuItemsController(
         AppDbContext dbContext,
@@ -49,7 +51,8 @@ public class AdminMenuItemsController : ControllerBase
         IOptions<AvatarStorageOptions> storageOptions,
         IAmazonS3 s3Client,
         ILogger<AdminMenuItemsController> logger,
-        ReportLogWriter reportLogWriter)
+        ReportLogWriter reportLogWriter,
+        StoredImageVerifier storedImageVerifier)
     {
         _dbContext = dbContext;
         _userManager = userManager;
@@ -57,6 +60,7 @@ public class AdminMenuItemsController : ControllerBase
         _s3Client = s3Client;
         _logger = logger;
         _reportLogWriter = reportLogWriter;
+        _storedImageVerifier = storedImageVerifier;
     }
 
     [HttpPost("image-upload-url")]
@@ -189,6 +193,19 @@ public class AdminMenuItemsController : ControllerBase
             return BadRequest(new { message = "Uploaded menu image must be a JPG, PNG, or WebP file." });
         }
 
+        // The upload went straight to the bucket, so this is the first sight of the bytes. Both the
+        // content type and the extension were chosen by the uploader and prove nothing.
+        if (!await _storedImageVerifier.IsDeclaredImageAsync(
+                _storageOptions.Bucket,
+                objectKey,
+                metadata.Headers.ContentType,
+                cancellationToken))
+        {
+            await _storedImageVerifier.DeleteAsync(_storageOptions.Bucket, objectKey, cancellationToken);
+
+            return BadRequest(new { message = "Uploaded menu image must be a JPG, PNG, or WebP file." });
+        }
+
         return Ok(new CompleteMenuItemImageUploadResponse
         {
             ObjectKey = objectKey,
@@ -233,66 +250,7 @@ public class AdminMenuItemsController : ControllerBase
         var items = await query
             .OrderBy(item => item.DisplayOrder)
             .ThenBy(item => item.Name)
-            .Select(item => new MenuItemResponse
-            {
-                Id = item.Id,
-                RestaurantId = item.RestaurantId,
-                CategoryId = item.CategoryId,
-                CategoryName = item.Category != null ? item.Category.Name : string.Empty,
-                Name = item.Name,
-                Description = item.Description,
-                Price = item.Price,
-                ImageUrl = item.ImageUrl,
-                IsAvailable = item.IsAvailable,
-                IsSoldOut = item.IsSoldOut,
-                IsWatched = item.IsWatched,
-                StockQuantity = item.StockQuantity,
-                IsVegetarian = item.IsVegetarian,
-                IsVegan = item.IsVegan,
-                IsGlutenFree = item.IsGlutenFree,
-                IsHalal = item.IsHalal,
-                Allergens = item.Allergens,
-                SpiceLevel = item.SpiceLevel,
-                ServingSize = item.ServingSize,
-                Calories = item.Calories,
-                IsPopular = item.IsPopular,
-                IsRecommended = item.IsRecommended,
-                DisplayOrder = item.DisplayOrder,
-                CreatedAt = item.CreatedAt,
-                UpdatedAt = item.UpdatedAt,
-                OptionGroups = item.OptionGroups
-                    .OrderBy(group => group.DisplayOrder)
-                    .Select(group => new MenuOptionGroupResponse
-                    {
-                        Id = group.Id,
-                        MenuItemId = group.MenuItemId,
-                        Name = group.Name,
-                        IsRequired = group.IsRequired,
-                        MinSelections = group.MinSelections,
-                        MaxSelections = group.MaxSelections,
-                        DisplayOrder = group.DisplayOrder,
-                        IsActive = group.IsActive,
-                        CreatedAt = group.CreatedAt,
-                        UpdatedAt = group.UpdatedAt,
-                        Options = group.Options
-                            .OrderBy(option => option.DisplayOrder)
-                            .Select(option => new MenuOptionResponse
-                            {
-                                Id = option.Id,
-                                GroupId = option.GroupId,
-                                Name = option.Name,
-                                PriceAdjustment = option.PriceAdjustment,
-                                AdjustmentType = (int)option.AdjustmentType,
-                                MaxQuantity = option.MaxQuantity,
-                                DisplayOrder = option.DisplayOrder,
-                                IsAvailable = option.IsAvailable,
-                                CreatedAt = option.CreatedAt,
-                                UpdatedAt = option.UpdatedAt
-                            })
-                            .ToList()
-                    })
-                    .ToList()
-            })
+            .Select(ToResponse)
             .ToListAsync(cancellationToken);
 
         return Ok(items);
@@ -347,6 +305,8 @@ public class AdminMenuItemsController : ControllerBase
         {
             return BadRequest(new { message = validationError });
         }
+        if (request.MayContainAllergens?.Trim().Length > 500 || request.CrossContactStatement?.Trim().Length > 1000)
+            return BadRequest(new { message = "May-contain allergens must not exceed 500 characters and cross-contact statement must not exceed 1,000 characters." });
 
         var category = await _dbContext.MenuCategories
             .AsNoTracking()
@@ -357,11 +317,41 @@ public class AdminMenuItemsController : ControllerBase
             return BadRequest(new { message = "Category does not belong to the selected restaurant." });
         }
 
+        var priceProblem = await DescribePriceProblemAsync(
+            request.RestaurantId,
+            request.Price,
+            cancellationToken);
+
+        if (priceProblem is not null)
+        {
+            return BadRequest(new { message = priceProblem, code = "price_precision" });
+        }
+
         var name = request.Name.Trim();
 
         if (await ItemNameExistsAsync(request.CategoryId, name, null, cancellationToken))
         {
             return Conflict(new { message = "An item with this name already exists in the category." });
+        }
+
+        // A gluten-free claim beside an allergen list that says "wheat" is either a typo or a
+        // dangerous mistake, and only the person in front of the menu can tell which.
+        var dietaryConflicts = DietaryClaimConflicts.Find(
+            request.IsGlutenFree,
+            request.IsVegan,
+            request.IsVegetarian,
+            request.IsHalal,
+            NormalizeOptionalValue(request.Allergens),
+            NormalizeOptionalValue(request.MayContainAllergens));
+
+        if (dietaryConflicts.Count > 0 && !request.AcknowledgeDietaryConflicts)
+        {
+            return Conflict(new
+            {
+                message = "The dietary labels contradict the allergen information for this item.",
+                code = "dietary_conflict",
+                conflicts = dietaryConflicts
+            });
         }
 
         var item = new MenuItem
@@ -375,11 +365,17 @@ public class AdminMenuItemsController : ControllerBase
             ImageUrl = NormalizeOptionalValue(request.ImageUrl),
             IsAvailable = request.IsAvailable,
             IsSoldOut = request.IsSoldOut,
-            IsVegetarian = request.IsVegetarian,
+            IsVegetarian = DietaryClaimConflicts.ResolveVegetarian(request.IsVegan, request.IsVegetarian),
             IsVegan = request.IsVegan,
             IsGlutenFree = request.IsGlutenFree,
             IsHalal = request.IsHalal,
             Allergens = NormalizeOptionalValue(request.Allergens),
+            MayContainAllergens = NormalizeOptionalValue(request.MayContainAllergens),
+            CrossContactStatement = NormalizeOptionalValue(request.CrossContactStatement),
+            AllergenInfoLastVerifiedAt = ResolveAllergenVerifiedAt(
+                NormalizeOptionalValue(request.Allergens),
+                NormalizeOptionalValue(request.MayContainAllergens),
+                NormalizeOptionalValue(request.CrossContactStatement)),
             SpiceLevel = request.SpiceLevel,
             ServingSize = NormalizeOptionalValue(request.ServingSize),
             Calories = request.Calories,
@@ -397,6 +393,17 @@ public class AdminMenuItemsController : ControllerBase
             item.RestaurantId,
             $"Created menu item {item.Name}.",
             after: SnapshotItem(item));
+
+        if (dietaryConflicts.Count > 0)
+        {
+            _reportLogWriter.AddAudit(
+                "MenuItem.DietaryConflictAcknowledged",
+                "MenuItem",
+                item.Id.ToString(),
+                item.RestaurantId,
+                $"Saved {item.Name} with contradicting dietary labels: {string.Join(" ", dietaryConflicts)}",
+                after: SnapshotItem(item));
+        }
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         var response = MapToResponse(item, category.Name);
@@ -445,6 +452,8 @@ public class AdminMenuItemsController : ControllerBase
         {
             return BadRequest(new { message = validationError });
         }
+        if (request.MayContainAllergens?.Trim().Length > 500 || request.CrossContactStatement?.Trim().Length > 1000)
+            return BadRequest(new { message = "May-contain allergens must not exceed 500 characters and cross-contact statement must not exceed 1,000 characters." });
 
         var category = await _dbContext.MenuCategories
             .AsNoTracking()
@@ -453,6 +462,37 @@ public class AdminMenuItemsController : ControllerBase
         if (category is null || category.RestaurantId != item.RestaurantId)
         {
             return BadRequest(new { message = "Category does not belong to the item's restaurant." });
+        }
+
+        var priceProblem = await DescribePriceProblemAsync(item.RestaurantId, request.Price, cancellationToken);
+
+        if (priceProblem is not null)
+        {
+            return BadRequest(new { message = priceProblem, code = "price_precision" });
+        }
+
+        if (request.ExpectedUpdatedAt is null)
+        {
+            return BadRequest(new
+            {
+                message = "This save is missing the item version it was based on, so it cannot be "
+                    + "checked against changes made by anyone else. Reload the item and try again.",
+                code = "missing_expected_version"
+            });
+        }
+
+        // The update carries every field, so losing this race does not cost the other person one
+        // field — it silently restores all of theirs to what they were before they saved.
+        if (!request.OverwriteConflict && WasChangedElsewhere(item, request.ExpectedUpdatedAt.Value))
+        {
+            return Conflict(new
+            {
+                message = "Someone else saved this item while you were editing it. Review their "
+                    + "version before saving, so their changes are not undone.",
+                code = "menu_item_conflict",
+                currentUpdatedAt = VersionOf(item),
+                item = MapToResponse(item, category.Name)
+            });
         }
 
         var name = request.Name.Trim();
@@ -466,17 +506,50 @@ public class AdminMenuItemsController : ControllerBase
         var beforeItem = SnapshotItem(item);
 
         item.CategoryId = request.CategoryId;
+        // A gluten-free claim beside an allergen list that says "wheat" is either a typo or a
+        // dangerous mistake, and only the person in front of the menu can tell which.
+        var dietaryConflicts = DietaryClaimConflicts.Find(
+            request.IsGlutenFree,
+            request.IsVegan,
+            request.IsVegetarian,
+            request.IsHalal,
+            NormalizeOptionalValue(request.Allergens),
+            NormalizeOptionalValue(request.MayContainAllergens));
+
+        if (dietaryConflicts.Count > 0 && !request.AcknowledgeDietaryConflicts)
+        {
+            return Conflict(new
+            {
+                message = "The dietary labels contradict the allergen information for this item.",
+                code = "dietary_conflict",
+                conflicts = dietaryConflicts
+            });
+        }
+
         item.Name = name;
         item.Description = NormalizeOptionalValue(request.Description);
         item.Price = request.Price;
         item.ImageUrl = NormalizeOptionalValue(request.ImageUrl);
         item.IsAvailable = request.IsAvailable;
         item.IsSoldOut = request.IsSoldOut;
-        item.IsVegetarian = request.IsVegetarian;
+        item.IsVegetarian = DietaryClaimConflicts.ResolveVegetarian(request.IsVegan, request.IsVegetarian);
         item.IsVegan = request.IsVegan;
         item.IsGlutenFree = request.IsGlutenFree;
         item.IsHalal = request.IsHalal;
-        item.Allergens = NormalizeOptionalValue(request.Allergens);
+        var nextAllergens = NormalizeOptionalValue(request.Allergens);
+        var nextMayContainAllergens = NormalizeOptionalValue(request.MayContainAllergens);
+        var nextCrossContactStatement = NormalizeOptionalValue(request.CrossContactStatement);
+        item.AllergenInfoLastVerifiedAt = ResolveAllergenVerifiedAt(
+            nextAllergens,
+            nextMayContainAllergens,
+            nextCrossContactStatement,
+            item.Allergens,
+            item.MayContainAllergens,
+            item.CrossContactStatement,
+            item.AllergenInfoLastVerifiedAt);
+        item.Allergens = nextAllergens;
+        item.MayContainAllergens = nextMayContainAllergens;
+        item.CrossContactStatement = nextCrossContactStatement;
         item.SpiceLevel = request.SpiceLevel;
         item.ServingSize = NormalizeOptionalValue(request.ServingSize);
         item.Calories = request.Calories;
@@ -493,6 +566,19 @@ public class AdminMenuItemsController : ControllerBase
             $"Updated menu item {item.Name}.",
             beforeItem,
             SnapshotItem(item));
+
+        if (dietaryConflicts.Count > 0)
+        {
+            // Someone said out loud that a contradicting label is correct; that decision needs a name
+            // against it, because the item now tells customers something its own allergens deny.
+            _reportLogWriter.AddAudit(
+                "MenuItem.DietaryConflictAcknowledged",
+                "MenuItem",
+                item.Id.ToString(),
+                item.RestaurantId,
+                $"Saved {item.Name} with contradicting dietary labels: {string.Join(" ", dietaryConflicts)}",
+                after: SnapshotItem(item));
+        }
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         if (!string.Equals(previousImageUrl, item.ImageUrl, StringComparison.OrdinalIgnoreCase))
@@ -686,6 +772,11 @@ public class AdminMenuItemsController : ControllerBase
             return BadRequest(new { message = "stockQuantity cannot be negative." });
         }
 
+        if (request.AdjustBy is not null && request.StockQuantity is not null)
+        {
+            return BadRequest(new { message = "Send either stockQuantity or adjustBy, not both." });
+        }
+
         var item = await _dbContext.MenuItems
             .FirstOrDefaultAsync(menuItem => menuItem.Id == id, cancellationToken);
 
@@ -700,11 +791,40 @@ public class AdminMenuItemsController : ControllerBase
         }
 
         var beforeStock = new { item.Id, item.Name, item.StockQuantity, item.IsSoldOut };
-        item.StockQuantity = request.StockQuantity;
 
-        if (request.StockQuantity is { } quantity)
+        if (request.AdjustBy is { } delta)
         {
-            item.IsSoldOut = quantity == 0;
+            if (item.StockQuantity is null)
+            {
+                return BadRequest(new { message = "This item does not track stock, so there is nothing to adjust." });
+            }
+
+            // One statement, so the database adds to whatever the row holds right now. Reading the
+            // count and writing the result back would lose an increment whenever two people pressed
+            // the button at once, and both requests would report success.
+            await _dbContext.MenuItems
+                .Where(menuItem => menuItem.Id == id && menuItem.StockQuantity != null)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(
+                            menuItem => menuItem.StockQuantity,
+                            menuItem => Math.Max(0, menuItem.StockQuantity!.Value + delta))
+                        .SetProperty(
+                            menuItem => menuItem.IsSoldOut,
+                            menuItem => Math.Max(0, menuItem.StockQuantity!.Value + delta) == 0)
+                        .SetProperty(menuItem => menuItem.UpdatedAt, DateTime.UtcNow),
+                    cancellationToken);
+
+            await _dbContext.Entry(item).ReloadAsync(cancellationToken);
+        }
+        else
+        {
+            item.StockQuantity = request.StockQuantity;
+
+            if (request.StockQuantity is { } quantity)
+            {
+                item.IsSoldOut = quantity == 0;
+            }
         }
 
         item.UpdatedAt = DateTime.UtcNow;
@@ -713,9 +833,11 @@ public class AdminMenuItemsController : ControllerBase
             "MenuItem",
             item.Id.ToString(),
             item.RestaurantId,
-            request.StockQuantity is null
-                ? $"{item.Name} stock tracking turned off."
-                : $"{item.Name} stock set to {request.StockQuantity}.",
+            request.AdjustBy is { } adjustment
+                ? $"{item.Name} stock adjusted by {adjustment:+#;-#;0} to {item.StockQuantity}."
+                : request.StockQuantity is null
+                    ? $"{item.Name} stock tracking turned off."
+                    : $"{item.Name} stock set to {request.StockQuantity}.",
             beforeStock,
             new { item.Id, item.Name, item.StockQuantity, item.IsSoldOut });
         await _dbContext.SaveChangesAsync(cancellationToken);
@@ -922,6 +1044,129 @@ public class AdminMenuItemsController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// The one shape a menu item is returned in.
+    ///
+    /// <para>
+    /// This used to be written out three times — once for the list, once for the single-item read
+    /// and once for create/update — and the copies drifted: only the create/update copy carried
+    /// <see cref="MenuItemResponse.MayContainAllergens"/>, <see cref="MenuItemResponse.CrossContactStatement"/>
+    /// and <see cref="MenuItemResponse.AllergenInfoLastVerifiedAt"/>. Every other read reported an
+    /// item's "may contain" and cross-contact declarations as null while they sat in the database,
+    /// so the admin menu could not find them by search, counted the item as having declared no
+    /// allergens, and — because the edit form fills itself from that same read — wrote the nulls
+    /// back over the real text the next time anyone pressed Save.
+    /// </para>
+    /// </summary>
+    private static readonly Expression<Func<MenuItem, MenuItemResponse>> ToResponse = item => new MenuItemResponse
+    {
+        Id = item.Id,
+        RestaurantId = item.RestaurantId,
+        CategoryId = item.CategoryId,
+        CategoryName = item.Category != null ? item.Category.Name : string.Empty,
+        Name = item.Name,
+        Description = item.Description,
+        Price = item.Price,
+        ImageUrl = item.ImageUrl,
+        IsAvailable = item.IsAvailable,
+        IsSoldOut = item.IsSoldOut,
+        IsWatched = item.IsWatched,
+        StockQuantity = item.StockQuantity,
+        IsVegetarian = item.IsVegetarian,
+        IsVegan = item.IsVegan,
+        IsGlutenFree = item.IsGlutenFree,
+        IsHalal = item.IsHalal,
+        Allergens = item.Allergens,
+        MayContainAllergens = item.MayContainAllergens,
+        CrossContactStatement = item.CrossContactStatement,
+        AllergenInfoLastVerifiedAt = item.AllergenInfoLastVerifiedAt,
+        SpiceLevel = item.SpiceLevel,
+        ServingSize = item.ServingSize,
+        Calories = item.Calories,
+        IsPopular = item.IsPopular,
+        IsRecommended = item.IsRecommended,
+        DisplayOrder = item.DisplayOrder,
+        CreatedAt = item.CreatedAt,
+        UpdatedAt = item.UpdatedAt,
+        OptionGroups = item.OptionGroups
+            .OrderBy(group => group.DisplayOrder)
+            .Select(group => new MenuOptionGroupResponse
+            {
+                Id = group.Id,
+                MenuItemId = group.MenuItemId,
+                Name = group.Name,
+                IsRequired = group.IsRequired,
+                MinSelections = group.MinSelections,
+                MaxSelections = group.MaxSelections,
+                DisplayOrder = group.DisplayOrder,
+                IsActive = group.IsActive,
+                CreatedAt = group.CreatedAt,
+                UpdatedAt = group.UpdatedAt,
+                Options = group.Options
+                    .OrderBy(option => option.DisplayOrder)
+                    .Select(option => new MenuOptionResponse
+                    {
+                        Id = option.Id,
+                        GroupId = option.GroupId,
+                        Name = option.Name,
+                        PriceAdjustment = option.PriceAdjustment,
+                        AdjustmentType = (int)option.AdjustmentType,
+                        MaxQuantity = option.MaxQuantity,
+                        DisplayOrder = option.DisplayOrder,
+                        Allergens = option.Allergens,
+                        MayContainAllergens = option.MayContainAllergens,
+                        CrossContactStatement = option.CrossContactStatement,
+                        IsAvailable = option.IsAvailable,
+                        CreatedAt = option.CreatedAt,
+                        UpdatedAt = option.UpdatedAt
+                    })
+                    .ToList()
+            })
+            .ToList()
+    };
+
+    /// <summary>The same projection, for an item already in memory rather than in a query.</summary>
+    private static readonly Func<MenuItem, MenuItemResponse> ToResponseInMemory = ToResponse.Compile();
+
+    /// <summary>
+    /// The item's version. An item that has never been edited has no <c>UpdatedAt</c>, and treating
+    /// that as "no version to check" would leave every newly created item unprotected — which is
+    /// exactly when two people are most likely to be filling in the same new dish.
+    /// </summary>
+    private static DateTime VersionOf(MenuItem item) => item.UpdatedAt ?? item.CreatedAt;
+
+    /// <summary>
+    /// True when the row has moved on since the editor loaded it.
+    ///
+    /// <para>
+    /// Compared to the millisecond rather than exactly: the value makes a round trip through JSON
+    /// and back, and a comparison tight enough to fail on a rounding difference would reject every
+    /// save. A millisecond is far shorter than the gap between two people pressing Save, and the
+    /// database's own microsecond resolution is what separates two saves that genuinely race.
+    /// </para>
+    /// </summary>
+    private static bool WasChangedElsewhere(MenuItem item, DateTime expectedUpdatedAt) =>
+        Math.Abs((VersionOf(item) - expectedUpdatedAt).TotalMilliseconds) > 1;
+
+    /// <summary>
+    /// Why this restaurant cannot be charged this price, or null when it can. Reads the currency
+    /// from the restaurant rather than assuming AUD, because what counts as a payable fraction is a
+    /// property of the currency and not of the menu.
+    /// </summary>
+    private async Task<string?> DescribePriceProblemAsync(
+        Guid restaurantId,
+        decimal price,
+        CancellationToken cancellationToken)
+    {
+        var currency = await _dbContext.Restaurants
+            .AsNoTracking()
+            .Where(restaurant => restaurant.Id == restaurantId)
+            .Select(restaurant => restaurant.Currency)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return CurrencyPrecision.DescribeProblem(price, currency, "Price");
+    }
+
     private async Task<MenuItemResponse?> FindItemResponseAsync(
         Guid id,
         CancellationToken cancellationToken)
@@ -929,66 +1174,7 @@ public class AdminMenuItemsController : ControllerBase
         return await _dbContext.MenuItems
             .AsNoTracking()
             .Where(item => item.Id == id)
-            .Select(item => new MenuItemResponse
-            {
-                Id = item.Id,
-                RestaurantId = item.RestaurantId,
-                CategoryId = item.CategoryId,
-                CategoryName = item.Category != null ? item.Category.Name : string.Empty,
-                Name = item.Name,
-                Description = item.Description,
-                Price = item.Price,
-                ImageUrl = item.ImageUrl,
-                IsAvailable = item.IsAvailable,
-                IsSoldOut = item.IsSoldOut,
-                IsWatched = item.IsWatched,
-                StockQuantity = item.StockQuantity,
-                IsVegetarian = item.IsVegetarian,
-                IsVegan = item.IsVegan,
-                IsGlutenFree = item.IsGlutenFree,
-                IsHalal = item.IsHalal,
-                Allergens = item.Allergens,
-                SpiceLevel = item.SpiceLevel,
-                ServingSize = item.ServingSize,
-                Calories = item.Calories,
-                IsPopular = item.IsPopular,
-                IsRecommended = item.IsRecommended,
-                DisplayOrder = item.DisplayOrder,
-                CreatedAt = item.CreatedAt,
-                UpdatedAt = item.UpdatedAt,
-                OptionGroups = item.OptionGroups
-                    .OrderBy(group => group.DisplayOrder)
-                    .Select(group => new MenuOptionGroupResponse
-                    {
-                        Id = group.Id,
-                        MenuItemId = group.MenuItemId,
-                        Name = group.Name,
-                        IsRequired = group.IsRequired,
-                        MinSelections = group.MinSelections,
-                        MaxSelections = group.MaxSelections,
-                        DisplayOrder = group.DisplayOrder,
-                        IsActive = group.IsActive,
-                        CreatedAt = group.CreatedAt,
-                        UpdatedAt = group.UpdatedAt,
-                        Options = group.Options
-                            .OrderBy(option => option.DisplayOrder)
-                            .Select(option => new MenuOptionResponse
-                            {
-                                Id = option.Id,
-                                GroupId = option.GroupId,
-                                Name = option.Name,
-                                PriceAdjustment = option.PriceAdjustment,
-                                AdjustmentType = (int)option.AdjustmentType,
-                                MaxQuantity = option.MaxQuantity,
-                                DisplayOrder = option.DisplayOrder,
-                                IsAvailable = option.IsAvailable,
-                                CreatedAt = option.CreatedAt,
-                                UpdatedAt = option.UpdatedAt
-                            })
-                            .ToList()
-                    })
-                    .ToList()
-            })
+            .Select(ToResponse)
             .FirstOrDefaultAsync(cancellationToken);
     }
 
@@ -1105,6 +1291,38 @@ public class AdminMenuItemsController : ControllerBase
         return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 
+    /// <summary>
+    /// When the allergen information was last actually supplied. Saving an item with all three
+    /// allergen fields empty must leave this null: a timestamp on empty information reads as
+    /// "checked, nothing to declare" when the truth is "nobody has checked", and it is shown to
+    /// customers. Unchanged information keeps its original timestamp rather than being refreshed
+    /// by an edit to the price or the photo.
+    /// </summary>
+    private static DateTime? ResolveAllergenVerifiedAt(
+        string? allergens,
+        string? mayContainAllergens,
+        string? crossContactStatement,
+        string? previousAllergens = null,
+        string? previousMayContainAllergens = null,
+        string? previousCrossContactStatement = null,
+        DateTime? previousVerifiedAt = null)
+    {
+        var hasAllergenInformation = allergens is not null
+            || mayContainAllergens is not null
+            || crossContactStatement is not null;
+
+        if (!hasAllergenInformation)
+        {
+            return null;
+        }
+
+        var unchanged = string.Equals(allergens, previousAllergens, StringComparison.Ordinal)
+            && string.Equals(mayContainAllergens, previousMayContainAllergens, StringComparison.Ordinal)
+            && string.Equals(crossContactStatement, previousCrossContactStatement, StringComparison.Ordinal);
+
+        return unchanged && previousVerifiedAt.HasValue ? previousVerifiedAt : DateTime.UtcNow;
+    }
+
     private bool IsS3StorageEnabled()
     {
         return string.Equals(_storageOptions.Provider, "S3", StringComparison.OrdinalIgnoreCase) &&
@@ -1188,68 +1406,14 @@ public class AdminMenuItemsController : ControllerBase
         return true;
     }
 
+    /// <summary>
+    /// After a write, where the category name is known but the navigation may not be loaded.
+    /// </summary>
     private static MenuItemResponse MapToResponse(MenuItem item, string categoryName)
     {
-        return new MenuItemResponse
-        {
-            Id = item.Id,
-            RestaurantId = item.RestaurantId,
-            CategoryId = item.CategoryId,
-            CategoryName = categoryName,
-            Name = item.Name,
-            Description = item.Description,
-            Price = item.Price,
-            ImageUrl = item.ImageUrl,
-            IsAvailable = item.IsAvailable,
-            IsSoldOut = item.IsSoldOut,
-            IsWatched = item.IsWatched,
-            StockQuantity = item.StockQuantity,
-            IsVegetarian = item.IsVegetarian,
-            IsVegan = item.IsVegan,
-            IsGlutenFree = item.IsGlutenFree,
-            IsHalal = item.IsHalal,
-            Allergens = item.Allergens,
-            SpiceLevel = item.SpiceLevel,
-            ServingSize = item.ServingSize,
-            Calories = item.Calories,
-            IsPopular = item.IsPopular,
-            IsRecommended = item.IsRecommended,
-            DisplayOrder = item.DisplayOrder,
-            CreatedAt = item.CreatedAt,
-            UpdatedAt = item.UpdatedAt,
-            OptionGroups = item.OptionGroups
-                .OrderBy(group => group.DisplayOrder)
-                .Select(group => new MenuOptionGroupResponse
-                {
-                    Id = group.Id,
-                    MenuItemId = group.MenuItemId,
-                    Name = group.Name,
-                    IsRequired = group.IsRequired,
-                    MinSelections = group.MinSelections,
-                    MaxSelections = group.MaxSelections,
-                    DisplayOrder = group.DisplayOrder,
-                    IsActive = group.IsActive,
-                    CreatedAt = group.CreatedAt,
-                    UpdatedAt = group.UpdatedAt,
-                    Options = group.Options
-                        .OrderBy(option => option.DisplayOrder)
-                        .Select(option => new MenuOptionResponse
-                        {
-                            Id = option.Id,
-                            GroupId = option.GroupId,
-                            Name = option.Name,
-                            PriceAdjustment = option.PriceAdjustment,
-                            AdjustmentType = (int)option.AdjustmentType,
-                            MaxQuantity = option.MaxQuantity,
-                            DisplayOrder = option.DisplayOrder,
-                            IsAvailable = option.IsAvailable,
-                            CreatedAt = option.CreatedAt,
-                            UpdatedAt = option.UpdatedAt
-                        })
-                        .ToList()
-                })
-                .ToList()
-        };
+        var response = ToResponseInMemory(item);
+        response.CategoryName = categoryName;
+        return response;
     }
 
     private static object SnapshotItem(MenuItem item) => new

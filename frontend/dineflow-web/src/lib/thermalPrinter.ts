@@ -1,9 +1,9 @@
 import qz from 'qz-tray'
 import { getStoredToken, refreshAccessToken, type AdminOrder } from '@/api/auth'
 import { recordPrinterDiagnostic } from '@/lib/printerDiagnostics'
+import { formatReceiptMoney, type ReceiptDocument } from '@/lib/receipt'
 import { formatServiceCode } from '@/lib/serviceCode'
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 const printerBridgeBaseUrl = (
   import.meta.env.VITE_PRINTER_BRIDGE_URL || 'http://127.0.0.1:17891'
 ).replace(/\/$/, '')
@@ -163,7 +163,7 @@ export const defaultThermalPrinterSettings: ThermalPrinterSettings = {
   paperWidth: '80mm',
   cutPaper: true,
   beepOnPrint: false,
-  autoPrintNewOrders: false,
+  autoPrintNewOrders: true,
   qzTargetType: 'printer',
   qzEncoding: 'UTF-8',
   qzPrinterName: '',
@@ -288,16 +288,188 @@ export function buildEscPosKitchenTicket(
   return `${lines.join('\n')}\n`
 }
 
-export function encodeEscPosKitchenTicket(
-  ticket: KitchenTicket,
+/**
+ * A customer receipt is a different document from a kitchen ticket: it has to carry the
+ * supplier's identity and ABN, the date of supply, per-line prices, and the GST position.
+ * Printing it through the kitchen layout would hand the customer a docket headed
+ * "KITCHEN TICKET" with none of that on it.
+ */
+export function buildEscPosReceipt(
+  receipt: ReceiptDocument,
+  settings: Pick<ThermalPrinterSettings, 'paperWidth' | 'cutPaper' | 'beepOnPrint'>,
+): string {
+  const columns = settings.paperWidth === '58mm' ? 32 : 42
+  const separator = '-'.repeat(columns)
+  const centred = (value: string) => escposAlignCenter + value + escposAlignLeft
+  const supplierLines = [
+    receipt.supplier.legalBusinessName
+      && receipt.supplier.legalBusinessName !== receipt.supplier.restaurantName
+        ? receipt.supplier.legalBusinessName
+        : null,
+    receipt.supplier.abn ? `ABN ${receipt.supplier.abn}` : null,
+    receipt.supplier.address,
+    receipt.supplier.phone,
+  ].filter((value): value is string => Boolean(value && value.trim()))
+
+  const lines: string[] = [
+    escposInit + (settings.beepOnPrint ? escposBeep : ''),
+    escposAlignCenter + escposBoldOn + receipt.documentTitle.toUpperCase() + escposBoldOff,
+    escposSizeDouble + receipt.code + escposSizeNormal,
+    escposBoldOn + receipt.supplier.restaurantName + escposBoldOff,
+  ]
+
+  for (const supplierLine of supplierLines) {
+    for (const wrapped of wrapText(supplierLine, columns)) {
+      lines.push(wrapped)
+    }
+  }
+
+  lines.push(receipt.scopeLabel.toUpperCase() + escposAlignLeft, separator)
+
+  for (const meta of receipt.meta) {
+    lines.push(twoColumn(meta.label, meta.value, columns))
+  }
+
+  lines.push(separator)
+
+  for (const item of receipt.items) {
+    // The headline amount is the dish's own price; each priced extra gets its own money line so
+    // the customer can see what it added, with a line total to close the arithmetic.
+    const price = formatReceiptMoney(item.baseAmount ?? item.totalPrice, receipt.currency)
+    const itemPrefix = `${item.quantity}X`
+    const itemIndent = ' '.repeat(Math.max(0, itemPrefix.length + 2))
+    // Reserve the price column so a long dish name cannot push the amount off the paper.
+    const nameColumns = Math.max(8, columns - itemIndent.length - price.length - 1)
+    const wrappedName = wrapText(item.name, nameColumns)
+
+    lines.push(escposBoldOn + twoColumnRaw(
+      `${itemPrefix}  ${wrappedName[0] ?? item.name}`,
+      price,
+      columns,
+    ) + escposBoldOff)
+    for (const extraNameLine of wrappedName.slice(1)) {
+      lines.push(escposBoldOn + `${itemIndent}${extraNameLine}` + escposBoldOff)
+    }
+
+    for (const group of item.optionGroups) {
+      for (const optionLine of wrapText(
+        `${group.groupName}: ${group.options.join(', ')}`,
+        columns - itemIndent.length,
+      )) {
+        lines.push(`${itemIndent}${optionLine}`)
+      }
+    }
+
+    for (const modifier of item.modifiers) {
+      const modifierAmount = formatReceiptMoney(modifier.amount, receipt.currency)
+      const label = `${modifier.amount > 0 ? '+' : ''}${modifier.label}`
+      lines.push(itemIndent + twoColumnRaw(
+        label,
+        modifierAmount,
+        columns - itemIndent.length,
+      ))
+    }
+
+    if (item.note) {
+      for (const noteLine of wrapText(`Note: ${item.note}`, columns - itemIndent.length)) {
+        lines.push(`${itemIndent}${noteLine}`)
+      }
+    }
+
+    if (item.modifiers.length > 0) {
+      lines.push(itemIndent + twoColumnRaw(
+        'Line total',
+        formatReceiptMoney(item.totalPrice, receipt.currency),
+        columns - itemIndent.length,
+      ))
+    }
+  }
+
+  lines.push(
+    separator,
+    escposBoldOn + twoColumn(
+      'TOTAL',
+      formatReceiptMoney(receipt.totalAmount, receipt.currency),
+      columns,
+    ) + escposBoldOff,
+  )
+
+  if (receipt.gstAmount !== null) {
+    lines.push(twoColumn(
+      'GST INCLUDED',
+      formatReceiptMoney(receipt.gstAmount, receipt.currency),
+      columns,
+    ))
+  }
+
+  lines.push(
+    twoColumn('AMOUNT DUE', formatReceiptMoney(receipt.amountDue, receipt.currency), columns),
+    separator,
+  )
+
+  const footerLines = [
+    receipt.gstAmount !== null ? 'Total price includes GST.' : null,
+    receipt.surchargeNotice,
+    receipt.refundContactEmail ? `Refund enquiries: ${receipt.refundContactEmail}` : null,
+    'Thank you',
+  ].filter((value): value is string => Boolean(value && value.trim()))
+
+  for (const footerLine of footerLines) {
+    for (const wrapped of wrapText(footerLine, columns)) {
+      lines.push(centred(wrapped))
+    }
+  }
+
+  lines.push('\n\n')
+
+  if (settings.cutPaper) {
+    lines.push(gs + 'V' + '\x41' + '\x00')
+  }
+
+  return `${lines.join('\n')}\n`
+}
+
+/** What a thermal transport is being asked to print. */
+export type ThermalDocument =
+  | { kind: 'kitchen'; ticket: KitchenTicket }
+  | { kind: 'receipt'; receipt: ReceiptDocument }
+
+export function buildEscPosDocument(
+  job: ThermalDocument,
+  settings: Pick<ThermalPrinterSettings, 'paperWidth' | 'cutPaper' | 'beepOnPrint'>,
+): string {
+  return job.kind === 'receipt'
+    ? buildEscPosReceipt(job.receipt, settings)
+    : buildEscPosKitchenTicket(job.ticket, settings)
+}
+
+export function encodeEscPosDocument(
+  job: ThermalDocument,
   settings: Pick<ThermalPrinterSettings, 'paperWidth' | 'cutPaper' | 'beepOnPrint'>,
 ): Uint8Array {
-  return new TextEncoder().encode(buildEscPosKitchenTicket(ticket, settings))
+  return new TextEncoder().encode(buildEscPosDocument(job, settings))
+}
+
+/** A label for logs and toasts — the order number, or the table code for a merged bill. */
+export function describeThermalDocument(job: ThermalDocument): string {
+  return job.kind === 'receipt' ? job.receipt.code : job.ticket.orderNumber
+}
+
+/** When the underlying order or bill was raised, used for print-latency diagnostics. */
+function thermalDocumentCreatedAt(job: ThermalDocument): Date {
+  return job.kind === 'receipt' ? job.receipt.issuedAt : job.ticket.createdAt
 }
 
 /** Why a QZ Tray operation failed, so the UI can show the right guidance
  * (e.g. a download link when the desktop app is missing) instead of a raw error. */
-export type QzTrayErrorReason = 'not-loaded' | 'not-running' | 'no-printer' | 'printer-unavailable' | 'print-failed'
+export type QzTrayErrorReason =
+  | 'not-loaded'
+  | 'not-running'
+  | 'no-printer'
+  | 'printer-unavailable'
+  | 'print-failed'
+  /** The request could not be signed, so it was never sent. See {@link requestSignature}. */
+  | 'not-signed'
 
 export class QzTrayError extends Error {
   readonly reason: QzTrayErrorReason
@@ -443,48 +615,84 @@ function configureQzDiagnostics(client: typeof qz): void {
 /** Wire QZ Tray's trust chain to the backend: the deployment certificate comes
  * from `GET /api/print/certificate` and each request is signed server-side via
  * `POST /api/print/sign`, so requests are no longer "anonymous" in QZ's prompt.
- * When the backend has no certificate configured, both hooks fall back to the
- * previous anonymous behaviour (QZ prompts, cannot be remembered). */
+ * Both hooks fail closed — see the notes on each. */
 function configureQzSecurity(client: typeof qz): void {
   if (qzSecurityConfigured) {
     return
   }
   qzSecurityConfigured = true
 
-  client.security.setCertificatePromise((resolve, reject) => {
-    fetch(`${apiBaseUrl}/api/print/certificate`)
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(`Certificate request failed with HTTP ${response.status}`)
-        }
-        return response.text()
-      })
-      .then(resolve)
-      .catch(reject)
-  })
+  client.security.setCertificatePromise(
+    (resolve, reject) => {
+      fetch('/api/print/certificate')
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error(`Certificate request failed with HTTP ${response.status}`)
+          }
+          return response.text()
+        })
+        .then(resolve)
+        .catch(reject)
+    },
+    // Without this qz-tray's default is to swallow the failure and connect with
+    // `certificate: null` — an anonymous connection, which is the other way to arrive at QZ's
+    // native "Cannot verify trust" dialog. It cannot be remembered either, because there is no
+    // certificate for QZ to remember it against. Refusing the connection instead keeps the
+    // failure inside DineFlow, where the reason can be shown and the certificate fixed.
+    { rejectOnFailure: true },
+  )
 
   client.security.setSignatureAlgorithm('SHA512')
 
   // NOTE: qz-tray 2.2.x requires the resolver-factory form here — it passes the
   // factory's return value to `new Promise(...)`, so returning a Promise directly
   // throws "Promise resolver is not a function" and every signature fails.
-  client.security.setSignaturePromise((dataToSign: string) => (resolve) => {
-    void requestSignature(dataToSign).then(resolve)
+  //
+  // Rejecting matters as much as resolving. qz-tray does `obj.signature = signature || ""` and
+  // sends the request either way, so resolving with an empty string puts an *unsigned* request on
+  // the wire — which is precisely what makes QZ raise "Cannot verify trust — Invalid Signature",
+  // and why "Remember this decision" can never silence it: QZ has nothing to remember the request
+  // by. Its catch branch instead rejects the caller's promise and drops the call, so nothing
+  // unsigned ever reaches QZ.
+  client.security.setSignaturePromise((dataToSign: string) => (resolve, reject) => {
+    void requestSignature(dataToSign).then(resolve, reject)
   })
 }
 
-async function requestSignature(dataToSign: string, hasRetried = false): Promise<string> {
+/**
+ * Signs one QZ request through the backend, or throws.
+ *
+ * <p>
+ * Every failure here used to end in `return ''`, and an empty signature is not a refusal — qz-tray
+ * sends the request anyway, unsigned, and QZ answers with the native "Cannot verify trust" prompt.
+ * Staff saw it appear at random on a machine whose certificate was installed and chained correctly,
+ * because the certificate was never the thing in question: individual requests were arriving with
+ * `signature: ""` while their neighbours carried a full SHA512 signature and passed silently.
+ * </p>
+ *
+ * <p>
+ * So a failure throws, and the caller's request is dropped rather than downgraded. A print that
+ * cannot be signed fails inside DineFlow, where the reason can be shown, instead of becoming a
+ * modal dialog from another application that the customer-facing till has no way to explain.
+ * </p>
+ */
+export async function requestSignature(dataToSign: string, hasRetried = false): Promise<string> {
   const token = getStoredToken()
 
   if (!token) {
-    // No auth token → the sign endpoint (staff-only) would 401. Surface it so
-    // the cause is obvious instead of a silent "Invalid Signature" in QZ.
-    console.error('[QZ] Cannot sign print request: not signed in. Log in as staff, then reconnect QZ.')
-    return ''
+    // Signing is staff-only, so there is nothing to send. Refusing here also covers the window
+    // after a refresh in which QZ has reconnected and started discovering printers before the
+    // session is back.
+    throw new QzTrayError(
+      'not-signed',
+      'Not signed in, so the print request could not be signed. Sign in as staff and try again.',
+    )
   }
 
+  let response: Response
+
   try {
-    const response = await fetch(`${apiBaseUrl}/api/print/sign`, {
+    response = await fetch('/api/print/sign', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -492,35 +700,42 @@ async function requestSignature(dataToSign: string, hasRetried = false): Promise
       },
       body: JSON.stringify({ request: dataToSign }),
     })
-
-    if (!response.ok) {
-      // The access token had expired — this is exactly the "printed a moment
-      // after the staff page had been idle" case that used to surface as a
-      // confusing QZ "Invalid Signature" prompt. Silently refresh and sign
-      // again once before giving up.
-      if ((response.status === 401 || response.status === 403) && !hasRetried) {
-        const refreshed = await refreshAccessToken()
-        if (refreshed) {
-          return requestSignature(dataToSign, true)
-        }
-      }
-
-      const detail = response.status === 401 || response.status === 403
-        ? 'not authorized — your session may have expired; log out and back in as staff.'
-        : `HTTP ${response.status}.`
-      throw new Error(`sign endpoint ${detail}`)
-    }
-
-    const payload = await response.json() as { signature?: string }
-    if (!payload.signature) {
-      console.error('[QZ] Sign endpoint returned no signature — check QZ_PRIVATE_KEY_PEM_B64 on the server.')
-    }
-    return payload.signature ?? ''
   } catch (error) {
-    // Fall back to an unsigned request: QZ prompts instead of failing the print.
-    console.error('[QZ] Signing request failed:', error instanceof Error ? error.message : error)
-    return ''
+    throw new QzTrayError(
+      'not-signed',
+      'DineFlow could not be reached to sign the print request.',
+      { cause: error },
+    )
   }
+
+  if (!response.ok) {
+    // The access token had expired — this is exactly the "printed a moment after the staff page
+    // had been idle" case. Silently refresh and sign again once before giving up.
+    if ((response.status === 401 || response.status === 403) && !hasRetried) {
+      const refreshed = await refreshAccessToken()
+      if (refreshed) {
+        return requestSignature(dataToSign, true)
+      }
+    }
+
+    throw new QzTrayError(
+      'not-signed',
+      response.status === 401 || response.status === 403
+        ? 'Your session has expired, so the print request could not be signed. Sign in again.'
+        : `DineFlow could not sign the print request (HTTP ${response.status}).`,
+    )
+  }
+
+  const payload = await response.json() as { signature?: string }
+
+  if (!payload.signature) {
+    throw new QzTrayError(
+      'not-signed',
+      'DineFlow returned no signature for the print request. Check the printing certificate configuration.',
+    )
+  }
+
+  return payload.signature
 }
 
 const qzOverrideCertFileName = 'override.crt'
@@ -536,7 +751,7 @@ export function canManageQzTrustCertificate(): boolean {
 }
 
 async function fetchQzCertificatePem(): Promise<string> {
-  const response = await fetch(`${apiBaseUrl}/api/print/certificate`)
+  const response = await fetch('/api/print/certificate')
 
   if (!response.ok) {
     throw new Error('The QZ signing certificate is not configured on the server.')
@@ -596,7 +811,34 @@ export async function downloadQzTrustCertificate(): Promise<void> {
   }
 }
 
+/**
+ * Whether DineFlow can sign QZ requests right now.
+ *
+ * <p>
+ * Signing is staff-only and goes through the backend, so between a page load and the session being
+ * restored — and after a session expires — there is a window where no request can be signed. Opening
+ * a connection during that window is what starts printer discovery, and discovery is signed: the
+ * calls either fail one by one or, before signing failures were made to fail closed, reached QZ
+ * unsigned and produced the native "Invalid Signature" dialog.
+ * </p>
+ */
+function canSignQzRequests(): boolean {
+  // The same test requestSignature makes, so the gate and the signing cannot disagree about what
+  // counts as signed in.
+  return Boolean(getStoredToken())
+}
+
 async function connectQzTrayInternal(context: string): Promise<void> {
+  // Checked before connecting rather than at the first signed call: connecting is what sets
+  // discovery going, and a connection that cannot sign has nothing useful it can do.
+  if (!canSignQzRequests()) {
+    recordPrinterDiagnostic('qz_connect_blocked_unsigned', { context })
+    throw new QzTrayError(
+      'not-signed',
+      'Not signed in, so DineFlow cannot sign printer requests. Sign in as staff to use the kitchen printer.',
+    )
+  }
+
   const client = getQzClient()
   configureQzSecurity(client)
   configureQzDiagnostics(client)
@@ -1220,6 +1462,127 @@ export async function checkQzPrinterHealth(printerName: string, timeoutMs = 2_50
   })
 }
 
+/**
+ * Whether the configured printer can currently be reached.
+ *
+ * <p>FS-021. The QZ Tray status only describes the websocket between this page and the QZ desktop
+ * app, both of which live on the same machine. It stays "connected" while the laptop is carried
+ * away from the shop, the network printer is unplugged, or the USB cable is pulled — none of which
+ * it can see. A restaurant reading that status has no reason to suspect tickets are going nowhere,
+ * which is exactly how a paid order ends up with no docket in the kitchen.</p>
+ *
+ * <p>So this probes the printer itself, per transport, and is safe to call on a timer: it opens
+ * nothing it does not close and never throws.</p>
+ */
+export type PrinterReadiness = {
+  state: 'ready' | 'unreachable' | 'not-configured' | 'unknown'
+  /** Short reason, shown to staff when the printer is not ready. */
+  detail: string
+  checkedAt: number
+}
+
+/**
+ * The per-transport probes, injectable so the readiness rules can be exercised without a printer.
+ * Intra-module calls bypass any module mock, so the seam has to be a real parameter.
+ */
+export type PrinterProbes = {
+  isQzConnected: () => boolean
+  listPrinters: () => Promise<string[]>
+  listSerialPorts: () => Promise<string[]>
+  probeNetwork: (host: string, port: number, timeoutMs?: number) => Promise<boolean>
+  checkHealth: (printerName: string) => Promise<QzPrinterHealth>
+  getSerialSession: () => unknown
+}
+
+const defaultPrinterProbes: PrinterProbes = {
+  isQzConnected: () => isQzTrayConnected(),
+  listPrinters: () => listQzTrayPrinters(),
+  listSerialPorts: () => listQzSerialPorts(),
+  probeNetwork: (host, port, timeoutMs) => probeQzNetworkPrinter(host, port, timeoutMs),
+  checkHealth: (printerName) => checkQzPrinterHealth(printerName),
+  getSerialSession: () => webSerialStore.__dineflowSerialSession,
+}
+
+export async function probePrinterReadiness(
+  settings: ThermalPrinterSettings,
+  probes: PrinterProbes = defaultPrinterProbes,
+): Promise<PrinterReadiness> {
+  const checkedAt = Date.now()
+  const ready = (detail: string): PrinterReadiness => ({ state: 'ready', detail, checkedAt })
+  const unreachable = (detail: string): PrinterReadiness => ({ state: 'unreachable', detail, checkedAt })
+  const notConfigured = (detail: string): PrinterReadiness => ({ state: 'not-configured', detail, checkedAt })
+
+  try {
+    switch (settings.mode) {
+      case 'browser':
+        // The browser print dialog is always available; there is nothing to reach.
+        return ready('Browser printing')
+
+      case 'qz-tray': {
+        if (!probes.isQzConnected()) {
+          return unreachable('QZ Tray is not running')
+        }
+
+        if (settings.qzTargetType === 'network') {
+          const host = settings.qzNetworkHost.trim()
+          if (!host) return notConfigured('No printer address set')
+
+          return await probes.probeNetwork(host, settings.qzNetworkPort, 4_000)
+            ? ready(`${host}:${settings.qzNetworkPort} responded`)
+            : unreachable(`${host}:${settings.qzNetworkPort} did not respond`)
+        }
+
+        if (settings.qzTargetType === 'serial') {
+          const port = settings.qzSerialPort.trim()
+          if (!port) return notConfigured('No COM port selected')
+
+          const ports = await probes.listSerialPorts()
+          return ports.includes(port)
+            ? ready(`${port} is present`)
+            : unreachable(`${port} is no longer available`)
+        }
+
+        const printerName = settings.qzPrinterName.trim()
+        if (!printerName) return notConfigured('No printer selected')
+
+        // A queue that has vanished is the strongest signal available: an unplugged USB printer
+        // disappears from the list entirely, while a spooler status may never be reported at all.
+        const printers = await probes.listPrinters()
+        if (!printers.includes(printerName)) {
+          return unreachable(`"${printerName}" is no longer installed`)
+        }
+
+        const health = await probes.checkHealth(printerName)
+        return health.ok
+          ? ready(`"${printerName}" is ready`)
+          : unreachable(`"${printerName}" reports ${health.status}`)
+      }
+
+      case 'web-serial': {
+        const session = probes.getSerialSession()
+        return session
+          ? ready('Serial port open')
+          : unreachable('No serial port is open — select the port again')
+      }
+
+      case 'web-usb':
+        return settings.usbVendorId.trim() && settings.usbProductId.trim()
+          ? { state: 'unknown', detail: 'WebUSB is only verifiable by printing', checkedAt }
+          : notConfigured('No USB device selected')
+
+      case 'web-bluetooth':
+        return settings.bleDeviceName.trim()
+          ? { state: 'unknown', detail: 'Bluetooth is only verifiable by printing', checkedAt }
+          : notConfigured('No Bluetooth device selected')
+
+      default:
+        return { state: 'unknown', detail: 'Unrecognised printer mode', checkedAt }
+    }
+  } catch (error) {
+    return unreachable(error instanceof Error ? error.message : 'The printer could not be reached')
+  }
+}
+
 /** Probe a network printer by opening a raw TCP socket through QZ Tray. Resolves
  * true when the host accepts a connection on `port` (RAW/9100) within the
  * timeout, false otherwise. Never throws — used for the settings "Test
@@ -1432,7 +1795,7 @@ export async function clearQzPrinterQueue(printerName?: string): Promise<void> {
   )
 }
 
-export async function printKitchenTicketWithQzTray(ticket: KitchenTicket, settings: ThermalPrinterSettings): Promise<void> {
+export async function printThermalDocumentWithQzTray(job: ThermalDocument, settings: ThermalPrinterSettings): Promise<void> {
   const client = getQzClient()
 
   // Serial target (e.g. Bluetooth outgoing COM): QZ owns the connection and keeps
@@ -1448,7 +1811,7 @@ export async function printKitchenTicketWithQzTray(ticket: KitchenTicket, settin
     await connectQzTray()
 
     const baudRate = settings.serialBaudRate || defaultThermalPrinterSettings.serialBaudRate
-    const payload = buildEscPosKitchenTicket(ticket, settings)
+    const payload = buildEscPosDocument(job, settings)
     const sendOnce = async () => {
       await ensureQzSerialPortOpen(client, serialPort, baudRate, settings.qzEncoding)
       await client.serial.sendData(serialPort, payload)
@@ -1493,7 +1856,7 @@ export async function printKitchenTicketWithQzTray(ticket: KitchenTicket, settin
     await connectQzTray('network-print')
 
     const networkPort = settings.qzNetworkPort || defaultThermalPrinterSettings.qzNetworkPort
-    const payload = buildEscPosKitchenTicket(ticket, settings)
+    const payload = buildEscPosDocument(job, settings)
     const printStartedAt = Date.now()
 
     // Queued so this printer only ever has one connection open at a time — see
@@ -1503,11 +1866,11 @@ export async function printKitchenTicketWithQzTray(ticket: KitchenTicket, settin
       const previousPrintResolvedAt = lastNetworkPrintResolvedAt.get(target)
       let reusedConnection = false
       recordPrinterDiagnostic('qz_network_print_started', {
-        orderNumber: ticket.orderNumber,
+        orderNumber: describeThermalDocument(job),
         target,
         payloadBytes: new TextEncoder().encode(payload).byteLength,
         idleBeforePrintMs: previousPrintResolvedAt === undefined ? null : Date.now() - previousPrintResolvedAt,
-        idleSinceTicketCreatedMs: Math.max(Date.now() - ticket.createdAt.getTime(), 0),
+        idleSinceTicketCreatedMs: Math.max(Date.now() - thermalDocumentCreatedAt(job).getTime(), 0),
       })
 
       const sendOnce = async () => {
@@ -1530,7 +1893,7 @@ export async function printKitchenTicketWithQzTray(ticket: KitchenTicket, settin
         await sendOnce()
       } catch (firstError) {
         recordPrinterDiagnostic('qz_network_socket_reconnecting', {
-          orderNumber: ticket.orderNumber,
+          orderNumber: describeThermalDocument(job),
           target,
           message: firstError instanceof Error ? firstError.message : String(firstError),
         })
@@ -1541,14 +1904,14 @@ export async function printKitchenTicketWithQzTray(ticket: KitchenTicket, settin
 
       lastNetworkPrintResolvedAt.set(target, Date.now())
       recordPrinterDiagnostic('qz_network_print_resolved', {
-        orderNumber: ticket.orderNumber,
+        orderNumber: describeThermalDocument(job),
         target,
         durationMs: Date.now() - printStartedAt,
         reusedConnection,
       })
     }).catch((error: unknown) => {
       recordPrinterDiagnostic('qz_network_print_failed', {
-        orderNumber: ticket.orderNumber,
+        orderNumber: describeThermalDocument(job),
         target: `${networkHost}:${networkPort}`,
         durationMs: Date.now() - printStartedAt,
         message: error instanceof Error ? error.message : String(error),
@@ -1584,10 +1947,10 @@ export async function printKitchenTicketWithQzTray(ticket: KitchenTicket, settin
 
   try {
     const config = client.configs.create(printerName, {
-      jobName: `Kitchen ${ticket.orderNumber}`,
+      jobName: `${job.kind === 'receipt' ? 'Receipt' : 'Kitchen'} ${describeThermalDocument(job)}`,
       encoding: settings.qzEncoding,
     })
-    await client.print(config, [buildEscPosKitchenTicket(ticket, settings)])
+    await client.print(config, [buildEscPosDocument(job, settings)])
   } catch (error) {
     throw new QzTrayError(
       'print-failed',
@@ -1816,7 +2179,7 @@ export async function testWebSerialConnection(
   }
 }
 
-export async function printKitchenTicketWithWebSerial(ticket: KitchenTicket, settings: ThermalPrinterSettings): Promise<void> {
+export async function printThermalDocumentWithWebSerial(job: ThermalDocument, settings: ThermalPrinterSettings): Promise<void> {
   const baudRate = settings.serialBaudRate || defaultThermalPrinterSettings.serialBaudRate
   const session = await ensureWebSerialSession(baudRate, true)
   if (!session) {
@@ -1824,7 +2187,7 @@ export async function printKitchenTicketWithWebSerial(ticket: KitchenTicket, set
   }
 
   try {
-    await session.writer.write(encodeEscPosKitchenTicket(ticket, settings))
+    await session.writer.write(encodeEscPosDocument(job, settings))
   } catch (error) {
     // The link died (printer slept, went out of range, or powered off). Tear the
     // session down so the next print dials a fresh connection instead of writing
@@ -2014,7 +2377,7 @@ async function writeBleChunk(characteristic: BleCharacteristicLike, chunk: Uint8
   await new Promise((resolve) => window.setTimeout(resolve, 30))
 }
 
-export async function printKitchenTicketWithWebBluetooth(ticket: KitchenTicket, settings: ThermalPrinterSettings): Promise<void> {
+export async function printThermalDocumentWithWebBluetooth(job: ThermalDocument, settings: ThermalPrinterSettings): Promise<void> {
   const bluetooth = (navigator as BluetoothNavigator).bluetooth
 
   if (!bluetooth) {
@@ -2043,7 +2406,7 @@ export async function printKitchenTicketWithWebBluetooth(ticket: KitchenTicket, 
     session = await connectBleDevice(match)
   }
 
-  const payload = encodeEscPosKitchenTicket(ticket, settings)
+  const payload = encodeEscPosDocument(job, settings)
 
   try {
     for (let offset = 0; offset < payload.byteLength; offset += bleChunkSize) {
@@ -2231,7 +2594,7 @@ export async function testWebUsbConnection(
   }
 }
 
-export async function printKitchenTicketWithWebUsb(ticket: KitchenTicket, settings: ThermalPrinterSettings): Promise<void> {
+export async function printThermalDocumentWithWebUsb(job: ThermalDocument, settings: ThermalPrinterSettings): Promise<void> {
   const usb = (navigator as UsbNavigator).usb
 
   if (!usb) {
@@ -2273,7 +2636,7 @@ export async function printKitchenTicketWithWebUsb(ticket: KitchenTicket, settin
 
   try {
     const endpointNumber = getUsbEndpointNumber(device, interfaceNumber, settings.usbEndpointNumber)
-    const payload = encodeEscPosKitchenTicket(ticket, settings)
+    const payload = encodeEscPosDocument(job, settings)
 
     for (let offset = 0; offset < payload.byteLength; offset += 64) {
       await device.transferOut(endpointNumber, payload.slice(offset, offset + 64))
@@ -2379,7 +2742,14 @@ function groupTicketOptions(item: AdminOrder['items'][number]): KitchenTicket['i
   for (const option of item.selectedOptions ?? []) {
     const groupName = option.groupNameSnapshot || 'Options'
     const quantity = option.quantity ?? 1
+    // The kitchen ticket is what the person assembling the plate reads. A modifier that brings its
+    // own allergen has to say so here, not only on the menu the customer saw.
+    const declared = [
+      option.allergensSnapshot?.trim() ? `CONTAINS ${option.allergensSnapshot.trim().toUpperCase()}` : null,
+      option.mayContainAllergensSnapshot?.trim() ? `MAY CONTAIN ${option.mayContainAllergensSnapshot.trim().toUpperCase()}` : null,
+    ].filter(Boolean).join(' / ')
     const label = `${option.optionNameSnapshot}${quantity > 1 ? ` x${quantity}` : ''}`
+      + (declared ? ` [${declared}]` : '')
     grouped.set(groupName, [...(grouped.get(groupName) ?? []), label])
   }
 
@@ -2387,7 +2757,13 @@ function groupTicketOptions(item: AdminOrder['items'][number]): KitchenTicket['i
 }
 
 function twoColumn(label: string, value: string, columns: number): string {
-  const left = label.toUpperCase()
+  return twoColumnRaw(label.toUpperCase(), value, columns)
+}
+
+/** Same layout as twoColumn, but leaves the left side's casing alone — receipt item names
+ *  are read by customers, not shouted across a kitchen. */
+function twoColumnRaw(label: string, value: string, columns: number): string {
+  const left = label
   const right = value.trim()
   const gap = Math.max(1, columns - left.length - right.length)
   return `${left}${' '.repeat(gap)}${right}`

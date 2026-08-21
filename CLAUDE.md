@@ -106,7 +106,7 @@ npm run dev
 - **DTOs** live in `DineFlow.Api/Contracts/<Domain>/` as `*Request.cs` and `*Response.cs`.
 - **Controllers** inject `AppDbContext` and `ILogger<T>` directly — no repository layer for now.
 - **FK strategy**: `MenuCategory` and `AspNetUsers` have real FK constraints to `Restaurants`. `Order.RestaurantId` and `RestaurantTable.RestaurantId` are plain `Guid?` columns with no FK constraint.
-- **Identity seeder** (`IdentitySeeder.cs`) seeds in this order: Roles → Restaurants → Tables → MenuCategories → MenuItems → Orders → Users. Restaurants must be seeded before users because `AspNetUsers` has a FK to `Restaurants`.
+- **Identity seeder** (`IdentitySeeder.cs`) has three entry points with different blast radii: `SeedRolesAsync` (always safe), `SeedPlatformOwnerAsync` (bootstrap owner from `SeedOwner:*`, never rewrites an existing password in Production), and `SeedDemoDataAsync` (throws in Production). Demo seeding order is Restaurants → Tables → MenuCategories → MenuItems → Orders → Users; restaurants must come before users because `AspNetUsers` has a FK to `Restaurants`.
 - **Migrations** live in `DineFlow.Infrastructure/Migrations/` (not `Persistence/Migrations/`).
 
 ### Frontend
@@ -129,6 +129,23 @@ dotnet ef database update --project DineFlow.Infrastructure --startup-project Di
 
 # Drop the database (destructive!)
 dotnet ef database drop --project DineFlow.Infrastructure --startup-project DineFlow.Api
+```
+
+### Startup migrations and seeding
+
+The API migrates and seeds on startup **only outside Production**:
+
+| Setting | Default | Production |
+|---|---|---|
+| `Database__MigrateOnStartup` | `true` outside Production | `false`; run migrations as a release task |
+| `Seed__DemoData` | `true` outside Production | refused, whatever the flag says |
+
+Roles and the `SeedOwner:*` bootstrap owner are seeded in every environment (both idempotent). An
+existing owner's password is never rewritten in Production.
+
+```bash
+# Release task: apply migrations, seed roles and the bootstrap owner, then exit
+dotnet DineFlow.Api.dll --migrate
 ```
 
 ---

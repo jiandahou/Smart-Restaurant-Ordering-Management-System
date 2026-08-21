@@ -1,0 +1,4 @@
+
+# CI test reports and audit output
+TestResults/
+nuget-audit.txt

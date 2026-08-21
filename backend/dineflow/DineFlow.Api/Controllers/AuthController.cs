@@ -5,6 +5,7 @@ using DineFlow.Api.Options;
 using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Api.Contracts.Auth;
+using DineFlow.Api.Compliance;
 using DineFlow.Application.Authentication;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Persistence;
@@ -14,8 +15,10 @@ using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using System.Globalization;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text.Encodings.Web;
@@ -41,6 +44,8 @@ public class AuthController : ControllerBase
     private readonly IJwtTokenService _jwtTokenService;
     private readonly IRefreshTokenService _refreshTokenService;
     private readonly IEmailSender _emailSender;
+    private readonly TransactionalEmailLayout _emailLayout;
+    private readonly StoredImageVerifier _storedImageVerifier;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IOAuthLoginCodeStore _oauthLoginCodeStore;
     private readonly IMfaEmailSetupCodeStore _mfaEmailCodeStore;
@@ -64,6 +69,8 @@ public class AuthController : ControllerBase
         IMfaEmailSetupCodeStore mfaEmailCodeStore,
         IMfaLoginChallengeStore mfaLoginChallengeStore,
         AppDbContext dbContext,
+        TransactionalEmailLayout emailLayout,
+        StoredImageVerifier storedImageVerifier,
         IOptions<EmailOptions> emailOptions,
         IOptions<AvatarStorageOptions> avatarStorageOptions,
         IAmazonS3 s3Client,
@@ -76,6 +83,8 @@ public class AuthController : ControllerBase
         _jwtTokenService = jwtTokenService;
         _refreshTokenService = refreshTokenService;
         _emailSender = emailSender;
+        _emailLayout = emailLayout;
+        _storedImageVerifier = storedImageVerifier;
         _httpClientFactory = httpClientFactory;
         _oauthLoginCodeStore = oauthLoginCodeStore;
         _mfaEmailCodeStore = mfaEmailCodeStore;
@@ -139,6 +148,7 @@ public class AuthController : ControllerBase
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.AuthenticationEmail)]
     [HttpPost("register-customer")]
     public async Task<IActionResult> RegisterCustomer(RegisterRequest request)
     {
@@ -146,6 +156,7 @@ public class AuthController : ControllerBase
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.Authentication)]
     [HttpPost("confirm-email")]
     public async Task<IActionResult> ConfirmEmail(ConfirmEmailRequest request)
     {
@@ -186,10 +197,18 @@ public class AuthController : ControllerBase
             });
         }
 
+        var confirmMfaChallenge = await CreateMfaLoginChallengeIfRequiredAsync(user, HttpContext.RequestAborted);
+
+        if (confirmMfaChallenge is not null)
+        {
+            return confirmMfaChallenge;
+        }
+
         return await BuildAuthenticatedResponseAsync(user, "Email confirmed. You are now signed in.");
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.AuthenticationEmail)]
     [HttpPost("resend-confirmation-email")]
     public async Task<IActionResult> ResendConfirmationEmail(ResendEmailConfirmationRequest request)
     {
@@ -223,6 +242,7 @@ public class AuthController : ControllerBase
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.AuthenticationEmail)]
     [HttpPost("request-magic-link")]
     public async Task<IActionResult> RequestMagicLink(RequestMagicLinkRequest request)
     {
@@ -250,6 +270,7 @@ public class AuthController : ControllerBase
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.AuthenticationEmail)]
     [HttpPost("request-password-reset")]
     public async Task<IActionResult> RequestPasswordReset(RequestPasswordResetRequest request)
     {
@@ -341,7 +362,8 @@ public class AuthController : ControllerBase
         {
             return BadRequest(new
             {
-                message = "MFA verification is required to update your password."
+                message = "MFA verification is required to update your password.",
+                code = MfaVerificationCodes.SensitiveActionRequired
             });
         }
 
@@ -378,6 +400,7 @@ public class AuthController : ControllerBase
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.Authentication)]
     [HttpPost("reset-password")]
     public async Task<IActionResult> ResetPassword(ResetPasswordRequest request)
     {
@@ -439,8 +462,11 @@ public class AuthController : ControllerBase
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.Authentication)]
     [HttpPost("magic-link-login")]
-    public async Task<IActionResult> MagicLinkLogin(MagicLinkLoginRequest request)
+    public async Task<IActionResult> MagicLinkLogin(
+        MagicLinkLoginRequest request,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.UserId) || string.IsNullOrWhiteSpace(request.Token))
         {
@@ -460,6 +486,11 @@ public class AuthController : ControllerBase
             });
         }
 
+        if (await _userManager.IsLockedOutAsync(user))
+        {
+            return LockedOutResponse(await _userManager.GetLockoutEndDateAsync(user));
+        }
+
         var isValidToken = await _userManager.VerifyUserTokenAsync(
             user,
             TokenOptions.DefaultProvider,
@@ -468,18 +499,31 @@ public class AuthController : ControllerBase
 
         if (!isValidToken)
         {
+            // A guessable single-use token is still a credential, so a failed redemption counts
+            // towards the same account lockout as a wrong password.
+            await _userManager.AccessFailedAsync(user);
+
             return BadRequest(new
             {
                 message = "Sign-in link is invalid or expired."
             });
         }
 
+        await _userManager.ResetAccessFailedCountAsync(user);
         await _userManager.UpdateSecurityStampAsync(user);
+
+        var mfaChallengeResponse = await CreateMfaLoginChallengeIfRequiredAsync(user, cancellationToken);
+
+        if (mfaChallengeResponse is not null)
+        {
+            return mfaChallengeResponse;
+        }
 
         return await BuildAuthenticatedResponseAsync(user, "Magic link sign-in successful.");
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.Authentication)]
     [HttpPost("login")]
     public async Task<IActionResult> Login(LoginRequest request)
     {
@@ -493,11 +537,18 @@ public class AuthController : ControllerBase
             });
         }
 
+        // lockoutOnFailure counts the attempt against the account, which is the only control that
+        // survives an attacker rotating source addresses. A success resets the counter.
         var result = await _signInManager.CheckPasswordSignInAsync(
             user,
             request.Password,
-            lockoutOnFailure: false
+            lockoutOnFailure: true
         );
+
+        if (result.IsLockedOut)
+        {
+            return LockedOutResponse(await _userManager.GetLockoutEndDateAsync(user));
+        }
 
         if (!result.Succeeded)
         {
@@ -509,51 +560,31 @@ public class AuthController : ControllerBase
 
         if (!await _userManager.IsEmailConfirmedAsync(user))
         {
-            return Unauthorized(new
+            // The password was right, so this is not a credential problem and saying so is not a
+            // disclosure. No token is issued — the account stays unusable until the address is
+            // confirmed — but the client now has enough to offer a resend instead of a dead end.
+            return StatusCode(StatusCodes.Status403Forbidden, new
             {
-                message = "Please confirm your email before signing in."
+                message = "Confirm your email address before signing in.",
+                code = "email_not_confirmed",
+                email = user.Email
             });
         }
 
-        var mfaSettings = await _dbContext.UserMfaSettings
-            .AsNoTracking()
-            .FirstOrDefaultAsync(settings => settings.UserId == user.Id);
+        var mfaChallengeResponse = await CreateMfaLoginChallengeIfRequiredAsync(
+            user,
+            HttpContext.RequestAborted);
 
-        if (mfaSettings is not null &&
-            mfaSettings.RequireForLogin &&
-            (mfaSettings.TotpEnabled || mfaSettings.EmailEnabled))
+        if (mfaChallengeResponse is not null)
         {
-            var methods = new List<string>();
-            string? emailCode = null;
-
-            if (mfaSettings.TotpEnabled)
-            {
-                methods.Add(MfaMethods.Totp);
-            }
-
-            if (mfaSettings.EmailEnabled)
-            {
-                methods.Add(MfaMethods.Email);
-                emailCode = GenerateSixDigitCode();
-                await SendMfaLoginCodeEmailAsync(user, emailCode);
-            }
-
-            var challengeId = _mfaLoginChallengeStore.Create(user.Id, methods, emailCode);
-
-            return Ok(new
-            {
-                message = "MFA verification is required.",
-                mfaRequired = true,
-                challengeId,
-                methods,
-                preferredMethod = mfaSettings.PreferredMethod
-            });
+            return mfaChallengeResponse;
         }
 
         return await BuildAuthenticatedResponseAsync(user, "Login successful.");
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.TokenLifecycle)]
     [HttpPost("refresh")]
     public async Task<IActionResult> Refresh(RefreshTokenRequest request)
     {
@@ -563,6 +594,18 @@ public class AuthController : ControllerBase
         }
 
         var result = await _refreshTokenService.RotateAsync(request.RefreshToken, GetClientIpAddress());
+
+        // Answered apart from the failures below, and deliberately not as 401: nothing is wrong with
+        // this session. A sibling tab rotated the shared token a moment ago and has already stored
+        // the replacement, so the caller should read that and carry on rather than sign anybody out.
+        if (result.FailureReason == RefreshTokenFailureReason.RotationRace)
+        {
+            return Conflict(new
+            {
+                message = "This session was refreshed in another tab. Retry with the stored token.",
+                retry = true
+            });
+        }
 
         if (!result.Succeeded || result.UserId is null || result.NewRawToken is null)
         {
@@ -613,6 +656,7 @@ public class AuthController : ControllerBase
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.TokenLifecycle)]
     [HttpPost("logout")]
     public async Task<IActionResult> Logout(RefreshTokenRequest request)
     {
@@ -629,12 +673,20 @@ public class AuthController : ControllerBase
 
     [AllowAnonymous]
     [HttpGet("google/login")]
-    public IActionResult GoogleLogin()
+    public IActionResult GoogleLogin(
+        [FromQuery] string? customerTermsVersion,
+        [FromQuery] string? privacyPolicyVersion,
+        [FromQuery] string? returnTo)
     {
         var redirectUrl = Url.Action(nameof(GoogleCallback), "Auth");
         var properties = _signInManager.ConfigureExternalAuthenticationProperties(
             GoogleDefaults.AuthenticationScheme,
             redirectUrl);
+        properties.Items["customerTermsVersion"] = customerTermsVersion ?? string.Empty;
+        properties.Items["privacyPolicyVersion"] = privacyPolicyVersion ?? string.Empty;
+        // Carried through the provider so a customer who signed in from a restaurant menu is handed
+        // back to it. Sanitised on the way out again, not here: what returns is what matters.
+        properties.Items[ExternalReturnToKey] = OAuthReturnPath.Sanitize(returnTo) ?? string.Empty;
 
         return Challenge(properties, GoogleDefaults.AuthenticationScheme);
     }
@@ -671,13 +723,23 @@ public class AuthController : ControllerBase
 
             if (user is null)
             {
+                if (!HasCurrentOAuthLegalConsent(authenticateResult.Properties))
+                {
+                    await HttpContext.SignOutAsync(IdentityConstants.ExternalScheme);
+                    return Redirect(BuildFrontendUrl("/login?oauthError=legal_consent_required"));
+                }
                 user = new ApplicationUser
                 {
                     UserName = email,
                     Email = email,
                     FullName = string.IsNullOrWhiteSpace(fullName) ? email : fullName,
                     EmailConfirmed = true,
-                    CreatedAt = DateTime.UtcNow
+                    CreatedAt = DateTime.UtcNow,
+                    AcceptedCustomerTermsVersion = LegalDocumentVersions.CustomerTerms,
+                    AcknowledgedPrivacyPolicyVersion = LegalDocumentVersions.PrivacyPolicy,
+                    LegalAcceptedAt = DateTime.UtcNow,
+                    LegalAcceptanceIpAddress = GetClientIpAddress(),
+                    LegalAcceptanceUserAgent = Request.Headers.UserAgent.ToString()
                 };
 
                 var createResult = await _userManager.CreateAsync(user);
@@ -757,18 +819,26 @@ public class AuthController : ControllerBase
         await HttpContext.SignOutAsync(IdentityConstants.ExternalScheme);
 
         var code = _oauthLoginCodeStore.CreateCode(user.Id);
+        var returnTo = BuildExternalReturnToQuery(authenticateResult.Properties);
 
-        return Redirect(BuildFrontendUrl($"/oauth/callback?code={Uri.EscapeDataString(code)}&provider=google"));
+        return Redirect(BuildFrontendUrl(
+            $"/oauth/callback?code={Uri.EscapeDataString(code)}&provider=google{returnTo}"));
     }
 
     [AllowAnonymous]
     [HttpGet("facebook/login")]
-    public IActionResult FacebookLogin()
+    public IActionResult FacebookLogin(
+        [FromQuery] string? customerTermsVersion,
+        [FromQuery] string? privacyPolicyVersion,
+        [FromQuery] string? returnTo)
     {
         var redirectUrl = Url.Action(nameof(FacebookCallback), "Auth");
         var properties = _signInManager.ConfigureExternalAuthenticationProperties(
             FacebookDefaults.AuthenticationScheme,
             redirectUrl);
+        properties.Items["customerTermsVersion"] = customerTermsVersion ?? string.Empty;
+        properties.Items["privacyPolicyVersion"] = privacyPolicyVersion ?? string.Empty;
+        properties.Items[ExternalReturnToKey] = OAuthReturnPath.Sanitize(returnTo) ?? string.Empty;
 
         return Challenge(properties, FacebookDefaults.AuthenticationScheme);
     }
@@ -805,13 +875,23 @@ public class AuthController : ControllerBase
 
             if (user is null)
             {
+                if (!HasCurrentOAuthLegalConsent(authenticateResult.Properties))
+                {
+                    await HttpContext.SignOutAsync(IdentityConstants.ExternalScheme);
+                    return Redirect(BuildFrontendUrl("/login?oauthError=legal_consent_required"));
+                }
                 user = new ApplicationUser
                 {
                     UserName = email,
                     Email = email,
                     FullName = string.IsNullOrWhiteSpace(fullName) ? email : fullName,
                     EmailConfirmed = true,
-                    CreatedAt = DateTime.UtcNow
+                    CreatedAt = DateTime.UtcNow,
+                    AcceptedCustomerTermsVersion = LegalDocumentVersions.CustomerTerms,
+                    AcknowledgedPrivacyPolicyVersion = LegalDocumentVersions.PrivacyPolicy,
+                    LegalAcceptedAt = DateTime.UtcNow,
+                    LegalAcceptanceIpAddress = GetClientIpAddress(),
+                    LegalAcceptanceUserAgent = Request.Headers.UserAgent.ToString()
                 };
 
                 var createResult = await _userManager.CreateAsync(user);
@@ -891,13 +971,18 @@ public class AuthController : ControllerBase
         await HttpContext.SignOutAsync(IdentityConstants.ExternalScheme);
 
         var code = _oauthLoginCodeStore.CreateCode(user.Id);
+        var returnTo = BuildExternalReturnToQuery(authenticateResult.Properties);
 
-        return Redirect(BuildFrontendUrl($"/oauth/callback?code={Uri.EscapeDataString(code)}&provider=facebook"));
+        return Redirect(BuildFrontendUrl(
+            $"/oauth/callback?code={Uri.EscapeDataString(code)}&provider=facebook{returnTo}"));
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.Authentication)]
     [HttpPost("oauth/exchange")]
-    public async Task<IActionResult> ExchangeOAuthCode(ExchangeOAuthCodeRequest request)
+    public async Task<IActionResult> ExchangeOAuthCode(
+        ExchangeOAuthCodeRequest request,
+        CancellationToken cancellationToken)
     {
         if (!_oauthLoginCodeStore.TryConsumeCode(request.Code, out var userId))
         {
@@ -915,6 +1000,16 @@ public class AuthController : ControllerBase
             {
                 message = "OAuth sign-in code is invalid."
             });
+        }
+
+        // The same gate as password and magic-link sign-in. Without it "Ask for MFA when this
+        // account signs in" was a setting the provider routes quietly ignored, which is worse than
+        // not offering it: someone who turned it on had no way to find out it did not apply.
+        var mfaChallengeResponse = await CreateMfaLoginChallengeIfRequiredAsync(user, cancellationToken);
+
+        if (mfaChallengeResponse is not null)
+        {
+            return mfaChallengeResponse;
         }
 
         return await BuildAuthenticatedResponseAsync(user, "Sign-in successful.");
@@ -982,15 +1077,14 @@ public class AuthController : ControllerBase
             });
         }
 
-        var nextFullName = request.FullName.Trim();
+        var nextFullNameProblem = AccountFieldLimits.DescribeFullNameProblem(request.FullName);
 
-        if (string.IsNullOrWhiteSpace(nextFullName))
+        if (nextFullNameProblem is not null)
         {
-            return BadRequest(new
-            {
-                message = "Full name is required."
-            });
+            return BadRequest(new { message = nextFullNameProblem });
         }
+
+        var nextFullName = AccountFieldLimits.NormalizeFullName(request.FullName);
 
         var beforeProfile = new
         {
@@ -1210,6 +1304,22 @@ public class AuthController : ControllerBase
             });
         }
 
+        // A presigned upload goes straight to the bucket, so this is the first time we can see the
+        // bytes. Only the head of the object is fetched — enough to tell an image from a disguise.
+        if (!await _storedImageVerifier.IsDeclaredImageAsync(
+                _avatarStorageOptions.Bucket,
+                objectKey,
+                metadata.Headers.ContentType,
+                cancellationToken))
+        {
+            await _storedImageVerifier.DeleteAsync(_avatarStorageOptions.Bucket, objectKey, cancellationToken);
+
+            return BadRequest(new
+            {
+                message = "Uploaded avatar image must be a JPG, PNG, or WebP file."
+            });
+        }
+
         var previousAvatarUrl = user.AvatarUrl;
         user.AvatarUrl = BuildAvatarPublicUrl(objectKey);
         user.UpdatedAt = DateTime.UtcNow;
@@ -1299,6 +1409,21 @@ public class AuthController : ControllerBase
             {
                 message = "Avatar image must be a JPG, PNG, or WebP file."
             });
+        }
+
+        // The content type above is whatever the uploader typed on the request. Read what the file
+        // actually is before storing it under a name that says "image".
+        await using (var header = file.OpenReadStream())
+        {
+            var leadingBytes = await ImageContentSignature.ReadHeaderAsync(header, cancellationToken);
+
+            if (!ImageContentSignature.Matches(leadingBytes, file.ContentType))
+            {
+                return BadRequest(new
+                {
+                    message = "Avatar image must be a JPG, PNG, or WebP file."
+                });
+            }
         }
 
         var webRootPath = GetWebRootPath();
@@ -1416,6 +1541,18 @@ public class AuthController : ControllerBase
             });
         }
 
+        // Changing the address is the account recovery action: every reset link and email code
+        // follows it to the new inbox. The password alone was the only thing standing in front of
+        // it, on an account whose owner asked for more than a password.
+        if (!await ValidateSensitiveActionAsync(user.Id, request.Verification, HttpContext.RequestAborted))
+        {
+            return BadRequest(new
+            {
+                message = "MFA verification is required to change your email address.",
+                code = MfaVerificationCodes.SensitiveActionRequired
+            });
+        }
+
         var existingUser = await _userManager.FindByEmailAsync(newEmail);
 
         if (existingUser is not null)
@@ -1441,6 +1578,11 @@ public class AuthController : ControllerBase
             });
         }
 
+        // The current address is the only one an attacker holding the account has no reason to
+        // watch, so this is the real owner's one chance to notice. Best effort: a warning that
+        // cannot be delivered must not stop a change the account holder legitimately asked for.
+        await TrySendEmailChangeNoticeAsync(user.Email!, newEmail, alreadyChanged: false);
+
         _reportLogWriter.AddAudit(
             "Auth.EmailChangeRequested",
             "User",
@@ -1462,6 +1604,7 @@ public class AuthController : ControllerBase
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.Authentication)]
     [HttpPost("confirm-email-change")]
     public async Task<IActionResult> ConfirmEmailChange(ConfirmEmailChangeRequest request)
     {
@@ -1497,6 +1640,11 @@ public class AuthController : ControllerBase
             });
         }
 
+        // The address and the username are one identity, and Identity writes them in two separate
+        // saves. A failure between the two used to leave the account signing in under the old
+        // username while mail went to the new address, and the response said so and stopped there.
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(HttpContext.RequestAborted);
+
         var changeResult = await _userManager.ChangeEmailAsync(user, newEmail, request.Token);
 
         if (!changeResult.Succeeded)
@@ -1512,15 +1660,23 @@ public class AuthController : ControllerBase
 
         if (!userNameResult.Succeeded)
         {
+            // Nothing is committed: the account keeps the address it had.
             return BadRequest(new
             {
-                message = "Email was changed, but username update failed.",
+                message = "Email change could not be completed. Your address is unchanged.",
                 errors = userNameResult.Errors
             });
         }
 
         user.UpdatedAt = DateTime.UtcNow;
         await _userManager.UpdateSecurityStampAsync(user);
+
+        // Sessions elsewhere were issued to the old identity and survive the change; on a stolen
+        // account that is exactly the session the real owner cannot see or reach.
+        await _refreshTokenService.RevokeAllForUserAsync(
+            user.Id,
+            GetClientIpAddress(),
+            HttpContext.RequestAborted);
 
         _reportLogWriter.AddAudit(
             "Auth.EmailChanged",
@@ -1538,7 +1694,11 @@ public class AuthController : ControllerBase
                 user.Email,
                 user.RestaurantId
             });
-        await _dbContext.SaveChangesAsync();
+        await _dbContext.SaveChangesAsync(HttpContext.RequestAborted);
+        await transaction.CommitAsync(HttpContext.RequestAborted);
+
+        // After the commit: the change is done either way, and a mail failure must not undo it.
+        await TrySendEmailChangeNoticeAsync(previousEmail!, newEmail, alreadyChanged: true);
 
         return Ok(new
         {
@@ -1554,6 +1714,18 @@ public class AuthController : ControllerBase
         var sendPasswordSetupEmail =
             role != ApplicationRoles.Customer &&
             request is RegisterRestaurantUserRequest { SendPasswordSetupEmail: true };
+
+        if (role == ApplicationRoles.Customer &&
+            (request.AcceptedCustomerTermsVersion != LegalDocumentVersions.CustomerTerms ||
+             request.AcknowledgedPrivacyPolicyVersion != LegalDocumentVersions.PrivacyPolicy))
+        {
+            return BadRequest(new
+            {
+                message = "Accept the current Customer Terms and acknowledge the current Privacy Policy.",
+                requiredCustomerTermsVersion = LegalDocumentVersions.CustomerTerms,
+                requiredPrivacyPolicyVersion = LegalDocumentVersions.PrivacyPolicy
+            });
+        }
 
         if (role != ApplicationRoles.Customer)
         {
@@ -1571,6 +1743,13 @@ public class AuthController : ControllerBase
             {
                 message = "Password is required when a password setup email is not requested."
             });
+        }
+
+        var fullNameProblem = AccountFieldLimits.DescribeFullNameProblem(request.FullName);
+
+        if (fullNameProblem is not null)
+        {
+            return BadRequest(new { message = fullNameProblem });
         }
 
         var existingUser = await _userManager.FindByEmailAsync(request.Email);
@@ -1619,11 +1798,20 @@ public class AuthController : ControllerBase
         {
             UserName = request.Email,
             Email = request.Email,
-            FullName = request.FullName,
+            FullName = AccountFieldLimits.NormalizeFullName(request.FullName),
             RestaurantId = restaurantId,
             EmailConfirmed = role != ApplicationRoles.Customer,
             CreatedAt = DateTime.UtcNow
         };
+
+        if (role == ApplicationRoles.Customer)
+        {
+            user.AcceptedCustomerTermsVersion = request.AcceptedCustomerTermsVersion;
+            user.AcknowledgedPrivacyPolicyVersion = request.AcknowledgedPrivacyPolicyVersion;
+            user.LegalAcceptedAt = DateTime.UtcNow;
+            user.LegalAcceptanceIpAddress = GetClientIpAddress();
+            user.LegalAcceptanceUserAgent = Request.Headers.UserAgent.ToString();
+        }
 
         var result = sendPasswordSetupEmail
             ? await _userManager.CreateAsync(user)
@@ -1739,18 +1927,45 @@ public class AuthController : ControllerBase
 
         var token = await _userManager.GeneratePasswordResetTokenAsync(user);
         var passwordSetupUrl = BuildPasswordResetUrl(user.Id, token);
-        var encodedUrl = HtmlEncoder.Default.Encode(passwordSetupUrl);
 
-        await _emailSender.SendAsync(
+        await SendLayoutEmailAsync(
             user.Email,
             "Set up your DineFlow password",
-            $"""
-            <p>A DineFlow administrator created a {HtmlEncoder.Default.Encode(role)} account for you.</p>
-            <p>Choose your password using the secure link below. This link expires in one hour.</p>
-            <p><a href="{encodedUrl}">Set up password</a></p>
-            <p>If you were not expecting this invitation, you can ignore this email.</p>
-            """,
-            $"Set up your DineFlow password (link expires in one hour): {passwordSetupUrl}");
+            new TransactionalEmail(
+                Heading: "Set up your password",
+                Paragraphs:
+                [
+                    $"An administrator created a {role} account for you on DineFlow.",
+                    "Choose a password using the secure link below to finish setting it up."
+                ],
+                ActionLabel: "Set up password",
+                ActionUrl: passwordSetupUrl,
+                Footnotes:
+                [
+                    "This link expires in one hour.",
+                    "If you were not expecting this invitation, you can ignore this email."
+                ]));
+    }
+
+    /// <summary>Renders through the shared shell so every DineFlow email looks like the same sender.</summary>
+    private Task SendLayoutEmailAsync(string recipient, string subject, TransactionalEmail email) =>
+        _emailSender.SendAsync(
+            recipient,
+            subject,
+            _emailLayout.RenderHtml(email),
+            _emailLayout.RenderText(email));
+
+    /// <summary>"one hour", "30 minutes" — so the copy cannot drift from the configured window.</summary>
+    private static string DescribeDuration(TimeSpan duration)
+    {
+        if (duration.TotalMinutes < 60)
+        {
+            var minutes = (int)Math.Round(duration.TotalMinutes);
+            return $"{minutes} minute{(minutes == 1 ? string.Empty : "s")}";
+        }
+
+        var hours = (int)Math.Round(duration.TotalHours);
+        return hours == 1 ? "one hour" : $"{hours} hours";
     }
 
     private async Task SendConfirmationEmailAsync(ApplicationUser user)
@@ -1762,17 +1977,29 @@ public class AuthController : ControllerBase
 
         var token = await _userManager.GenerateEmailConfirmationTokenAsync(user);
         var confirmationUrl = BuildConfirmationUrl(user.Id, token);
-        var encodedUrl = HtmlEncoder.Default.Encode(confirmationUrl);
 
-        await _emailSender.SendAsync(
+        await SendLayoutEmailAsync(
             user.Email,
-            "Confirm your DineFlow email",
-            $"""
-            <p>Welcome to DineFlow.</p>
-            <p>Confirm your email to finish creating your account.</p>
-            <p><a href="{encodedUrl}">Confirm email</a></p>
-            """,
-            $"Confirm your DineFlow email: {confirmationUrl}");
+            "Confirm your email address",
+            new TransactionalEmail(
+                Heading: "Confirm your email address",
+                Paragraphs:
+                [
+                    $"An account was created for {user.Email} on DineFlow, where you can order from "
+                        + "restaurants that use the platform.",
+                    "Confirming the address finishes setting up the account and lets us send you "
+                        + "order confirmations and receipts."
+                ],
+                ActionLabel: "Confirm email address",
+                ActionUrl: confirmationUrl,
+                Footnotes:
+                [
+                    $"This link expires in {DescribeDuration(UnconfirmedCustomerCleanupService.ConfirmationWindow)}. "
+                        + "Until then you can send yourself a new one by trying to sign in.",
+                    "After that the unconfirmed account is removed automatically, and you would "
+                        + "need to sign up again.",
+                    "If you did not create this account, no action is needed."
+                ]));
     }
 
     private async Task SendMagicLinkEmailAsync(ApplicationUser user)
@@ -1787,17 +2014,21 @@ public class AuthController : ControllerBase
             TokenOptions.DefaultProvider,
             MagicLinkLoginPurpose);
         var magicLinkUrl = BuildMagicLinkUrl(user.Id, token);
-        var encodedUrl = HtmlEncoder.Default.Encode(magicLinkUrl);
 
-        await _emailSender.SendAsync(
+        await SendLayoutEmailAsync(
             user.Email,
             "Sign in to DineFlow",
-            $"""
-            <p>Use this secure link to sign in to DineFlow.</p>
-            <p>This link expires in one hour and can only be used once.</p>
-            <p><a href="{encodedUrl}">Sign in to DineFlow</a></p>
-            """,
-            $"Sign in to DineFlow: {magicLinkUrl}");
+            new TransactionalEmail(
+                Heading: "Sign in to DineFlow",
+                Paragraphs: ["Use the secure link below to sign in. No password is needed."],
+                ActionLabel: "Sign in to DineFlow",
+                ActionUrl: magicLinkUrl,
+                Footnotes:
+                [
+                    "This link expires in one hour and can only be used once.",
+                    "If you did not ask to sign in, you can ignore this email — nobody can use the "
+                        + "link without access to this inbox."
+                ]));
     }
 
     private async Task SendPasswordResetEmailAsync(ApplicationUser user)
@@ -1809,34 +2040,117 @@ public class AuthController : ControllerBase
 
         var token = await _userManager.GeneratePasswordResetTokenAsync(user);
         var passwordResetUrl = BuildPasswordResetUrl(user.Id, token);
-        var encodedUrl = HtmlEncoder.Default.Encode(passwordResetUrl);
 
-        await _emailSender.SendAsync(
+        await SendLayoutEmailAsync(
             user.Email,
             "Reset your DineFlow password",
-            $"""
-            <p>Use this secure link to reset your DineFlow password.</p>
-            <p>This link expires in one hour.</p>
-            <p><a href="{encodedUrl}">Reset password</a></p>
-            """,
-            $"Reset your DineFlow password: {passwordResetUrl}");
+            new TransactionalEmail(
+                Heading: "Reset your password",
+                Paragraphs: ["Use the secure link below to choose a new password for your account."],
+                ActionLabel: "Reset password",
+                ActionUrl: passwordResetUrl,
+                Footnotes:
+                [
+                    "This link expires in one hour.",
+                    "If you did not ask to reset your password, you can ignore this email — your "
+                        + "current password still works."
+                ]));
+    }
+
+    /// <summary>
+    /// Tells the address being replaced what is happening to it.
+    ///
+    /// <para>
+    /// Sent twice, because the two moments say different things: when the change is requested it is
+    /// a warning that can still be acted on, and when it completes it is the record that the account
+    /// has moved. Someone who did not ask for either needs the first one most.
+    /// </para>
+    ///
+    /// <para>
+    /// The new address is shown in full rather than masked: the reader is the account holder, and
+    /// hiding where their account went would leave them nothing to report.
+    /// </para>
+    /// </summary>
+    private async Task TrySendEmailChangeNoticeAsync(string previousEmail, string newEmail, bool alreadyChanged)
+    {
+        if (string.IsNullOrWhiteSpace(previousEmail))
+        {
+            return;
+        }
+
+        var heading = alreadyChanged ? "Your email address was changed" : "Someone asked to change your email address";
+        var opening = alreadyChanged
+            ? $"The email address on your DineFlow account was changed from {previousEmail} to {newEmail}."
+            : $"A request was made to change the email address on your DineFlow account from "
+                + $"{previousEmail} to {newEmail}.";
+        var consequence = alreadyChanged
+            ? "You have been signed out everywhere, and this address can no longer be used to sign in."
+            : "Nothing has changed yet. The change only takes effect once the new address is confirmed.";
+
+        // Only offered before the change lands. Afterwards a reset link would be sent to the new
+        // address — telling the person reading this to reset their password would send them chasing
+        // a link that arrives in someone else's inbox.
+        var footnotes = alreadyChanged
+            ?
+            [
+                "If you made this change, nothing further is needed and you can ignore this email.",
+                "If you did not, contact us at the support address below straight away. A password "
+                    + "reset will no longer reach this inbox."
+            ]
+            : new[]
+            {
+                "If you made this change, nothing further is needed and you can ignore this email.",
+                "If you did not, reset your password now — whoever made the request has access to "
+                    + "the account."
+            };
+
+        try
+        {
+            await SendLayoutEmailAsync(
+                previousEmail,
+                alreadyChanged ? "Your DineFlow email address was changed" : "Email address change requested",
+                new TransactionalEmail(
+                    Heading: heading,
+                    Paragraphs: [opening, consequence],
+                    ActionLabel: alreadyChanged ? null : "Reset your password",
+                    ActionUrl: alreadyChanged ? null : BuildFrontendUrl("/forgot-password"),
+                    Footnotes: footnotes));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to notify {Email} that its account address is changing.", previousEmail);
+        }
     }
 
     private async Task SendEmailChangeConfirmationAsync(ApplicationUser user, string newEmail)
     {
         var token = await _userManager.GenerateChangeEmailTokenAsync(user, newEmail);
         var emailChangeUrl = BuildEmailChangeUrl(user.Id, newEmail, token);
-        var encodedUrl = HtmlEncoder.Default.Encode(emailChangeUrl);
 
-        await _emailSender.SendAsync(
+        await SendLayoutEmailAsync(
             newEmail,
             "Confirm your new DineFlow email",
-            $"""
-            <p>Confirm this email address for your DineFlow account.</p>
-            <p>This link expires in one hour.</p>
-            <p><a href="{encodedUrl}">Confirm new email</a></p>
-            """,
-            $"Confirm your new DineFlow email: {emailChangeUrl}");
+            new TransactionalEmail(
+                Heading: "Confirm your new email address",
+                Paragraphs:
+                [
+                    // Naming both addresses is what lets the reader tell an expected change from
+                    // someone trying to move an account they do not own onto this inbox.
+                    $"A request was made to change the email address on the DineFlow account "
+                        + $"{user.Email} to {newEmail}.",
+                    "Confirm the address below to complete the change. Until then the account keeps "
+                        + $"its current address, {user.Email}."
+                ],
+                ActionLabel: "Confirm new email address",
+                ActionUrl: emailChangeUrl,
+                Footnotes:
+                [
+                    "This link expires in one hour.",
+                    "Confirming signs you out everywhere, so any other device will ask you to sign "
+                        + "in again with the new address.",
+                    "If you did not request this change, you can ignore this email — the account "
+                        + "keeps its current address."
+                ]));
     }
 
     private async Task SendMfaLoginCodeEmailAsync(ApplicationUser user, string code)
@@ -1846,15 +2160,46 @@ public class AuthController : ControllerBase
             throw new InvalidOperationException("User email is required to send an MFA code.");
         }
 
-        await _emailSender.SendAsync(
+        await SendLayoutEmailAsync(
             user.Email,
             "Your DineFlow verification code",
-            $"""
-            <p>Use this code to finish signing in to DineFlow.</p>
-            <p><strong style="font-size: 24px; letter-spacing: 0.2em;">{HtmlEncoder.Default.Encode(code)}</strong></p>
-            <p>This code expires in five minutes.</p>
-            """,
-            $"Your DineFlow verification code is {code}. It expires in five minutes.");
+            new TransactionalEmail(
+                Heading: "Your verification code",
+                Paragraphs:
+                [
+                    "Use this code to finish signing in to DineFlow:",
+                    code
+                ],
+                Footnotes:
+                [
+                    "This code expires in five minutes.",
+                    "If you did not try to sign in, someone may know your password — change it as "
+                        + "soon as you can. Nobody can use this code without it."
+                ]));
+    }
+
+    /// <summary>
+    /// Lockout tells the caller the account exists, which is unavoidable — the alternative is
+    /// leaving the person locked out with no idea why. It carries the wait so a legitimate owner
+    /// knows when to come back, and Retry-After so clients can back off without polling.
+    /// </summary>
+    private IActionResult LockedOutResponse(DateTimeOffset? lockoutEnd)
+    {
+        var remaining = lockoutEnd is null
+            ? TimeSpan.Zero
+            : lockoutEnd.Value - DateTimeOffset.UtcNow;
+        var remainingMinutes = Math.Max(1, (int)Math.Ceiling(remaining.TotalMinutes));
+
+        Response.Headers.RetryAfter = ((int)Math.Max(1, Math.Ceiling(remaining.TotalSeconds)))
+            .ToString(CultureInfo.InvariantCulture);
+
+        return StatusCode(StatusCodes.Status423Locked, new
+        {
+            message = $"Too many failed sign-in attempts. Try again in {remainingMinutes} minute"
+                + (remainingMinutes == 1 ? "." : "s."),
+            code = "account_locked",
+            lockoutEnd
+        });
     }
 
     private async Task<IActionResult> BuildAuthenticatedResponseAsync(ApplicationUser user, string message)
@@ -1900,6 +2245,13 @@ public class AuthController : ControllerBase
 
     private string? GetClientIpAddress() => HttpContext.Connection.RemoteIpAddress?.ToString();
 
+    private static bool HasCurrentOAuthLegalConsent(AuthenticationProperties? properties) =>
+        properties is not null &&
+        properties.Items.TryGetValue("customerTermsVersion", out var termsVersion) &&
+        properties.Items.TryGetValue("privacyPolicyVersion", out var privacyVersion) &&
+        termsVersion == LegalDocumentVersions.CustomerTerms &&
+        privacyVersion == LegalDocumentVersions.PrivacyPolicy;
+
     private async Task<object> BuildUserPayloadAsync(ApplicationUser user, IEnumerable<string> roles)
     {
         var logins = await _userManager.GetLoginsAsync(user);
@@ -1920,6 +2272,50 @@ public class AuthController : ControllerBase
             hasPassword = !string.IsNullOrWhiteSpace(user.PasswordHash),
             externalProviders
         };
+    }
+
+    private async Task<IActionResult?> CreateMfaLoginChallengeIfRequiredAsync(
+        ApplicationUser user,
+        CancellationToken cancellationToken)
+    {
+        var mfaSettings = await _dbContext.UserMfaSettings
+            .AsNoTracking()
+            .FirstOrDefaultAsync(
+                settings => settings.UserId == user.Id,
+                cancellationToken);
+
+        if (mfaSettings is null ||
+            !mfaSettings.RequireForLogin ||
+            (!mfaSettings.TotpEnabled && !mfaSettings.EmailEnabled))
+        {
+            return null;
+        }
+
+        var methods = new List<string>();
+        string? emailCode = null;
+
+        if (mfaSettings.TotpEnabled)
+        {
+            methods.Add(MfaMethods.Totp);
+        }
+
+        if (mfaSettings.EmailEnabled)
+        {
+            methods.Add(MfaMethods.Email);
+            emailCode = GenerateSixDigitCode();
+            await SendMfaLoginCodeEmailAsync(user, emailCode);
+        }
+
+        var challengeId = _mfaLoginChallengeStore.Create(user.Id, methods, emailCode);
+
+        return Ok(new
+        {
+            message = "MFA verification is required.",
+            mfaRequired = true,
+            challengeId,
+            methods,
+            preferredMethod = mfaSettings.PreferredMethod
+        });
     }
 
     private static string GetAuthenticatedResponseAuditAction(string message)
@@ -2041,6 +2437,29 @@ public class AuthController : ControllerBase
     private static string NormalizeCode(string? code)
     {
         return new string((code ?? string.Empty).Where(char.IsDigit).ToArray());
+    }
+
+    /// <summary>Where the external sign-in should hand the customer back, kept in the auth state.</summary>
+    private const string ExternalReturnToKey = "returnTo";
+
+    /// <summary>
+    /// The <c>&amp;returnTo=…</c> to append to the frontend callback, or an empty string.
+    /// </summary>
+    /// <remarks>
+    /// Re-sanitised on the way out. The value has been round-tripped through the provider by now,
+    /// so it is treated as arriving from outside however it was checked on the way in.
+    /// </remarks>
+    private static string BuildExternalReturnToQuery(AuthenticationProperties? properties)
+    {
+        if (properties?.Items is null ||
+            !properties.Items.TryGetValue(ExternalReturnToKey, out var stored))
+        {
+            return string.Empty;
+        }
+
+        var safe = OAuthReturnPath.Sanitize(stored);
+
+        return safe is null ? string.Empty : $"&returnTo={Uri.EscapeDataString(safe)}";
     }
 
     private string BuildFrontendUrl(string pathAndQuery)

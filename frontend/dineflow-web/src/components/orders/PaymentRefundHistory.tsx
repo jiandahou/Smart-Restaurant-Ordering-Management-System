@@ -1,5 +1,6 @@
 import type { AdminOrderPayment, AdminPaymentRefundStatus } from '../../api/auth'
 import { Badge } from '../ui/badge'
+import { ProviderIdentifier } from '@/components/orders/ProviderIdentifier'
 
 const refundStatusLabels: Record<AdminPaymentRefundStatus, string> = {
   Pending: 'Pending',
@@ -69,13 +70,34 @@ export function PaymentRefundHistory({
                 </Badge>
               </div>
               <div className="order-refund-meta">
-                <span>{refund.providerRefundId || 'No Stripe refund id yet'}</span>
+                <ProviderIdentifier
+                  value={refund.providerRefundId}
+                  fallback="No Stripe refund id yet"
+                  label="refund id"
+                />
                 <span>{formatDate(refund.refundedAt || refund.failedAt || refund.updatedAt || refund.createdAt)}</span>
               </div>
               {refund.reason && (
                 <div className="order-refund-reason">
                   <strong>Reason</strong>
                   <span>{refund.reason}</span>
+                </div>
+              )}
+              {(refund.items.length > 0 || refund.unattributedAmountCents > 0) && (
+                <div className="mt-2 rounded-md border bg-muted/30 p-2 text-xs">
+                  <strong className="mb-1 block">Allocation</strong>
+                  {refund.items.map((item) => (
+                    <div key={item.orderItemId} className="flex justify-between gap-3">
+                      <span>{item.quantity} × {item.menuItemNameSnapshot}</span>
+                      <span>{formatPaymentAmount(item.amountCents, refund.currency || currency)}</span>
+                    </div>
+                  ))}
+                  {refund.unattributedAmountCents > 0 && (
+                    <div className="flex justify-between gap-3 text-amber-700 dark:text-amber-300">
+                      <span>General / unattributed adjustment</span>
+                      <span>{formatPaymentAmount(refund.unattributedAmountCents, refund.currency || currency)}</span>
+                    </div>
+                  )}
                 </div>
               )}
               {refund.failureReason && (

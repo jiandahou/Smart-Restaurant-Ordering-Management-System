@@ -1,8 +1,10 @@
 import { getStoredToken } from './auth'
+import { createUuid } from '../lib/uuid'
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
 export const cartParticipantTokenHeader = 'X-Cart-Participant-Token'
+/** Identifies one intended mutation, so retries of it are applied once. */
+export const idempotencyKeyHeader = 'Idempotency-Key'
 
 export type CartItem = {
   id: string
@@ -15,8 +17,17 @@ export type CartItem = {
   lineTotal: number
   note: string | null
   selectedOptions: CartItemOption[]
+  /** Mirrors the restaurant's visibility toggle only — see `isOrderable`. */
   isAvailable: boolean
   isSoldOut: boolean
+  /**
+   * Whether checkout would accept this line. The two flags above each answer part of that question
+   * and neither answers all of it: a line can be `isAvailable` and still be refused because its
+   * menu section was archived.
+   */
+  isOrderable: boolean
+  /** Why not, in words a customer can act on. Null when the line is fine. */
+  unavailableReason: string | null
   createdAt: string
   updatedAt: string | null
 }
@@ -26,6 +37,9 @@ export type CartItemOption = {
   groupNameSnapshot: string
   optionNameSnapshot: string
   priceAdjustmentSnapshot: number
+  allergensSnapshot?: string | null
+  mayContainAllergensSnapshot?: string | null
+  crossContactStatementSnapshot?: string | null
   quantity: number
 }
 
@@ -110,6 +124,12 @@ export type UpdateCartItemRequest = {
   quantity: number
   note?: string
   selectedOptionIds?: string[]
+  /**
+   * The line's `updatedAt` as it stood when the edit began. A dine-in cart is shared, and this edit
+   * sets an absolute quantity — without the version, two people editing one line both succeed and
+   * the later write silently replaces the earlier. Required by the server.
+   */
+  expectedUpdatedAt: string
 }
 
 export async function joinCart(request: JoinCartRequest) {
@@ -123,14 +143,35 @@ export async function getCart(cartId: string, participantToken: string) {
   return cartRequest<Cart>(`/api/public/carts/${cartId}`, {}, participantToken)
 }
 
+/**
+ * Adds to the cart, once, however many times the request is sent.
+ *
+ * <p>
+ * Adding is the one cart operation that is not repeatable — the server adds to what is already
+ * there. A phone that loses signal after the server committed but before the response arrived
+ * cannot tell that apart from a request that never landed, so it retries, and the customer ends up
+ * with two of something they tapped once. The key identifies the intent rather than the attempt, so
+ * every retry of the same tap collapses to one.
+ * </p>
+ *
+ * <p>
+ * Generated here, not by the caller: the guarantee is worth nothing if a caller forgets, and no
+ * caller has a better idea of what "the same tap" means than the function they called once.
+ * </p>
+ */
 export async function addCartItem(
   cartId: string,
   participantToken: string,
   request: AddCartItemRequest,
+  idempotencyKey: string = createUuid(),
 ) {
   return cartRequest<Cart>(
     `/api/public/carts/${cartId}/items`,
-    { method: 'POST', body: JSON.stringify(request) },
+    {
+      method: 'POST',
+      body: JSON.stringify(request),
+      headers: { [idempotencyKeyHeader]: idempotencyKey },
+    },
     participantToken,
   )
 }
@@ -180,12 +221,39 @@ export async function updateCartNote(
   )
 }
 
-export async function checkoutCart(cartId: string, participantToken: string) {
+export type CheckoutCartRequest = {
+  acceptedCustomerTermsVersion: string
+  acknowledgedPrivacyPolicyVersion: string
+  acknowledgedAllergenNoticeVersion: string
+}
+
+/**
+ * Long enough for a slow connection to finish an ordinary checkout, short enough that a stalled one
+ * gives the screen back while the person is still looking at it.
+ */
+export const checkoutTimeoutMs = 20_000
+
+/**
+ * Submits the cart.
+ *
+ * <p>
+ * Timing out here does not mean the order was not placed — only that the answer never arrived. The
+ * caller may safely submit again: one cart can produce only one order, so a second attempt returns
+ * the order the first one created rather than making another.
+ * </p>
+ */
+export async function checkoutCart(cartId: string, participantToken: string, request: CheckoutCartRequest) {
   return cartRequest<CheckoutCartResponse>(
     `/api/public/carts/${cartId}/checkout`,
-    { method: 'POST' },
+    { method: 'POST', body: JSON.stringify(request) },
     participantToken,
+    checkoutTimeoutMs,
   )
+}
+
+/** True when a request gave up waiting rather than being answered. */
+export function isTimeout(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'TimeoutError'
 }
 
 export type CreatePublicPaymentSessionResponse = {
@@ -220,6 +288,7 @@ async function cartRequest<T>(
   path: string,
   options: RequestInit,
   participantToken?: string,
+  timeoutMs?: number,
 ) {
   const headers = new Headers(options.headers)
   headers.set('Accept', 'application/json')
@@ -237,12 +306,45 @@ async function cartRequest<T>(
     headers.set('Authorization', `Bearer ${authToken}`)
   }
 
-  const response = await fetch(`${apiBaseUrl}${path}`, { ...options, headers })
+  // A request with no deadline is one the caller can never recover from: fetch waits on the
+  // browser's own timeout, which on a stalled mobile connection can be minutes, and until then the
+  // screen is frozen with nothing to act on.
+  const response = await fetch(path, {
+    ...options,
+    headers,
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+  })
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => null)
-    throw new Error(errorBody?.message || `Request failed with HTTP ${response.status}`)
+    const error = new Error(errorBody?.message || `Request failed with HTTP ${response.status}`)
+
+    // The body carried more than a message — a code, and for a conflict the cart as it now stands.
+    // Throwing only the sentence discarded exactly what the caller needed to recover.
+    return Promise.reject(Object.assign(error, {
+      status: response.status,
+      code: typeof errorBody?.code === 'string' ? errorBody.code : undefined,
+      details: errorBody ?? undefined,
+    }))
   }
 
   return (await response.json()) as T
+}
+
+/**
+ * The cart a conflict response carried, or null when this was not one.
+ *
+ * <p>
+ * A rejected edit is only half an answer. The other half is what the cart looks like now, so the
+ * screen can stop describing a version that no longer exists.
+ * </p>
+ */
+export function cartFromConflict(error: unknown): Cart | null {
+  if ((error as { code?: string })?.code !== 'cart_item_conflict') {
+    return null
+  }
+
+  const cart = (error as { details?: { cart?: unknown } })?.details?.cart
+
+  return cart && typeof cart === 'object' && 'id' in cart ? (cart as Cart) : null
 }

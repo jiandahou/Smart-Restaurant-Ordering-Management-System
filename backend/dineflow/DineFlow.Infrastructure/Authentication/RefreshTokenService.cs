@@ -40,7 +40,13 @@ public class RefreshTokenService : IRefreshTokenService
         CancellationToken cancellationToken = default)
     {
         var tokenHash = Hash(rawToken);
+
+        // Read without tracking: the claim below writes this row through SQL, and a tracked copy
+        // would sit in the context afterwards still describing the token as unused — handed back to
+        // anything that reads it later in the same request, which is how a rotated token could be
+        // reported as still live.
         var existing = await _dbContext.RefreshTokens
+            .AsNoTracking()
             .FirstOrDefaultAsync(refreshToken => refreshToken.TokenHash == tokenHash, cancellationToken);
 
         if (existing is null)
@@ -58,11 +64,17 @@ public class RefreshTokenService : IRefreshTokenService
                 return RefreshTokenRotationResult.Failure(RefreshTokenFailureReason.Revoked);
             }
 
-            // Rotated away and now being presented again — someone is replaying
-            // an old token (stolen copy, or a retried request racing a prior
-            // refresh). Treat it as compromise and kill every active token for
-            // the user so both the legitimate and illegitimate holder are forced
-            // to log in again.
+            // Rotated away and now being presented again. Moments after the rotation this is the
+            // owner racing itself — two tabs sharing one stored token, woken by the same expiry —
+            // and revoking the account's whole token family for it signs a restaurant's till out
+            // mid-service. Later than that, it is the replay this check exists to catch.
+            if (RefreshTokenRotationRace.IsRace(existing.RevokedAt.Value, DateTime.UtcNow))
+            {
+                return RefreshTokenRotationResult.Failure(RefreshTokenFailureReason.RotationRace);
+            }
+
+            // Kill every active token for the user so both the legitimate and illegitimate holder
+            // are forced to log in again.
             await RevokeAllActiveForUserAsync(existing.UserId, ipAddress, cancellationToken);
             return RefreshTokenRotationResult.Failure(RefreshTokenFailureReason.Reused);
         }
@@ -74,16 +86,56 @@ public class RefreshTokenService : IRefreshTokenService
 
         var newRawToken = GenerateRawToken();
         var newTokenHash = Hash(newRawToken);
+        var rotatedAt = DateTime.UtcNow;
 
-        existing.RevokedAt = DateTime.UtcNow;
-        existing.RevokedByIp = ipAddress;
-        existing.ReplacedByTokenHash = newTokenHash;
+        // The claim, and the whole of it. Reading the row, deciding it was unused and writing it
+        // back is three steps, and callers arrive together: several tabs waking on the same expiry
+        // all read "not yet rotated", all rotated it, and all were issued a token of their own —
+        // one refresh token becoming six, and single-use rotation meaning nothing. Worse, a stolen
+        // token replayed alongside the owner's refresh would have succeeded too, and the reuse
+        // detection that exists to catch it would never have fired.
+        //
+        // Whoever moves RevokedAt away from null wins; everybody else affects no rows, re-reads a
+        // token that now carries a replacement, and is answered as the race it was.
+        var claimed = await _dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"""
+            UPDATE "RefreshTokens"
+               SET "RevokedAt" = {rotatedAt},
+                   "RevokedByIp" = {ipAddress},
+                   "ReplacedByTokenHash" = {newTokenHash}
+             WHERE "TokenHash" = {tokenHash}
+               AND "RevokedAt" IS NULL
+            """,
+            cancellationToken);
+
+        if (claimed == 0)
+        {
+            // Somebody else claimed it between the read above and this update. Whether that is a
+            // race or a replay is decided by when *they* rotated it, so the row is re-read rather
+            // than trusting the stale copy in memory.
+            var winner = await _dbContext.RefreshTokens
+                .AsNoTracking()
+                .FirstOrDefaultAsync(refreshToken => refreshToken.TokenHash == tokenHash, cancellationToken);
+
+            if (winner?.RevokedAt is null)
+            {
+                return RefreshTokenRotationResult.Failure(RefreshTokenFailureReason.NotFound);
+            }
+
+            if (RefreshTokenRotationRace.IsRace(winner.RevokedAt.Value, DateTime.UtcNow))
+            {
+                return RefreshTokenRotationResult.Failure(RefreshTokenFailureReason.RotationRace);
+            }
+
+            await RevokeAllActiveForUserAsync(winner.UserId, ipAddress, cancellationToken);
+            return RefreshTokenRotationResult.Failure(RefreshTokenFailureReason.Reused);
+        }
 
         _dbContext.RefreshTokens.Add(new RefreshToken
         {
             UserId = existing.UserId,
             TokenHash = newTokenHash,
-            ExpiresAt = DateTime.UtcNow.AddDays(_jwtOptions.RefreshTokenExpirationDays),
+            ExpiresAt = rotatedAt.AddDays(_jwtOptions.RefreshTokenExpirationDays),
             CreatedByIp = ipAddress,
         });
 
@@ -106,6 +158,9 @@ public class RefreshTokenService : IRefreshTokenService
         existing.RevokedByIp = ipAddress;
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
+
+    public Task RevokeAllForUserAsync(string userId, string? ipAddress, CancellationToken cancellationToken = default) =>
+        RevokeAllActiveForUserAsync(userId, ipAddress, cancellationToken);
 
     private async Task RevokeAllActiveForUserAsync(string userId, string? ipAddress, CancellationToken cancellationToken)
     {

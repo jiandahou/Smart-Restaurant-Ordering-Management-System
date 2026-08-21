@@ -14,6 +14,21 @@ public class Order
 
     public Guid? TableId { get; set; }
 
+    /// <summary>
+    /// The cart this order was placed from, when it came from one.
+    ///
+    /// <para>
+    /// Carries a unique index so the database itself can only ever hold one order per cart. Two
+    /// concurrent checkouts used to produce two orders and two order numbers from a single cart,
+    /// with the cart pointing at whichever committed last and the other left in the kitchen queue
+    /// belonging to nobody. Application-level locking is what normally prevents that; this is what
+    /// makes it impossible.
+    /// </para>
+    ///
+    /// <para>Null for orders that never had a cart — counter and admin-created orders.</para>
+    /// </summary>
+    public Guid? CartId { get; set; }
+
     public string? CustomerId { get; set; }
 
     /// SHA-256 of the guest access token. Guest orders have no account behind them, so this is the
@@ -41,6 +56,18 @@ public class Order
     public decimal TotalAmount { get; set; }
 
     public string? CustomerNote { get; set; }
+
+    public string? AcceptedCustomerTermsVersion { get; set; }
+
+    public string? AcknowledgedPrivacyPolicyVersion { get; set; }
+
+    public string? AcknowledgedAllergenNoticeVersion { get; set; }
+
+    public DateTime? LegalAcceptedAt { get; set; }
+
+    public string? LegalAcceptanceIpAddress { get; set; }
+
+    public string? LegalAcceptanceUserAgent { get; set; }
 
     public DateTime? ScheduledTime { get; set; }
 

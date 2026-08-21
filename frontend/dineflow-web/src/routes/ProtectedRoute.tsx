@@ -1,6 +1,7 @@
 import { Loader2 } from 'lucide-react'
 import { Navigate, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
+import { AccessDeniedPage } from '../pages/AccessDeniedPage'
 
 type ProtectedRouteProps = {
   roles?: string[]
@@ -23,7 +24,10 @@ export function ProtectedRoute({ roles }: ProtectedRouteProps) {
   }
 
   if (roles && !hasAnyRole(roles)) {
-    return <Navigate to="/me" replace />
+    // Rendered in place of the route's element rather than redirected: the protected page never
+    // mounts, so none of its data is requested, and the address stays visible for the person to
+    // read out to whoever administers their account.
+    return <AccessDeniedPage requiredRoles={roles} />
   }
 
   return <Outlet />

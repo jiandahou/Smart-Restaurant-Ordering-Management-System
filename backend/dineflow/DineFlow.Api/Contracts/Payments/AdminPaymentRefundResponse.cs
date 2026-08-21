@@ -22,6 +22,10 @@ public sealed class AdminPaymentRefundResponse
 
     public string? RequestedByUserId { get; set; }
 
+    public long UnattributedAmountCents { get; set; }
+
+    public List<AdminPaymentRefundItemResponse> Items { get; set; } = [];
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime? UpdatedAt { get; set; }
@@ -29,4 +33,15 @@ public sealed class AdminPaymentRefundResponse
     public DateTime? RefundedAt { get; set; }
 
     public DateTime? FailedAt { get; set; }
+}
+
+public sealed class AdminPaymentRefundItemResponse
+{
+    public Guid OrderItemId { get; set; }
+
+    public string MenuItemNameSnapshot { get; set; } = string.Empty;
+
+    public int Quantity { get; set; }
+
+    public long AmountCents { get; set; }
 }

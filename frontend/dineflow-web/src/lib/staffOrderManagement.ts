@@ -81,6 +81,34 @@ export function getStaffPrimaryAction(order: AdminOrder) {
   return expected && (order.availableActions ?? []).includes(expected) ? expected : null
 }
 
+/**
+ * Undoing a close.
+ *
+ * <p>
+ * The server offers <code>Reopen</code> on every finished order — completed, cancelled and rejected
+ * alike — and the screen offered it on none of them: eighty-six closed cards, not one button. An
+ * order cancelled by mistake, or rejected before someone noticed the kitchen could take it after
+ * all, had no way back from this screen at all.
+ * </p>
+ *
+ * <p>
+ * Kept apart from the primary action rather than folded into it. Reopening is a correction, not the
+ * next step in the order's life, and a list of finished orders should not be a wall of buttons
+ * inviting one.
+ * </p>
+ *
+ * <p>
+ * What may be reopened is the server's decision, read from <code>availableActions</code>. Reopening
+ * an unpaid or refunded order is allowed there and lands it back in the payment queue, where the
+ * kitchen leaves it alone until the money is settled — so there is no second opinion to add here.
+ * </p>
+ */
+export function getStaffRecoveryAction(order: AdminOrder) {
+  return (order.availableActions ?? []).includes('Reopen')
+    ? ('Reopen' satisfies OrderTransitionAction)
+    : null
+}
+
 export function getStaffDestructiveActions(order: AdminOrder) {
   const availableActions = order.availableActions ?? []
 

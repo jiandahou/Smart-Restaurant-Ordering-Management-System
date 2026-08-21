@@ -1,11 +1,12 @@
 import { zodResolver } from '@hookform/resolvers/zod'
-import { Building2, Camera, ChevronDown, CreditCard, Fingerprint, KeyRound, LockKeyhole, Mail, Pencil, Save, ShieldCheck, Smartphone, Trash2, UserRound, X, type LucideIcon } from 'lucide-react'
-import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
+import { Building2, Camera, ChevronDown, Fingerprint, KeyRound, LockKeyhole, Mail, Pencil, Save, ShieldCheck, Smartphone, Trash2, UserRound, X, type LucideIcon } from 'lucide-react'
+import { useEffect, useId, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
 import { useForm } from 'react-hook-form'
 import { QRCodeSVG } from 'qrcode.react'
 import { toast } from 'sonner'
 import { z } from 'zod'
 import {
+  describeError,
   deletePasskey,
   disableMfa,
   enableEmailMfa,
@@ -29,6 +30,8 @@ import {
 import { useAuth } from '../auth/AuthContext'
 import { updateCurrentUser, uploadCurrentUserAvatar } from '../auth/authSlice'
 import { Avatar, AvatarFallback, AvatarImage } from '../components/ui/avatar'
+import { CurrentAccountField } from '../components/auth/CurrentAccountField'
+import { rethrowIfSecondFactorRefused } from '../auth/sensitiveAction'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -54,13 +57,16 @@ import {
 } from '../components/ui/dialog'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '../components/ui/form'
 import { Input } from '../components/ui/input'
+import { PasswordRequirements } from '../components/auth/PasswordRequirements'
+import { fullNameSchema } from '../lib/nameFields'
+import { passwordSchema } from '../lib/passwordPolicy'
 import { Switch } from '../components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip'
 import { useAppDispatch } from '../hooks'
 import googleLogo from '../assets/google-g.svg'
 
 const profileFormSchema = z.object({
-  fullName: z.string().min(1, 'Name is required.'),
+  fullName: fullNameSchema('Name is required.'),
 })
 
 const emailChangeFormSchema = z.object({
@@ -81,12 +87,7 @@ const sensitiveVerificationFormSchema = z.object({
 })
 
 const directPasswordResetFormSchema = z.object({
-  password: z.string()
-    .min(6, 'Password must be at least 6 characters.')
-    .regex(/[A-Z]/, 'Password must include an uppercase letter.')
-    .regex(/[a-z]/, 'Password must include a lowercase letter.')
-    .regex(/\d/, 'Password must include a number.')
-    .regex(/[^A-Za-z0-9]/, 'Password must include a symbol.'),
+  password: passwordSchema,
   confirmPassword: z.string().min(1, 'Confirm your password.'),
 }).refine((values) => values.password === values.confirmPassword, {
   message: 'Passwords do not match.',
@@ -211,13 +212,45 @@ export function ProfilePage() {
     })
   }, [profileForm, user?.fullName])
 
+  const loadPasskeys = async () => {
+    setLoadingPasskeys(true)
+
+    try {
+      setPasskeys(await getPasskeys())
+    } catch (passkeyError) {
+      toast.error('Could not load passkeys', {
+        description: passkeyError instanceof Error ? passkeyError.message : 'Passkey list failed to load',
+      })
+    } finally {
+      setLoadingPasskeys(false)
+    }
+  }
+
+  const loadMfaSettings = async () => {
+    setLoadingMfaSettings(true)
+
+    try {
+      setMfaSettings(await getMfaSettings())
+    } catch {
+      toast.error('Could not load MFA settings', {
+        description: 'Please refresh the page and try again.',
+      })
+    } finally {
+      setLoadingMfaSettings(false)
+    }
+  }
+
   useEffect(() => {
+    // Clears the previous restaurant name before loading the new one. One extra render on mount, not a stale value.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadMfaSettings()
   }, [])
 
   useEffect(() => {
     const restaurantId = user?.restaurantId
 
+    // Clears the previous restaurant name before loading the new one. One extra render on mount, not a stale value.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setRestaurantName(null)
 
     if (!restaurantId) {
@@ -256,36 +289,10 @@ export function ProfilePage() {
       return
     }
 
+    // Fetch when the passkey panel opens. One extra render on mount, not a stale value.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadPasskeys()
   }, [passkeysOpen])
-
-  const loadPasskeys = async () => {
-    setLoadingPasskeys(true)
-
-    try {
-      setPasskeys(await getPasskeys())
-    } catch (passkeyError) {
-      toast.error('Could not load passkeys', {
-        description: passkeyError instanceof Error ? passkeyError.message : 'Passkey list failed to load',
-      })
-    } finally {
-      setLoadingPasskeys(false)
-    }
-  }
-
-  const loadMfaSettings = async () => {
-    setLoadingMfaSettings(true)
-
-    try {
-      setMfaSettings(await getMfaSettings())
-    } catch (mfaError) {
-      toast.error('Could not load MFA settings', {
-        description: mfaError instanceof Error ? mfaError.message : 'MFA settings failed to load',
-      })
-    } finally {
-      setLoadingMfaSettings(false)
-    }
-  }
 
   const handleProfileSubmit = async (values: ProfileFormValues) => {
     try {
@@ -314,10 +321,21 @@ export function ProfilePage() {
   }
 
   const handleEmailChangeSubmit = async (values: EmailChangeFormValues) => {
+    runSensitiveAction({
+      title: 'Verify email change',
+      description: 'Enter an MFA code before changing the address on this account.',
+      onVerify: async (verification) => {
+        await submitEmailChange(values, verification)
+      },
+    })
+  }
+
+  const submitEmailChange = async (values: EmailChangeFormValues, verification: MfaVerification) => {
     try {
       const response = await requestEmailChange({
         newEmail: values.newEmail.trim(),
         currentPassword: values.currentPassword,
+        verification: verification.method ? verification : undefined,
       })
 
       toast.success('Verification email sent', {
@@ -329,6 +347,7 @@ export function ProfilePage() {
       })
       setEditingEmail(false)
     } catch (emailChangeError) {
+      rethrowIfSecondFactorRefused(emailChangeError)
       const message = emailChangeError instanceof Error ? emailChangeError.message : 'Email change failed'
       toast.error('Could not request email change', {
         description: message,
@@ -428,8 +447,9 @@ export function ProfilePage() {
       setSensitiveAction(null)
       sensitiveVerificationForm.reset({ code: '' })
     } catch (verificationError) {
-      const message = verificationError instanceof Error ? verificationError.message : 'MFA verification failed'
+      const { message } = describeError(verificationError, 'MFA verification failed')
 
+      // The dialog stays open, with the reason on it: this is the failure that can be corrected.
       toast.error('Verification failed', {
         description: message,
       })
@@ -502,6 +522,7 @@ export function ProfilePage() {
         confirmPassword: '',
       })
     } catch (resetError) {
+      rethrowIfSecondFactorRefused(resetError)
       toast.error(password ? 'Could not update password' : 'Could not send reset link', {
         description: resetError instanceof Error ? resetError.message : 'Password reset failed',
       })
@@ -533,6 +554,7 @@ export function ProfilePage() {
       await loadPasskeys()
       setPasskeysOpen(true)
     } catch (passkeyError) {
+      rethrowIfSecondFactorRefused(passkeyError)
       toast.error('Could not add passkey', {
         description: passkeyError instanceof Error ? passkeyError.message : 'Passkey registration failed',
       })
@@ -592,6 +614,7 @@ export function ProfilePage() {
       })
       cancelEditingPasskey()
     } catch (passkeyError) {
+      rethrowIfSecondFactorRefused(passkeyError)
       toast.error('Could not rename passkey', {
         description: passkeyError instanceof Error ? passkeyError.message : 'Passkey update failed',
       })
@@ -626,6 +649,7 @@ export function ProfilePage() {
         description: passkey.deviceName ?? response.message,
       })
     } catch (passkeyError) {
+      rethrowIfSecondFactorRefused(passkeyError)
       toast.error('Could not delete passkey', {
         description: passkeyError instanceof Error ? passkeyError.message : 'Passkey delete failed',
       })
@@ -752,6 +776,7 @@ export function ProfilePage() {
         description: response.message,
       })
     } catch (mfaError) {
+      rethrowIfSecondFactorRefused(mfaError)
       toast.error('Could not disable MFA', {
         description: mfaError instanceof Error ? mfaError.message : 'MFA disable failed',
       })
@@ -778,7 +803,6 @@ export function ProfilePage() {
     try {
       const response = await updateMfaSettings({
         requireForLogin: nextRequiredFor.login,
-        requireForPayment: nextRequiredFor.payment,
         requireForSensitiveActions: nextRequiredFor.sensitiveActions,
       })
 
@@ -799,7 +823,7 @@ export function ProfilePage() {
     <main className="content-grid">
       <Card>
         <CardHeader>
-          <CardTitle>User Center</CardTitle>
+          <CardTitle asChild><h1>User Center</h1></CardTitle>
         </CardHeader>
         <CardContent className="profile-stack">
           <div className="avatar-panel">
@@ -929,6 +953,7 @@ export function ProfilePage() {
             {editingEmail ? (
               <Form {...emailChangeForm}>
                 <form className="security-inline-form" onSubmit={emailChangeForm.handleSubmit(handleEmailChangeSubmit)}>
+                  <CurrentAccountField email={user?.email} />
                   <FormField
                     control={emailChangeForm.control}
                     name="newEmail"
@@ -936,7 +961,7 @@ export function ProfilePage() {
                       <FormItem>
                         <FormLabel>New email</FormLabel>
                         <FormControl>
-                          <Input type="email" autoComplete="email" placeholder="new@example.com" {...field} />
+                          <Input type="email" autoComplete="off" placeholder="new@example.com" {...field} />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -1042,12 +1067,6 @@ export function ProfilePage() {
                     Login
                   </Badge>
                 )}
-                {mfaSettings?.requiredFor.payment && (
-                  <Badge variant="secondary" className="mfa-summary-badge">
-                    <CreditCard size={12} />
-                    Payment
-                  </Badge>
-                )}
                 {mfaSettings?.requiredFor.sensitiveActions && (
                   <Badge variant="secondary" className="mfa-summary-badge">
                     <ShieldCheck size={12} />
@@ -1066,36 +1085,14 @@ export function ProfilePage() {
                     <div className="mfa-method-copy">
                       <strong>Authenticator app</strong>
                       <span>Use a 6-digit code from Google Authenticator, 1Password, or another TOTP app.</span>
-                      {mfaSettings?.totp.enabled && (
-                        <Badge variant="default" className="mfa-configured-badge">
-                          <ShieldCheck size={13} />
-                          Configured
-                        </Badge>
-                      )}
                     </div>
-                    {!mfaSettings?.totp.enabled && <Badge variant="secondary">Off</Badge>}
-                    {!mfaSettings?.totp.enabled && (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        onClick={handleStartTotpSetup}
-                        disabled={startingTotpSetup || loadingMfaSettings}
-                      >
-                        <ShieldCheck size={16} />
-                        {startingTotpSetup ? 'Starting' : 'Set up'}
-                      </Button>
-                    )}
-                    {mfaSettings?.totp.enabled && (
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        onClick={() => void handleDisableMfa('totp')}
-                        disabled={disablingMfaMethod !== null}
-                      >
-                        <X size={16} />
-                        {disablingMfaMethod === 'totp' ? 'Disabling' : 'Disable'}
-                      </Button>
-                    )}
+                    <Switch
+                      aria-label="Authenticator app"
+                      checked={Boolean(mfaSettings?.totp.enabled)}
+                      disabled={startingTotpSetup || loadingMfaSettings || disablingMfaMethod !== null}
+                      onCheckedChange={(checked) =>
+                        void (checked ? handleStartTotpSetup() : handleDisableMfa('totp'))}
+                    />
                   </div>
                   <div className={`mfa-method-card ${mfaSettings?.email.enabled ? 'enabled' : ''}`}>
                     <div className="mfa-method-icon">
@@ -1104,36 +1101,14 @@ export function ProfilePage() {
                     <div className="mfa-method-copy">
                       <strong>Email code</strong>
                       <span>Receive a 6-digit code by email as a backup verification method.</span>
-                      {mfaSettings?.email.enabled && (
-                        <Badge variant="default" className="mfa-configured-badge">
-                          <Mail size={13} />
-                          Configured
-                        </Badge>
-                      )}
                     </div>
-                    {!mfaSettings?.email.enabled && <Badge variant="secondary">Off</Badge>}
-                    {!mfaSettings?.email.enabled && (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        onClick={handleStartEmailMfaSetup}
-                        disabled={startingEmailMfaSetup || loadingMfaSettings}
-                      >
-                        <Mail size={16} />
-                        {startingEmailMfaSetup ? 'Sending' : 'Set up'}
-                      </Button>
-                    )}
-                    {mfaSettings?.email.enabled && (
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        onClick={() => void handleDisableMfa('email')}
-                        disabled={disablingMfaMethod !== null}
-                      >
-                        <X size={16} />
-                        {disablingMfaMethod === 'email' ? 'Disabling' : 'Disable'}
-                      </Button>
-                    )}
+                    <Switch
+                      aria-label="Email code"
+                      checked={Boolean(mfaSettings?.email.enabled)}
+                      disabled={startingEmailMfaSetup || loadingMfaSettings || disablingMfaMethod !== null}
+                      onCheckedChange={(checked) =>
+                        void (checked ? handleStartEmailMfaSetup() : handleDisableMfa('email'))}
+                    />
                   </div>
                 </div>
                 {mfaSettings?.enabled && (
@@ -1144,11 +1119,11 @@ export function ProfilePage() {
                     </div>
                     <Button
                       type="button"
-                      variant="destructive"
+                      variant="outline"
+                      className="mfa-disable-all"
                       onClick={() => void handleDisableMfa('all')}
                       disabled={disablingMfaMethod !== null}
                     >
-                      <X size={16} />
                       {disablingMfaMethod === 'all' ? 'Disabling' : 'Disable all'}
                     </Button>
                   </div>
@@ -1157,18 +1132,10 @@ export function ProfilePage() {
                   <MfaScopeSwitch
                     icon={LockKeyhole}
                     title="Login"
-                    description="Ask for MFA when this account signs in."
+                    description="Ask for MFA when this account signs in. Signing in with a passkey already proves both factors, so no code is asked for."
                     checked={Boolean(mfaSettings?.requiredFor.login)}
                     disabled={!mfaSettings?.enabled || loadingMfaSettings || savingMfaSettings}
                     onCheckedChange={(checked) => void handleMfaScopeChange('login', checked)}
-                  />
-                  <MfaScopeSwitch
-                    icon={CreditCard}
-                    title="Payment"
-                    description="Require MFA before payment and payout actions."
-                    checked={Boolean(mfaSettings?.requiredFor.payment)}
-                    disabled={!mfaSettings?.enabled || loadingMfaSettings || savingMfaSettings}
-                    onCheckedChange={(checked) => void handleMfaScopeChange('payment', checked)}
                   />
                   <MfaScopeSwitch
                     icon={ShieldCheck}
@@ -1310,6 +1277,8 @@ export function ProfilePage() {
                   className="totp-form"
                   onSubmit={directPasswordResetForm.handleSubmit(handleDirectPasswordResetSubmit)}
                 >
+                  {/* So the manager updates the entry for this account rather than guessing. */}
+                  <CurrentAccountField email={user?.email} />
                   <FormField
                     control={directPasswordResetForm.control}
                     name="password"
@@ -1319,6 +1288,7 @@ export function ProfilePage() {
                         <FormControl>
                           <Input type="password" autoComplete="new-password" {...field} />
                         </FormControl>
+                        <PasswordRequirements password={field.value} />
                         <FormMessage />
                       </FormItem>
                     )}
@@ -1614,7 +1584,7 @@ function OverflowTooltipBox({
   )
 }
 
-function MfaScopeSwitch({
+export function MfaScopeSwitch({
   icon: Icon,
   title,
   description,
@@ -1629,16 +1599,27 @@ function MfaScopeSwitch({
   disabled: boolean
   onCheckedChange: (checked: boolean) => void
 }) {
+  // The title and description are the switch's label: without pointing at them, a screen reader
+  // announces "switch, on" with nothing to say which of the three it is.
+  const titleId = useId()
+  const descriptionId = useId()
+
   return (
     <div className="mfa-scope-item">
       <div className="mfa-scope-copy">
         <Icon size={18} />
         <div>
-          <strong>{title}</strong>
-          <span>{description}</span>
+          <strong id={titleId}>{title}</strong>
+          <span id={descriptionId}>{description}</span>
         </div>
       </div>
-      <Switch checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} />
+      <Switch
+        checked={checked}
+        disabled={disabled}
+        onCheckedChange={onCheckedChange}
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+      />
     </div>
   )
 }

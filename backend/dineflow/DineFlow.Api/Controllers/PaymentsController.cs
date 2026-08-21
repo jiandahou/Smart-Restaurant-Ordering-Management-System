@@ -16,6 +16,7 @@ using DineFlow.Infrastructure.Restaurant;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -76,6 +77,60 @@ public class PaymentsController : ControllerBase
         _logger = logger;
     }
 
+    /// <summary>
+    /// Customer return-path recovery. The Checkout Session id is an unguessable Stripe identifier,
+    /// and this endpoint can only perform an idempotent state refresh; it returns no order details.
+    /// </summary>
+    [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.GuestOrderAccess)]
+    [HttpPost("stripe/checkout-session/confirm")]
+    public async Task<ActionResult<ConfirmCheckoutSessionResponse>> ConfirmCheckoutSession(
+        ConfirmCheckoutSessionRequest request,
+        CancellationToken cancellationToken)
+    {
+        var sessionId = request.SessionId.Trim();
+        if (!sessionId.StartsWith("cs_", StringComparison.Ordinal))
+        {
+            return BadRequest(new { message = "Invalid Stripe Checkout Session id." });
+        }
+
+        var payment = await _dbContext.Payments
+            .Include(item => item.Order)
+                .ThenInclude(order => order!.Restaurant)
+            .FirstOrDefaultAsync(
+                item => item.Provider == PaymentProviders.Stripe &&
+                    item.ProviderCheckoutSessionId == sessionId,
+                cancellationToken);
+
+        if (payment is null)
+        {
+            return NotFound(new { message = "Checkout session was not found." });
+        }
+
+        var result = await _paymentSyncService.SyncCheckoutSessionAsync(
+            payment,
+            actorUserId: null,
+            cancellationToken);
+
+        if (!result.IsSuccess)
+        {
+            return StatusCode(result.StatusCode, new { message = result.Message });
+        }
+
+        var confirmed = payment.Status is PaymentStatus.Paid
+            or PaymentStatus.PartiallyRefunded
+            or PaymentStatus.Refunded;
+
+        return Ok(new ConfirmCheckoutSessionResponse
+        {
+            PaymentStatus = payment.Status.ToString(),
+            Confirmed = confirmed,
+            Message = confirmed
+                ? "Payment confirmed."
+                : "Payment is still being processed by Stripe."
+        });
+    }
+
     /// Manual recovery path: pulls the authoritative state from Stripe for a payment stranded by a
     /// dropped webhook, and fills in the settlement figures that only exist on the charge.
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]
@@ -90,6 +145,7 @@ public class PaymentsController : ControllerBase
             .Include(item => item.Order)
                 .ThenInclude(order => order!.Customer)
             .Include(item => item.Refunds)
+                .ThenInclude(refund => refund.Items)
             .FirstOrDefaultAsync(item => item.Id == paymentId, cancellationToken);
 
         if (payment is null)
@@ -104,12 +160,19 @@ public class PaymentsController : ControllerBase
             return Forbid();
         }
 
-        var result = await _paymentSyncService.SyncAsync(
+        // Through the session, not straight to the payment intent. An expired Checkout session leaves
+        // an intent Stripe reports as canceled, so going directly recorded the payment as Cancelled —
+        // which reads as "somebody cancelled this" when what happened is that the customer walked away
+        // and the session timed out. Only the session itself can tell those apart, and the difference
+        // is what staff act on. Payments with no session fall through to the intent as before.
+        var result = await _paymentSyncService.SyncCheckoutSessionAsync(
             payment,
             User.FindFirstValue(ClaimTypes.NameIdentifier),
             cancellationToken);
 
-        if (!result.IsSuccess)
+        // An expired session is a definite answer, not a failed sync: the state has just been written
+        // and the person who pressed Re-sync should be shown it, not an error over a stale row.
+        if (!result.IsSuccess && !result.StateIsSettled)
         {
             return StatusCode(result.StatusCode, new { message = result.Message });
         }
@@ -210,6 +273,7 @@ public class PaymentsController : ControllerBase
         var query = _dbContext.Payments
             .AsNoTracking()
             .Include(payment => payment.Refunds)
+                .ThenInclude(refund => refund.Items)
             .Include(payment => payment.Order)
                 .ThenInclude(order => order!.Restaurant)
             .Include(payment => payment.Order)
@@ -251,15 +315,15 @@ public class PaymentsController : ControllerBase
         var search = request.Search?.Trim();
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var pattern = $"%{search}%";
+            var pattern = SearchPattern.Contains(search);
             query = query.Where(payment =>
-                EF.Functions.ILike(payment.Id.ToString(), pattern) ||
-                (payment.ProviderCheckoutSessionId != null && EF.Functions.ILike(payment.ProviderCheckoutSessionId, pattern)) ||
-                (payment.ProviderPaymentIntentId != null && EF.Functions.ILike(payment.ProviderPaymentIntentId, pattern)) ||
-                (payment.Order != null && EF.Functions.ILike(payment.Order.OrderNumber, pattern)) ||
-                (payment.Order != null && payment.Order.Restaurant != null && EF.Functions.ILike(payment.Order.Restaurant.Name, pattern)) ||
-                (payment.Order != null && payment.Order.Customer != null && payment.Order.Customer.FullName != null && EF.Functions.ILike(payment.Order.Customer.FullName, pattern)) ||
-                (payment.Order != null && payment.Order.Customer != null && payment.Order.Customer.Email != null && EF.Functions.ILike(payment.Order.Customer.Email, pattern)));
+                EF.Functions.ILike(payment.Id.ToString(), pattern, SearchPattern.EscapeCharacter) ||
+                (payment.ProviderCheckoutSessionId != null && EF.Functions.ILike(payment.ProviderCheckoutSessionId, pattern, SearchPattern.EscapeCharacter)) ||
+                (payment.ProviderPaymentIntentId != null && EF.Functions.ILike(payment.ProviderPaymentIntentId, pattern, SearchPattern.EscapeCharacter)) ||
+                (payment.Order != null && EF.Functions.ILike(payment.Order.OrderNumber, pattern, SearchPattern.EscapeCharacter)) ||
+                (payment.Order != null && payment.Order.Restaurant != null && EF.Functions.ILike(payment.Order.Restaurant.Name, pattern, SearchPattern.EscapeCharacter)) ||
+                (payment.Order != null && payment.Order.Customer != null && payment.Order.Customer.FullName != null && EF.Functions.ILike(payment.Order.Customer.FullName, pattern, SearchPattern.EscapeCharacter)) ||
+                (payment.Order != null && payment.Order.Customer != null && payment.Order.Customer.Email != null && EF.Functions.ILike(payment.Order.Customer.Email, pattern, SearchPattern.EscapeCharacter)));
         }
 
         var sortedQuery = ApplyPaymentSorting(query, request.SortBy, request.IsDescending);
@@ -577,7 +641,16 @@ public class PaymentsController : ControllerBase
                 cancellationToken,
                 $"refund-request-{refundRequest.Id:N}",
                 approvedAmountCents,
-                refundRequest.Id);
+                refundRequest.Id,
+                RefundRequestItemPolicy.AllocateApprovedRefund(
+                    approvedAmountCents,
+                    refundRequest.Items
+                        .Select(item => new RefundItemAllocation(
+                            item.OrderItemId,
+                            item.MenuItemNameSnapshot,
+                            item.Quantity,
+                            item.AmountCents))
+                        .ToList()));
         }
         catch
         {
@@ -632,6 +705,8 @@ public class PaymentsController : ControllerBase
                     note
                 });
         }
+        CloseOrderIfFullyRefunded(refundRequest.Order, userId, now);
+
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(MapToAdminRefundRequestResponse(refundRequest));
@@ -743,7 +818,7 @@ public class PaymentsController : ControllerBase
             return NotFound(new { message = "Order not found." });
         }
 
-        if (!await CanStartCheckoutSessionForOrderAsync(order))
+        if (!await CanStartCheckoutSessionForOrderAsync(order, request.GuestAccessToken))
         {
             if (User.Identity?.IsAuthenticated != true)
             {
@@ -803,7 +878,7 @@ public class PaymentsController : ControllerBase
             return NotFound(new { message = "Order not found." });
         }
 
-        if (!await CanStartCheckoutSessionForOrderAsync(order))
+        if (!await CanStartCheckoutSessionForOrderAsync(order, request.GuestAccessToken))
         {
             if (User.Identity?.IsAuthenticated != true)
             {
@@ -818,22 +893,10 @@ public class PaymentsController : ControllerBase
             return BadRequest(new { message = "Order has no items to pay for." });
         }
 
-        if (order.PaymentStatus is PaymentStatus.Paid
-            or PaymentStatus.Refunded
-            or PaymentStatus.PartiallyRefunded
-            or PaymentStatus.NotRequired)
+        var refusal = OnlineCheckoutEligibility.Refuse(order.Status, order.PaymentStatus, order.PaymentMethod);
+        if (refusal is not null)
         {
-            return Conflict(new { message = "This order cannot be paid online." });
-        }
-
-        if (order.PaymentMethod != PaymentMethod.Online)
-        {
-            return Conflict(new { message = "This order is configured for payment at the counter." });
-        }
-
-        if (order.Status is OrderStatus.Cancelled or OrderStatus.Rejected)
-        {
-            return BadRequest(new { message = "Cancelled or rejected orders cannot be paid." });
+            return Conflict(new { message = refusal });
         }
 
         var menuItemIdsForNameFallback = order.OrderItems
@@ -1151,6 +1214,44 @@ public class PaymentsController : ControllerBase
             await transaction.RollbackAsync(cancellationToken);
             return Ok(new { received = true, duplicate = true });
         }
+        catch (StripeWebhookNotReadyException ex)
+            when (StripeWebhookRetryWindow.ShouldAskStripeToRetry(
+                stripeEvent.Created.ToUniversalTime(), DateTime.UtcNow))
+        {
+            // Abandon the event id along with the work it stood for, so Stripe's retry arrives as a
+            // new event rather than being answered "already seen". Recording it here is what lost
+            // disputes outright: the payment row was simply not written yet, and the retry that would
+            // have caught it was turned away at the door.
+            await transaction.RollbackAsync(cancellationToken);
+            _logger.LogWarning(
+                ex,
+                "Stripe event {EventId} ({EventType}) arrived before its payment existed. Asking Stripe to retry.",
+                stripeEvent.Id,
+                stripeEvent.Type);
+
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                message = "The payment this event refers to is not available yet. Please retry.",
+                eventId = stripeEvent.Id
+            });
+        }
+        catch (StripeWebhookNotReadyException ex)
+        {
+            // Past the retry window this is no longer a race — it is an event that will never match,
+            // and continuing to fail would have Stripe disable the endpoint and stop delivering
+            // everything else. Bank it and make the gap loud instead.
+            _logger.LogError(
+                ex,
+                "Stripe event {EventId} ({EventType}) never found its payment within {Hours}h and has been recorded unmatched.",
+                stripeEvent.Id,
+                stripeEvent.Type,
+                StripeWebhookRetryWindow.Duration.TotalHours);
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            return Ok(new { received = true, unmatched = true });
+        }
 
         return Ok(new
         {
@@ -1194,6 +1295,7 @@ public class PaymentsController : ControllerBase
     {
         var query = _dbContext.PaymentRefunds
             .AsNoTracking()
+            .Include(refund => refund.Items)
             .Include(refund => refund.Payment)
                 .ThenInclude(payment => payment!.Order)
                     .ThenInclude(order => order!.Restaurant)
@@ -1231,7 +1333,9 @@ public class PaymentsController : ControllerBase
                 .ThenInclude(order => order!.Customer)
             .Include(request => request.Payment)
                 .ThenInclude(payment => payment!.Refunds)
+                    .ThenInclude(refund => refund.Items)
             .Include(request => request.PaymentRefund)
+                .ThenInclude(refund => refund!.Items)
             .Include(request => request.Items)
             .AsQueryable();
 
@@ -1258,15 +1362,15 @@ public class PaymentsController : ControllerBase
             return query;
         }
 
-        var pattern = $"%{search}%";
+        var pattern = SearchPattern.Contains(search);
         return query.Where(request =>
-            (request.Reason != null && EF.Functions.ILike(request.Reason, pattern)) ||
-            (request.AdminNote != null && EF.Functions.ILike(request.AdminNote, pattern)) ||
-            (request.RequesterName != null && EF.Functions.ILike(request.RequesterName, pattern)) ||
-            (request.RequesterEmail != null && EF.Functions.ILike(request.RequesterEmail, pattern)) ||
-            (request.Order != null && EF.Functions.ILike(request.Order.OrderNumber, pattern)) ||
-            (request.Order != null && request.Order.Restaurant != null && EF.Functions.ILike(request.Order.Restaurant.Name, pattern)) ||
-            (request.Order != null && request.Order.Customer != null && request.Order.Customer.Email != null && EF.Functions.ILike(request.Order.Customer.Email, pattern)));
+            (request.Reason != null && EF.Functions.ILike(request.Reason, pattern, SearchPattern.EscapeCharacter)) ||
+            (request.AdminNote != null && EF.Functions.ILike(request.AdminNote, pattern, SearchPattern.EscapeCharacter)) ||
+            (request.RequesterName != null && EF.Functions.ILike(request.RequesterName, pattern, SearchPattern.EscapeCharacter)) ||
+            (request.RequesterEmail != null && EF.Functions.ILike(request.RequesterEmail, pattern, SearchPattern.EscapeCharacter)) ||
+            (request.Order != null && EF.Functions.ILike(request.Order.OrderNumber, pattern, SearchPattern.EscapeCharacter)) ||
+            (request.Order != null && request.Order.Restaurant != null && EF.Functions.ILike(request.Order.Restaurant.Name, pattern, SearchPattern.EscapeCharacter)) ||
+            (request.Order != null && request.Order.Customer != null && request.Order.Customer.Email != null && EF.Functions.ILike(request.Order.Customer.Email, pattern, SearchPattern.EscapeCharacter)));
     }
 
     private static IOrderedQueryable<PaymentRefundRequest>? ApplyRefundRequestSorting(
@@ -1305,15 +1409,15 @@ public class PaymentsController : ControllerBase
             return query;
         }
 
-        var pattern = $"%{search}%";
+        var pattern = SearchPattern.Contains(search);
         return query.Where(refund =>
-            (refund.ProviderRefundId != null && EF.Functions.ILike(refund.ProviderRefundId, pattern)) ||
-            (refund.ProviderPaymentIntentId != null && EF.Functions.ILike(refund.ProviderPaymentIntentId, pattern)) ||
-            (refund.Reason != null && EF.Functions.ILike(refund.Reason, pattern)) ||
-            (refund.FailureReason != null && EF.Functions.ILike(refund.FailureReason, pattern)) ||
-            (refund.Payment != null && refund.Payment.Order != null && EF.Functions.ILike(refund.Payment.Order.OrderNumber, pattern)) ||
-            (refund.Payment != null && refund.Payment.Order != null && refund.Payment.Order.Restaurant != null && EF.Functions.ILike(refund.Payment.Order.Restaurant.Name, pattern)) ||
-            (refund.Payment != null && refund.Payment.Order != null && refund.Payment.Order.Customer != null && refund.Payment.Order.Customer.Email != null && EF.Functions.ILike(refund.Payment.Order.Customer.Email, pattern)));
+            (refund.ProviderRefundId != null && EF.Functions.ILike(refund.ProviderRefundId, pattern, SearchPattern.EscapeCharacter)) ||
+            (refund.ProviderPaymentIntentId != null && EF.Functions.ILike(refund.ProviderPaymentIntentId, pattern, SearchPattern.EscapeCharacter)) ||
+            (refund.Reason != null && EF.Functions.ILike(refund.Reason, pattern, SearchPattern.EscapeCharacter)) ||
+            (refund.FailureReason != null && EF.Functions.ILike(refund.FailureReason, pattern, SearchPattern.EscapeCharacter)) ||
+            (refund.Payment != null && refund.Payment.Order != null && EF.Functions.ILike(refund.Payment.Order.OrderNumber, pattern, SearchPattern.EscapeCharacter)) ||
+            (refund.Payment != null && refund.Payment.Order != null && refund.Payment.Order.Restaurant != null && EF.Functions.ILike(refund.Payment.Order.Restaurant.Name, pattern, SearchPattern.EscapeCharacter)) ||
+            (refund.Payment != null && refund.Payment.Order != null && refund.Payment.Order.Customer != null && refund.Payment.Order.Customer.Email != null && EF.Functions.ILike(refund.Payment.Order.Customer.Email, pattern, SearchPattern.EscapeCharacter)));
     }
 
     private static IOrderedQueryable<PaymentRefund>? ApplyRefundSorting(
@@ -1361,6 +1465,18 @@ public class PaymentsController : ControllerBase
             Reason = refund.Reason,
             FailureReason = refund.FailureReason,
             RequestedByUserId = refund.RequestedByUserId,
+            UnattributedAmountCents = Math.Max(0, refund.AmountCents - refund.Items.Sum(item => item.AmountCents)),
+            Items = refund.Items
+                .OrderBy(item => item.MenuItemNameSnapshot)
+                .ThenBy(item => item.OrderItemId)
+                .Select(item => new AdminPaymentRefundItemResponse
+                {
+                    OrderItemId = item.OrderItemId,
+                    MenuItemNameSnapshot = item.MenuItemNameSnapshot,
+                    Quantity = item.Quantity,
+                    AmountCents = item.AmountCents
+                })
+                .ToList(),
             CreatedAt = refund.CreatedAt,
             UpdatedAt = refund.UpdatedAt,
             RefundedAt = refund.RefundedAt,
@@ -1609,6 +1725,18 @@ public class PaymentsController : ControllerBase
             Reason = refund.Reason,
             FailureReason = refund.FailureReason,
             RequestedByUserId = refund.RequestedByUserId,
+            UnattributedAmountCents = Math.Max(0, refund.AmountCents - refund.Items.Sum(item => item.AmountCents)),
+            Items = refund.Items
+                .OrderBy(item => item.MenuItemNameSnapshot)
+                .ThenBy(item => item.OrderItemId)
+                .Select(item => new AdminPaymentRefundItemResponse
+                {
+                    OrderItemId = item.OrderItemId,
+                    MenuItemNameSnapshot = item.MenuItemNameSnapshot,
+                    Quantity = item.Quantity,
+                    AmountCents = item.AmountCents
+                })
+                .ToList(),
             CreatedAt = refund.CreatedAt,
             UpdatedAt = refund.UpdatedAt,
             RefundedAt = refund.RefundedAt,
@@ -1664,19 +1792,8 @@ public class PaymentsController : ControllerBase
         return "Menu item";
     }
 
-    private static string AddCheckoutSessionId(string url)
-    {
-        if (string.IsNullOrWhiteSpace(url))
-        {
-            return "http://localhost:5173/payment/success?session_id={CHECKOUT_SESSION_ID}";
-        }
-
-        var separator = url.Contains('?') ? '&' : '?';
-
-        return url.Contains("{CHECKOUT_SESSION_ID}", StringComparison.Ordinal)
-            ? url
-            : $"{url}{separator}session_id={{CHECKOUT_SESSION_ID}}";
-    }
+    private static string AddCheckoutSessionId(string url) =>
+        StripeCheckoutReturnUrl.WithSessionId(url);
 
     private static string AddReturnToUrl(string url, string? returnTo)
     {
@@ -1747,8 +1864,8 @@ public class PaymentsController : ControllerBase
 
         if (payment is null)
         {
-            _logger.LogWarning("No payment found for Stripe checkout session {SessionId}.", session.Id);
-            return;
+            throw new StripeWebhookNotReadyException(
+                $"No payment found for Stripe checkout session {session.Id}.");
         }
 
         if (!IsStripeEventForPayment(payment, stripeEvent))
@@ -1889,8 +2006,8 @@ public class PaymentsController : ControllerBase
 
         if (payment is null)
         {
-            _logger.LogWarning("No payment found for Stripe payment intent {PaymentIntentId}.", paymentIntent.Id);
-            return;
+            throw new StripeWebhookNotReadyException(
+                $"No payment found for Stripe payment intent {paymentIntent.Id}.");
         }
 
         if (!IsStripeEventForPayment(payment, stripeEvent))
@@ -2025,11 +2142,8 @@ public class PaymentsController : ControllerBase
         var payment = await FindPaymentForRefundAsync(stripeRefund, cancellationToken);
         if (payment is null)
         {
-            _logger.LogWarning(
-                "No payment found for Stripe refund {RefundId} with payment intent {PaymentIntentId}.",
-                stripeRefund.Id,
-                stripeRefund.PaymentIntentId);
-            return;
+            throw new StripeWebhookNotReadyException(
+                $"No payment found for Stripe refund {stripeRefund.Id} with payment intent {stripeRefund.PaymentIntentId}.");
         }
 
         if (!IsStripeEventForPayment(payment, stripeEvent))
@@ -2204,11 +2318,8 @@ public class PaymentsController : ControllerBase
 
         if (payment is null)
         {
-            _logger.LogWarning(
-                "No payment found for refunded Stripe charge {ChargeId} with payment intent {PaymentIntentId}.",
-                charge.Id,
-                charge.PaymentIntentId);
-            return;
+            throw new StripeWebhookNotReadyException(
+                $"No payment found for refunded Stripe charge {charge.Id} with payment intent {charge.PaymentIntentId}.");
         }
 
         if (!IsStripeEventForPayment(payment, stripeEvent))
@@ -2278,10 +2389,8 @@ public class PaymentsController : ControllerBase
 
         if (payment is null)
         {
-            _logger.LogWarning(
-                "No payment found for Stripe dispute {DisputeId}.",
-                dispute.Id);
-            return;
+            throw new StripeWebhookNotReadyException(
+                $"No payment found for Stripe dispute {dispute.Id}.");
         }
 
         if (!IsStripeEventForPayment(payment, stripeEvent))
@@ -2411,7 +2520,11 @@ public class PaymentsController : ControllerBase
         Refund stripeRefund,
         CancellationToken cancellationToken)
     {
-        if (stripeRefund.Metadata.TryGetValue(PaymentIdMetadataKey, out var paymentId) &&
+        // Defensive: a webhook that throws is answered with a 500, and Stripe then retries it for
+        // days without ever getting anywhere. Real events always carry a metadata object, but a
+        // refund event that reaches us without one must be handled, not thrown at.
+        if (stripeRefund.Metadata is not null &&
+            stripeRefund.Metadata.TryGetValue(PaymentIdMetadataKey, out var paymentId) &&
             Guid.TryParse(paymentId, out var parsedPaymentId))
         {
             var paymentById = await _dbContext.Payments
@@ -2443,7 +2556,8 @@ public class PaymentsController : ControllerBase
         Refund stripeRefund,
         CancellationToken cancellationToken)
     {
-        if (stripeRefund.Metadata.TryGetValue(RefundIdMetadataKey, out var refundId) &&
+        if (stripeRefund.Metadata is not null &&
+            stripeRefund.Metadata.TryGetValue(RefundIdMetadataKey, out var refundId) &&
             Guid.TryParse(refundId, out var parsedRefundId))
         {
             var refundById = payment.Refunds.FirstOrDefault(refund => refund.Id == parsedRefundId)
@@ -2463,7 +2577,8 @@ public class PaymentsController : ControllerBase
 
     private static string? ResolveRefundReason(Refund stripeRefund)
     {
-        if (stripeRefund.Metadata.TryGetValue("reason", out var metadataReason) &&
+        if (stripeRefund.Metadata is not null &&
+            stripeRefund.Metadata.TryGetValue("reason", out var metadataReason) &&
             !string.IsNullOrWhiteSpace(metadataReason))
         {
             return metadataReason.Trim();
@@ -2482,21 +2597,10 @@ public class PaymentsController : ControllerBase
 
     private static void ReconcilePaymentRefundStatus(Payment payment, DateTime now)
     {
-        var refundedAmountCents = GetSucceededRefundedAmount(payment);
-        var nextStatus = payment.Status;
-
-        if (refundedAmountCents >= payment.AmountCents && payment.AmountCents > 0)
-        {
-            nextStatus = PaymentStatus.Refunded;
-        }
-        else if (refundedAmountCents > 0)
-        {
-            // Never walk a fully refunded payment back down: with out-of-order webhooks the
-            // succeeded total can be observed low momentarily, and Refunded is terminal.
-            nextStatus = payment.Status == PaymentStatus.Refunded
-                ? PaymentStatus.Refunded
-                : PaymentStatus.PartiallyRefunded;
-        }
+        var nextStatus = RefundAggregateStatus.Resolve(
+            payment.Status,
+            payment.AmountCents,
+            GetSucceededRefundedAmount(payment));
 
         if (payment.Status != nextStatus)
         {
@@ -2593,6 +2697,61 @@ public class PaymentsController : ControllerBase
                     .SetProperty(item => item.UpdatedAt, DateTime.UtcNow),
                 cancellationToken);
 
+    /// <summary>
+    /// Calls an order off once the customer has been paid back in full and nothing has been handed
+    /// over yet.
+    /// </summary>
+    /// <remarks>
+    /// Refunding and closing were separate acts, so a fully refunded order could sit in the kitchen
+    /// still reading as Accepted: the pass is told to cook it, the customer is told they have their
+    /// money back, and neither side can see the other. <see cref="RefundedOrderClosure"/> holds the
+    /// line about when this applies — an order already ready or completed keeps its history, because
+    /// the food exists and rewriting it as cancelled would record a day that did not happen.
+    /// </remarks>
+    private void CloseOrderIfFullyRefunded(Order? order, string? actorUserId, DateTime now)
+    {
+        if (order is null)
+        {
+            return;
+        }
+
+        var paidCents = order.Payments
+            .Where(payment => payment.Status is PaymentStatus.Paid or PaymentStatus.PartiallyRefunded)
+            .Sum(payment => payment.AmountCents);
+        var refundedCents = order.Payments
+            .SelectMany(payment => payment.Refunds)
+            .Where(refund => refund.Status == PaymentRefundStatus.Succeeded)
+            .Sum(refund => refund.AmountCents);
+
+        var closure = RefundedOrderClosure.ClosureFor(order.Status, paidCents, refundedCents);
+
+        if (closure is null)
+        {
+            return;
+        }
+
+        var previousStatus = order.Status;
+        order.Status = closure.Value;
+        order.UpdatedAt = now;
+
+        _dbContext.OrderStatusHistories.Add(new OrderStatusHistory
+        {
+            OrderId = order.Id,
+            PreviousStatus = previousStatus,
+            NewStatus = closure.Value,
+            Action = OrderTransitionAction.Cancel.ToString(),
+            Reason = RefundedOrderClosure.CustomerExplanation,
+            ChangedByUserId = actorUserId,
+            CreatedAt = now,
+        });
+
+        _reportLogWriter.AddOrderEvent(
+            order,
+            "order.closed_after_full_refund",
+            $"{order.OrderNumber}: {previousStatus} -> {closure.Value} after a full refund.",
+            new { previousStatus = previousStatus.ToString(), newStatus = closure.Value.ToString() });
+    }
+
     private static string? BuildApprovalRefundReason(string? customerReason, string? adminNote)
     {
         var parts = new List<string>();
@@ -2619,7 +2778,7 @@ public class PaymentsController : ControllerBase
         return value.Trim();
     }
 
-    private async Task<bool> CanStartCheckoutSessionForOrderAsync(Order order)
+    private async Task<bool> CanStartCheckoutSessionForOrderAsync(Order order, string? guestAccessToken)
     {
         if (await CanAccessRestaurantAsync(order.RestaurantId))
         {
@@ -2633,7 +2792,12 @@ public class PaymentsController : ControllerBase
             return string.Equals(order.CustomerId, currentUserId, StringComparison.Ordinal);
         }
 
-        return true;
+        // A guest order used to end here on an unconditional "yes": knowing the order id was enough
+        // to mint a Stripe session for somebody else's order, which both discloses what they ordered
+        // and leaves the order marked as having a payment in flight — locking its real owner out of
+        // changing how they pay. Orders placed before tokens existed carry no hash and stay
+        // reachable, which is the same allowance every other guest route makes.
+        return GuestAccessTokenService.IsAuthorized(order.GuestAccessTokenHash, guestAccessToken);
     }
 
     private async Task<bool> CanAccessRestaurantAsync(Guid? restaurantId)

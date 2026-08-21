@@ -10,6 +10,14 @@ public class RestaurantResponse
 
     public string Phone { get; set; } = string.Empty;
 
+    public string LegalBusinessName { get; set; } = string.Empty;
+    public string? Abn { get; set; }
+    public bool GstRegistered { get; set; }
+    public bool PricesIncludeGst { get; set; }
+    public string BusinessContactEmail { get; set; } = string.Empty;
+    public string RefundContactEmail { get; set; } = string.Empty;
+    public string? CustomerSurchargeNotice { get; set; }
+
     public string? ImageUrl { get; set; }
 
     public string CountryCode { get; set; } = string.Empty;
@@ -85,6 +93,10 @@ public class RestaurantOperationsResponse
     public string Name { get; set; } = string.Empty;
 
     public bool AutoAcceptOrders { get; set; }
+
+    public string StripeConnectStatus { get; set; } = "NotConnected";
+
+    public bool OnlinePaymentsEnabled { get; set; }
 }
 
 /// <summary>

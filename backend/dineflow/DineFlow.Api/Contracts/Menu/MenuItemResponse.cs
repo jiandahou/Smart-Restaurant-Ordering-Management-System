@@ -21,6 +21,9 @@ public class MenuItemResponse
     public bool IsGlutenFree { get; set; }
     public bool IsHalal { get; set; }
     public string? Allergens { get; set; }
+    public string? MayContainAllergens { get; set; }
+    public string? CrossContactStatement { get; set; }
+    public DateTime? AllergenInfoLastVerifiedAt { get; set; }
     public int SpiceLevel { get; set; }
     public string? ServingSize { get; set; }
     public int? Calories { get; set; }

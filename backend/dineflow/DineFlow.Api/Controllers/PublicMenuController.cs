@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
+using DineFlow.Api.Services;
+
 namespace DineFlow.Api.Controllers;
 
 [ApiController]
@@ -39,7 +41,7 @@ public class PublicMenuController(AppDbContext dbContext) : ControllerBase
             return BadRequest(new { message = "Search cannot exceed 120 characters." });
         }
 
-        var searchPattern = string.IsNullOrWhiteSpace(searchTerm) ? null : $"%{searchTerm}%";
+        var searchPattern = string.IsNullOrWhiteSpace(searchTerm) ? null : SearchPattern.Contains(searchTerm);
         var categoriesQuery = dbContext.MenuCategories
             .AsNoTracking()
             .Where(category => category.RestaurantId == restaurantId && category.IsActive);
@@ -50,15 +52,15 @@ public class PublicMenuController(AppDbContext dbContext) : ControllerBase
                 item.RestaurantId == restaurantId &&
                 item.IsAvailable &&
                 (
-                    EF.Functions.ILike(item.Name, searchPattern) ||
-                    (item.Description != null && EF.Functions.ILike(item.Description, searchPattern)) ||
+                    EF.Functions.ILike(item.Name, searchPattern, SearchPattern.EscapeCharacter) ||
+                    (item.Description != null && EF.Functions.ILike(item.Description, searchPattern, SearchPattern.EscapeCharacter)) ||
                     item.OptionGroups.Any(group =>
                         group.IsActive &&
                         (
-                            EF.Functions.ILike(group.Name, searchPattern) ||
+                            EF.Functions.ILike(group.Name, searchPattern, SearchPattern.EscapeCharacter) ||
                             group.Options.Any(option =>
                                 option.IsAvailable &&
-                                EF.Functions.ILike(option.Name, searchPattern))
+                                EF.Functions.ILike(option.Name, searchPattern, SearchPattern.EscapeCharacter))
                         ))
                 )));
         }
@@ -77,15 +79,15 @@ public class PublicMenuController(AppDbContext dbContext) : ControllerBase
                         item.RestaurantId == restaurantId &&
                         item.IsAvailable &&
                         (searchPattern == null ||
-                            EF.Functions.ILike(item.Name, searchPattern) ||
-                            (item.Description != null && EF.Functions.ILike(item.Description, searchPattern)) ||
+                            EF.Functions.ILike(item.Name, searchPattern, SearchPattern.EscapeCharacter) ||
+                            (item.Description != null && EF.Functions.ILike(item.Description, searchPattern, SearchPattern.EscapeCharacter)) ||
                             item.OptionGroups.Any(group =>
                                 group.IsActive &&
                                 (
-                                    EF.Functions.ILike(group.Name, searchPattern) ||
+                                    EF.Functions.ILike(group.Name, searchPattern, SearchPattern.EscapeCharacter) ||
                                     group.Options.Any(option =>
                                         option.IsAvailable &&
-                                        EF.Functions.ILike(option.Name, searchPattern))
+                                        EF.Functions.ILike(option.Name, searchPattern, SearchPattern.EscapeCharacter))
                                 ))))
                     .OrderBy(item => item.DisplayOrder)
                     .ThenBy(item => item.Name)
@@ -99,11 +101,15 @@ public class PublicMenuController(AppDbContext dbContext) : ControllerBase
                         ImageUrl = item.ImageUrl,
                         IsAvailable = item.IsAvailable,
                         IsSoldOut = item.IsSoldOut,
+                        StockQuantity = item.StockQuantity,
                         IsVegetarian = item.IsVegetarian,
                         IsVegan = item.IsVegan,
                         IsGlutenFree = item.IsGlutenFree,
                         IsHalal = item.IsHalal,
                         Allergens = item.Allergens,
+                        MayContainAllergens = item.MayContainAllergens,
+                        CrossContactStatement = item.CrossContactStatement,
+                        AllergenInfoLastVerifiedAt = item.AllergenInfoLastVerifiedAt,
                         SpiceLevel = item.SpiceLevel,
                         ServingSize = item.ServingSize,
                         Calories = item.Calories,
@@ -138,7 +144,11 @@ public class PublicMenuController(AppDbContext dbContext) : ControllerBase
                                         PriceAdjustment = option.PriceAdjustment,
                                         AdjustmentType = (int)option.AdjustmentType,
                                         MaxQuantity = option.MaxQuantity,
+                                        RemainingStock = option.StockQuantity,
                                         DisplayOrder = option.DisplayOrder,
+                                        Allergens = option.Allergens,
+                                        MayContainAllergens = option.MayContainAllergens,
+                                        CrossContactStatement = option.CrossContactStatement,
                                         IsAvailable = option.IsAvailable,
                                         CreatedAt = option.CreatedAt,
                                         UpdatedAt = option.UpdatedAt
@@ -150,6 +160,13 @@ public class PublicMenuController(AppDbContext dbContext) : ControllerBase
                     .ToList()
             })
             .ToListAsync(cancellationToken);
+
+        // Applied here rather than inside the query so the rule about what a customer may see lives
+        // in one place, expressed once, instead of as a condition SQL happens to be able to translate.
+        foreach (var item in categories.SelectMany(category => category.Items))
+        {
+            item.RemainingStock = PublicStockDisclosure.RemainingToPublish(item.StockQuantity, item.IsSoldOut);
+        }
 
         return Ok(new PublicMenuResponse
         {

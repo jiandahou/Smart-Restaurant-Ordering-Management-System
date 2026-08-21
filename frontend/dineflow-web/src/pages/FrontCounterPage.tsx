@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Banknote,
   CalendarClock,
+  CheckCircle2,
   ClipboardCheck,
   Clock3,
   CreditCard,
@@ -26,6 +27,7 @@ import { toast } from 'sonner'
 import {
   completeFrontCounterOrder,
   getFrontCounterTable,
+  getFrontCounterRecentPayments,
   getFrontCounterTables,
   getFrontCounterTakeaway,
   getRestaurants,
@@ -62,7 +64,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { createOrderRealtimeClient, type OrderRealtimeUpdate } from '@/realtime/orderConnection'
 import { useRestaurantPrinting } from '@/printing/RestaurantPrintingContext'
-import type { KitchenTicket } from '@/lib/thermalPrinter'
+import { ReceiptDocumentView } from '@/components/orders/ReceiptDocumentView'
+import {
+  buildReceiptLinePricing,
+  gstIncludedInTotal,
+  resolveReceiptTitle,
+  type ReceiptDocument,
+} from '@/lib/receipt'
 import { formatServiceCode } from '@/lib/serviceCode'
 import {
   getFrontCounterActionLabel,
@@ -81,7 +89,19 @@ type FrontCounterTab = 'takeaway' | 'tables'
 type FrontCounterTypeFilter = 'all' | 'takeaway' | 'dineIn'
 type PickupDayKind = 'today' | 'carried-over' | 'upcoming' | 'unassigned'
 type PendingSettlement =
-  | { kind: 'order'; order: AdminOrder; action: Exclude<FrontCounterOrderAction, null> }
+  | {
+      kind: 'order'
+      order: AdminOrder
+      action: Exclude<FrontCounterOrderAction, null>
+      /**
+       * Set when the money was taken but the pickup could not be completed. "Take payment and
+       * complete" is two calls, and the second one can fail on its own — the till then held the
+       * customer's cash while the dialog still read "Take payment & complete", inviting the cashier
+       * to charge them again. The server refuses a second payment, so what actually happened was a
+       * second, equally blank error over a customer who had already paid and was waiting for food.
+       */
+      paymentAlreadyTaken?: boolean
+    }
   | { kind: 'table'; table: FrontCounterTableDetail }
 
 type PickupDateGroup = {
@@ -112,16 +132,6 @@ type ReceiptPrintTarget =
       amountReceived?: number
       changeDue?: number
     }
-
-type FrontCounterReceiptItem = {
-  id: string
-  quantity: number
-  name: string
-  unitPrice: number
-  totalPrice: number
-  note: string | null
-  selectedOptions: AdminOrder['items'][number]['selectedOptions']
-}
 
 const unassignedPickupKey = 'unassigned'
 const typeFilterOptions: { value: FrontCounterTypeFilter; label: string }[] = [
@@ -319,7 +329,7 @@ function refreshReceiptTarget(target: ReceiptPrintTarget): ReceiptPrintTarget {
 
 export function FrontCounterPage() {
   const { user } = useAuth()
-  const { printFrontCounterTicket } = useRestaurantPrinting()
+  const { printFrontCounterReceipt } = useRestaurantPrinting()
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
   const [activeTab, setActiveTab] = useState<FrontCounterTab>('takeaway')
   const [restaurants, setRestaurants] = useState<Restaurant[]>([])
@@ -346,6 +356,15 @@ export function FrontCounterPage() {
   const [receiptPrintTarget, setReceiptPrintTarget] = useState<ReceiptPrintTarget | null>(null)
   const [lastReceiptTarget, setLastReceiptTarget] = useState<ReceiptPrintTarget | null>(null)
   const [pendingSettlement, setPendingSettlement] = useState<PendingSettlement | null>(null)
+  // Recent counter transactions, kept apart from the working lists. Finishing a pickup takes an
+  // order out of those lists, which is right — it is done — but the void and refund controls lived
+  // only there, so a payment stopped being reachable at the moment a customer was most likely to
+  // come back about it.
+  const [recentPaymentsOpen, setRecentPaymentsOpen] = useState(false)
+  const [recentPayments, setRecentPayments] = useState<AdminOrder[]>([])
+  const [recentPaymentsWindowHours, setRecentPaymentsWindowHours] = useState(24)
+  const [recentPaymentsLoading, setRecentPaymentsLoading] = useState(false)
+  const [recentPaymentsSearch, setRecentPaymentsSearch] = useState('')
   const [pendingReversal, setPendingReversal] = useState<
     { order: AdminOrder; mode: 'void' | 'refund' } | null
   >(null)
@@ -435,7 +454,7 @@ export function FrontCounterPage() {
   useEffect(() => {
     if (!receiptPrintTarget) return
 
-    document.body.classList.add('front-counter-printing-receipt')
+    document.body.classList.add('printing-receipt')
 
     const clearReceiptPrint = () => setReceiptPrintTarget(null)
     const printTimer = window.setTimeout(() => {
@@ -447,7 +466,7 @@ export function FrontCounterPage() {
     return () => {
       window.clearTimeout(printTimer)
       window.removeEventListener('afterprint', clearReceiptPrint)
-      document.body.classList.remove('front-counter-printing-receipt')
+      document.body.classList.remove('printing-receipt')
     }
   }, [receiptPrintTarget])
 
@@ -606,13 +625,13 @@ export function FrontCounterPage() {
     const nextTarget = refreshReceiptTarget(target)
     setLastReceiptTarget(nextTarget)
     const printedAt = new Date()
-    void printFrontCounterTicket(createFrontCounterThermalTicket(nextTarget, printedAt))
+    void printFrontCounterReceipt(buildReceipt(nextTarget, printedAt))
       .then((result) => {
         if (result === 'browser') {
           setReceiptPrintTarget(nextTarget)
         }
       })
-  }, [printFrontCounterTicket])
+  }, [printFrontCounterReceipt])
 
   const promptForReceiptPrint = useCallback((target: ReceiptPrintTarget) => {
     const nextTarget = refreshReceiptTarget(target)
@@ -633,6 +652,24 @@ export function FrontCounterPage() {
     setCashReceived('')
     setPendingSettlement({ kind: 'order', order, action })
   }, [])
+
+  const loadRecentPayments = useCallback(async (searchTerm: string) => {
+    setRecentPaymentsLoading(true)
+    try {
+      const response = await getFrontCounterRecentPayments({
+        ...restaurantParams,
+        search: searchTerm.trim() || undefined,
+      })
+      setRecentPayments(response.orders)
+      setRecentPaymentsWindowHours(response.windowHours)
+    } catch (loadError) {
+      toast.error('Could not load recent counter payments', {
+        description: loadError instanceof Error ? loadError.message : 'The request failed.',
+      })
+    } finally {
+      setRecentPaymentsLoading(false)
+    }
+  }, [restaurantParams])
 
   const requestCounterReversal = useCallback((order: AdminOrder) => {
     const mode = getCounterReversalMode(order)
@@ -666,7 +703,9 @@ export function FrontCounterPage() {
         })
       }
       setPendingReversal(null)
-      await loadFrontCounter()
+      // Both lists, because either can be the one showing this payment. A voided payment left in
+      // the recent list still offering "Void payment" is how someone tries it twice.
+      await Promise.all([loadFrontCounter(), loadRecentPayments(recentPaymentsSearch)])
     } catch (reversalError) {
       toast.error('Counter reversal failed', {
         description: reversalError instanceof Error ? reversalError.message : 'The request failed.',
@@ -674,7 +713,14 @@ export function FrontCounterPage() {
     } finally {
       setBusyOrderId(null)
     }
-  }, [loadFrontCounter, pendingReversal, restaurantParams, reversalReason])
+  }, [
+    loadFrontCounter,
+    loadRecentPayments,
+    pendingReversal,
+    recentPaymentsSearch,
+    restaurantParams,
+    reversalReason,
+  ])
 
   const requestTableSettlement = useCallback((table: FrontCounterTableDetail) => {
     if (!table.activeSessionId) {
@@ -706,13 +752,18 @@ export function FrontCounterPage() {
     if (pendingSettlement.kind === 'order') {
       const { order, action } = pendingSettlement
       setBusyOrderId(order.id)
+      // Held outside the try so the failure path knows how far it got. Taking the money and
+      // completing the pickup are two calls, and the difference between "nothing happened" and
+      // "the customer has paid" is the whole of what the cashier needs to be told.
+      let updatedOrder = order
+      let paymentTaken = false
       try {
-        let updatedOrder = order
         let receiptAmountReceived: number | undefined
         let receiptChangeDue: number | undefined
         if (action === 'recordPayment' || action === 'payAndComplete') {
           const paymentResponse = await recordFrontCounterPayment(order.id, payload, restaurantParams)
           updatedOrder = paymentResponse.order
+          paymentTaken = true
           receiptAmountReceived = paymentResponse.amountReceived
           receiptChangeDue = paymentResponse.changeDue
           if (paymentResponse.changeDue > 0) {
@@ -745,9 +796,25 @@ export function FrontCounterPage() {
         })
         await loadFrontCounter()
       } catch (settleError) {
-        toast.error('Counter action failed', {
-          description: settleError instanceof Error ? settleError.message : 'The request failed.',
-        })
+        const message = settleError instanceof Error ? settleError.message : 'The request failed.'
+
+        if (paymentTaken) {
+          // The customer has paid. Say so first, then leave a dialog that can only finish the job —
+          // `updatedOrder` is the server's own answer to the payment, so its amount due is nil and
+          // the tender fields go with it.
+          toast.error('Payment recorded, but the pickup was not completed', {
+            description: `${getOrderDisplayCode(order)}: ${message} Do not take payment again.`,
+          })
+          setPendingSettlement({
+            kind: 'order',
+            order: updatedOrder,
+            action: 'complete',
+            paymentAlreadyTaken: true,
+          })
+          await loadFrontCounter()
+        } else {
+          toast.error('Counter action failed', { description: message })
+        }
       } finally {
         setBusyOrderId(null)
       }
@@ -933,6 +1000,19 @@ export function FrontCounterPage() {
             >
               <RefreshCw size={16} className={cn(refreshing && 'animate-spin')} />
               Refresh
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={needsRestaurantSelection}
+              onClick={() => {
+                setRecentPaymentsOpen(true)
+                setRecentPaymentsSearch('')
+                void loadRecentPayments('')
+              }}
+            >
+              <History size={16} />
+              Recent payments
             </Button>
             {lastReceiptTarget ? (
               <ReceiptPrintButton
@@ -1234,7 +1314,7 @@ export function FrontCounterPage() {
                                   {item.quantity}x {item.itemName}
                                 </strong>
                                 {item.note && <span>{item.note}</span>}
-                                <OrderItemOptionBadges options={item.selectedOptions} currency={selectedTable.currency} />
+                                <OrderItemOptionBadges item={item} options={item.selectedOptions} currency={selectedTable.currency} />
                               </div>
                               <span>{formatMoney(item.totalPrice, selectedTable.currency)}</span>
                             </div>
@@ -1311,6 +1391,77 @@ export function FrontCounterPage() {
           )}
         </TabsContent>
       </Tabs>
+
+      <Dialog open={recentPaymentsOpen} onOpenChange={setRecentPaymentsOpen}>
+        <DialogContent className="front-counter-recent-payments-dialog">
+          <DialogHeader>
+            <DialogTitle>Recent counter payments</DialogTitle>
+            <DialogDescription>
+              Counter payments from the last {recentPaymentsWindowHours} hours, including pickups
+              that have already been completed. Use this when a customer comes back about a payment
+              that has left the queue.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="front-counter-search">
+            {recentPaymentsLoading ? <Loader2 size={17} className="animate-spin" /> : <Search size={17} />}
+            <Input
+              value={recentPaymentsSearch}
+              onChange={(event) => {
+                setRecentPaymentsSearch(event.target.value)
+                void loadRecentPayments(event.target.value)
+              }}
+              placeholder="Order, pickup, customer, table, or item"
+              aria-label="Search recent counter payments"
+            />
+          </div>
+
+          <div className="front-counter-recent-payments-list">
+            {recentPaymentsLoading && recentPayments.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Loading recent counter payments...</p>
+            ) : recentPayments.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                {recentPaymentsSearch.trim()
+                  ? `No counter payments in the last ${recentPaymentsWindowHours} hours match "${recentPaymentsSearch.trim()}".`
+                  : `No counter payments have been taken in the last ${recentPaymentsWindowHours} hours.`}
+              </p>
+            ) : recentPayments.map((order) => {
+              const mode = getCounterReversalMode(order)
+
+              return (
+                <div key={order.id} className="front-counter-recent-payment">
+                  <div>
+                    <strong>{getOrderDisplayCode(order)}</strong>
+                    <span>{formatMoney(order.totalAmount, order.currency)}</span>
+                  </div>
+                  <div className="front-counter-recent-payment-state">
+                    <OrderStatusBadge status={order.status} />
+                    <PaymentStatusBadge status={order.paymentStatus} />
+                  </div>
+                  {mode ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        // Stand this dialog down first: the reversal asks for a reason and needs the
+                        // screen to itself.
+                        setRecentPaymentsOpen(false)
+                        requestCounterReversal(order)
+                      }}
+                    >
+                      <Undo2 size={15} />
+                      {mode === 'void' ? 'Void payment' : 'Record refund'}
+                    </Button>
+                  ) : (
+                    <span className="text-sm text-muted-foreground">Nothing left to reverse.</span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={pendingReversal !== null}
@@ -1402,7 +1553,9 @@ export function FrontCounterPage() {
                   : 'Confirm pickup completion'}
             </DialogTitle>
             <DialogDescription>
-              Review the amount and workflow effect before recording this counter action.
+              {pendingSettlement?.kind === 'order' && pendingSettlement.paymentAlreadyTaken
+                ? 'The payment went through; only the pickup completion failed. Finish it here — do not take payment again.'
+                : 'Review the amount and workflow effect before recording this counter action.'}
             </DialogDescription>
           </DialogHeader>
 
@@ -1427,6 +1580,13 @@ export function FrontCounterPage() {
                   )}
                 </small>
               </div>
+
+              {pendingSettlement.kind === 'order' && pendingSettlement.paymentAlreadyTaken ? (
+                <div className="front-counter-settlement-paid-note" role="status">
+                  <CheckCircle2 className="size-4 shrink-0" />
+                  <span>Payment already recorded for {getOrderDisplayCode(pendingSettlement.order)}.</span>
+                </div>
+              ) : null}
 
               {pendingSettlement.kind === 'order' ? (
                 <div className="front-counter-settlement-effect">
@@ -1550,9 +1710,8 @@ export function FrontCounterPage() {
       </Dialog>
 
       {receiptPrintTarget ? (
-        <FrontCounterReceiptPrint
-          target={receiptPrintTarget}
-          printedAt={new Date(receiptPrintTarget.requestedAt)}
+        <ReceiptDocumentView
+          receipt={buildReceipt(receiptPrintTarget, new Date(receiptPrintTarget.requestedAt))}
         />
       ) : null}
     </main>
@@ -1669,7 +1828,7 @@ function FrontCounterOrderCard({
                   {item.note}
                 </span>
               )}
-              <OrderItemOptionBadges options={item.selectedOptions} currency={order.currency} />
+              <OrderItemOptionBadges item={item} options={item.selectedOptions} currency={order.currency} />
             </div>
             <span>{formatMoney(item.totalPrice, order.currency)}</span>
           </div>
@@ -1827,7 +1986,7 @@ function SelectedTablePanel({
                         {item.quantity}x {item.itemName}
                       </strong>
                       {item.note && <span>{item.note}</span>}
-                      <OrderItemOptionBadges options={item.selectedOptions} currency={selectedTable.currency} />
+                      <OrderItemOptionBadges item={item} options={item.selectedOptions} currency={selectedTable.currency} />
                     </div>
                     <span>{formatMoney(item.totalPrice, selectedTable.currency)}</span>
                   </div>
@@ -1939,211 +2098,117 @@ function ReceiptPrintButton({
   )
 }
 
-function FrontCounterReceiptPrint({ target, printedAt }: { target: ReceiptPrintTarget; printedAt: Date }) {
-  const receipt = buildReceipt(target, printedAt)
-
-  return (
-    <section className="front-counter-receipt-print" aria-label="Counter receipt">
-      <header className="front-counter-receipt-header">
-        <span>{receipt.title}</span>
-        <h1>{receipt.code}</h1>
-        <p>{receipt.restaurantName}</p>
-      </header>
-
-      <dl className="front-counter-receipt-meta">
-        {receipt.meta.map((item) => (
-          <div key={item.label}>
-            <dt>{item.label}</dt>
-            <dd>{item.value}</dd>
-          </div>
-        ))}
-      </dl>
-
-      <div className="front-counter-receipt-items">
-        {receipt.items.map((item) => {
-          const optionGroups = groupReceiptOptions(item.selectedOptions)
-
-          return (
-            <article key={item.id} className="front-counter-receipt-item">
-              <div className="front-counter-receipt-item-main">
-                <strong>{item.quantity}x</strong>
-                <span>{item.name}</span>
-                <small>{formatMoney(item.totalPrice, receipt.currency)}</small>
-              </div>
-
-              {optionGroups.length > 0 ? (
-                <div className="front-counter-receipt-options">
-                  {optionGroups.map((group) => (
-                    <div key={group.groupName}>
-                      <strong>{group.groupName}</strong>
-                      <span>
-                        {group.options
-                          .map((option) => {
-                            const quantity = option.quantity ?? 1
-                            const adjustment = option.priceAdjustmentSnapshot === 0
-                              ? ''
-                              : ` ${formatReceiptAdjustment(option.priceAdjustmentSnapshot, receipt.currency)}`
-                            return `${option.optionNameSnapshot}${quantity > 1 ? ` x${quantity}` : ''}${adjustment}`
-                          })
-                          .join(', ')}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-
-              {item.note ? (
-                <p className="front-counter-receipt-note">
-                  <strong>Note:</strong> {item.note}
-                </p>
-              ) : null}
-            </article>
-          )
-        })}
-      </div>
-
-      <dl className="front-counter-receipt-total">
-        <div>
-          <dt>Total</dt>
-          <dd>{formatMoney(receipt.totalAmount, receipt.currency)}</dd>
-        </div>
-        <div>
-          <dt>Amount due</dt>
-          <dd>{formatMoney(receipt.amountDue, receipt.currency)}</dd>
-        </div>
-      </dl>
-
-      <footer className="front-counter-receipt-footer">
-        <p>Thank you</p>
-      </footer>
-    </section>
-  )
-}
-
-function buildReceipt(target: ReceiptPrintTarget, printedAt: Date) {
+function buildReceipt(target: ReceiptPrintTarget, printedAt: Date): ReceiptDocument {
   if (target.kind === 'order') {
     const order = target.order
-    const items: FrontCounterReceiptItem[] = order.items.map((item) => ({
-      id: item.id,
-      quantity: item.quantity,
-      name: item.itemNameSnapshot?.trim() || 'Unnamed item',
-      unitPrice: item.unitPrice,
-      totalPrice: item.totalPrice,
-      note: item.note,
-      selectedOptions: item.selectedOptions,
-    }))
     const isPaid = target.paid
       || order.paymentStatus === 'Paid'
       || order.paymentStatus === 'PartiallyRefunded'
       || order.paymentStatus === 'NotRequired'
+    const currency = order.currency
     // Dine-in used to print just "Table P2", which left the receipt with no called number at all.
     const code = getOrderDisplayCode(order)
 
     return {
-      title: order.orderType === 'Takeaway' ? 'Pickup receipt' : 'Counter receipt',
+      documentTitle: resolveReceiptTitle(order.restaurantGstRegistered ?? false, isPaid),
+      scopeLabel: order.orderType === 'Takeaway' ? 'Pickup receipt' : 'Counter receipt',
       code,
-      restaurantName: order.restaurantName ?? 'Assigned restaurant',
-      currency: order.currency,
-      items,
+      supplier: {
+        restaurantName: order.restaurantName ?? 'Assigned restaurant',
+        legalBusinessName: order.restaurantLegalBusinessName ?? null,
+        abn: order.restaurantAbn ?? null,
+        address: order.restaurantAddress ?? null,
+        phone: order.restaurantPhone ?? null,
+      },
+      issuedAt: new Date(order.createdAt),
+      currency,
+      gstAmount: gstIncludedInTotal(order.totalAmount, order.restaurantGstRegistered ?? false),
+      items: order.items.map((item) => ({
+        id: item.id,
+        quantity: item.quantity,
+        name: item.itemNameSnapshot?.trim() || 'Unnamed item',
+        totalPrice: item.totalPrice,
+        note: item.note,
+        ...buildReceiptLinePricing({
+          quantity: item.quantity,
+          basePrice: item.basePriceSnapshot,
+          unitPrice: item.unitPrice,
+          options: item.selectedOptions,
+          currency,
+        }),
+      })),
       totalAmount: order.totalAmount,
       amountDue: isPaid ? 0 : order.totalAmount,
+      surchargeNotice: order.restaurantCustomerSurchargeNotice ?? null,
+      refundContactEmail: order.restaurantRefundContactEmail ?? null,
       meta: [
-        { label: 'Order', value: getOrderDisplayCode(order) },
+        { label: 'Order', value: order.orderNumber },
         { label: 'Type', value: getOrderTypeLabel(order.orderType) },
         { label: 'Status', value: target.completed ? 'Completed' : order.status },
         { label: 'Payment', value: isPaid ? 'Paid' : `${order.paymentMethod} / ${order.paymentStatus}` },
         ...(target.tender ? [{ label: 'Tender', value: target.tender }] : []),
         ...(target.amountReceived !== undefined
-          ? [{ label: 'Received', value: formatMoney(target.amountReceived, order.currency) }]
+          ? [{ label: 'Received', value: formatMoney(target.amountReceived, currency) }]
           : []),
         ...(target.changeDue !== undefined
-          ? [{ label: 'Change', value: formatMoney(target.changeDue, order.currency) }]
+          ? [{ label: 'Change', value: formatMoney(target.changeDue, currency) }]
           : []),
-        { label: 'Created', value: formatDateTime(order.createdAt) },
+        { label: 'Date', value: formatDateTime(order.createdAt) },
         { label: 'Printed', value: formatDateTime(printedAt.toISOString()) },
       ],
     }
   }
 
   const table = target.table
-  const items: FrontCounterReceiptItem[] = table.mergedItems.map((item) => ({
-    id: item.orderItemIds.join('-'),
-    quantity: item.quantity,
-    name: item.itemName,
-    unitPrice: item.unitPrice,
-    totalPrice: item.totalPrice,
-    note: item.note,
-    selectedOptions: item.selectedOptions,
-  }))
+  const currency = table.currency
 
   return {
-    title: target.completed ? 'Table receipt' : 'Table bill',
+    documentTitle: resolveReceiptTitle(table.restaurantGstRegistered, target.paid ?? false),
+    scopeLabel: target.completed ? 'Table receipt' : 'Table bill',
     code: `Table ${table.tableNumber}`,
-    restaurantName: table.restaurantName,
-    currency: table.currency,
-    items,
+    supplier: {
+      restaurantName: table.restaurantName,
+      legalBusinessName: table.restaurantLegalBusinessName,
+      abn: table.restaurantAbn,
+      address: table.restaurantAddress,
+      phone: table.restaurantPhone,
+    },
+    issuedAt: table.openedAt ? new Date(table.openedAt) : printedAt,
+    currency,
+    gstAmount: gstIncludedInTotal(table.totalAmount, table.restaurantGstRegistered),
+    items: table.mergedItems.map((item) => ({
+      id: item.orderItemIds.join('-'),
+      quantity: item.quantity,
+      name: item.itemName,
+      totalPrice: item.totalPrice,
+      note: item.note,
+      ...buildReceiptLinePricing({
+        quantity: item.quantity,
+        basePrice: item.basePriceSnapshot,
+        unitPrice: item.unitPrice,
+        options: item.selectedOptions,
+        currency,
+      }),
+    })),
     totalAmount: table.totalAmount,
     amountDue: target.paid ? 0 : table.amountDue,
+    surchargeNotice: table.restaurantCustomerSurchargeNotice,
+    refundContactEmail: table.restaurantRefundContactEmail,
     meta: [
       { label: 'Orders', value: String(table.activeOrderCount) },
       { label: 'Items', value: String(table.itemCount) },
       { label: 'Status', value: target.completed ? 'Completed' : (table.activeOrderCount > 0 ? 'Open' : 'Idle') },
-      { label: 'Payment', value: target.paid ? 'Paid at counter' : formatMoney(table.amountDue, table.currency) },
+      { label: 'Payment', value: target.paid ? 'Paid at counter' : formatMoney(table.amountDue, currency) },
       ...(target.tender ? [{ label: 'Tender', value: target.tender }] : []),
       ...(target.amountReceived !== undefined
-        ? [{ label: 'Received', value: formatMoney(target.amountReceived, table.currency) }]
+        ? [{ label: 'Received', value: formatMoney(target.amountReceived, currency) }]
         : []),
       ...(target.changeDue !== undefined
-        ? [{ label: 'Change', value: formatMoney(target.changeDue, table.currency) }]
+        ? [{ label: 'Change', value: formatMoney(target.changeDue, currency) }]
         : []),
       { label: 'Opened', value: table.openedAt ? formatDateTime(table.openedAt) : '-' },
       { label: 'Printed', value: formatDateTime(printedAt.toISOString()) },
     ],
-  }
-}
-
-function createFrontCounterThermalTicket(
-  target: ReceiptPrintTarget,
-  printedAt: Date,
-): KitchenTicket {
-  const receipt = buildReceipt(target, printedAt)
-  const status = receipt.meta.find((item) => item.label === 'Status')?.value ?? 'RECEIPT'
-  const createdAtValue = target.kind === 'order'
-    ? target.order.createdAt
-    : target.table.openedAt
-  const createdAt = createdAtValue ? new Date(createdAtValue) : printedAt
-
-  return {
-    serviceCode: receipt.code,
-    // Table bills span several orders, so there is no single order number to reconcile against.
-    orderNumber: target.kind === 'order' ? target.order.orderNumber : receipt.code,
-    restaurantName: receipt.restaurantName,
-    orderScope: receipt.title,
-    status,
-    createdAt,
-    printedAt,
-    itemCount: receipt.items.reduce((total, item) => total + item.quantity, 0),
-    orderNote: [
-      ...receipt.meta.map((item) => `${item.label}: ${item.value}`),
-      `TOTAL: ${formatMoney(receipt.totalAmount, receipt.currency)}`,
-      `AMOUNT DUE: ${formatMoney(receipt.amountDue, receipt.currency)}`,
-      'Thank you',
-    ].join('\n'),
-    items: receipt.items.map((item) => ({
-      quantity: item.quantity,
-      name: `${item.name}  ${formatMoney(item.totalPrice, receipt.currency)}`,
-      note: item.note,
-      optionGroups: groupReceiptOptions(item.selectedOptions).map((group) => ({
-        groupName: group.groupName,
-        options: group.options.map((option) => {
-          const quantity = option.quantity ?? 1
-          const adjustment = option.priceAdjustmentSnapshot === 0
-            ? ''
-            : ` ${formatReceiptAdjustment(option.priceAdjustmentSnapshot, receipt.currency)}`
-          return `${option.optionNameSnapshot}${quantity > 1 ? ` x${quantity}` : ''}${adjustment}`
-        }),
-      })),
-    })),
   }
 }
 
@@ -2159,23 +2224,4 @@ function getOrderTypeLabel(orderType: AdminOrder['orderType']) {
   if (orderType === 'DineIn') return 'Dine in'
   if (orderType === 'Takeaway') return 'Takeaway'
   return 'Scheduled'
-}
-
-function groupReceiptOptions(options: AdminOrder['items'][number]['selectedOptions']) {
-  const groups = new Map<string, typeof options>()
-
-  for (const option of options) {
-    const groupName = option.groupNameSnapshot || 'Options'
-    groups.set(groupName, [...(groups.get(groupName) ?? []), option])
-  }
-
-  return Array.from(groups.entries()).map(([groupName, groupedOptions]) => ({
-    groupName,
-    options: groupedOptions,
-  }))
-}
-
-function formatReceiptAdjustment(amount: number, currency: string) {
-  const formatted = formatMoney(Math.abs(amount), currency)
-  return amount > 0 ? `+${formatted}` : `-${formatted}`
 }

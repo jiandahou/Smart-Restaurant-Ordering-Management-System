@@ -17,5 +17,15 @@ public class ApplicationUser : IdentityUser
 
     public DateTime? LastLoginAt { get; set; }
 
+    public string? AcceptedCustomerTermsVersion { get; set; }
+
+    public string? AcknowledgedPrivacyPolicyVersion { get; set; }
+
+    public DateTime? LegalAcceptedAt { get; set; }
+
+    public string? LegalAcceptanceIpAddress { get; set; }
+
+    public string? LegalAcceptanceUserAgent { get; set; }
+
     public RestaurantEntity? Restaurant { get; set; }
 }

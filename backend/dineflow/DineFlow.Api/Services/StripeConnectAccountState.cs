@@ -28,6 +28,17 @@ public sealed class StripeConnectAccountStateSnapshot
     public string[] FuturePendingVerification { get; set; } = [];
 
     public StripeConnectRequirementErrorSnapshot[] Errors { get; set; } = [];
+
+    /// <summary>
+    /// What the connected account calls itself.
+    /// </summary>
+    /// <remarks>
+    /// Stripe Checkout puts this at the top of the card page, and it ends up on the customer's
+    /// statement — it is the only part of the connected account a customer ever sees, and the
+    /// platform was not reading it. Kept in the snapshot rather than its own column because the
+    /// snapshot is already how this account's state travels.
+    /// </remarks>
+    public string? BusinessProfileName { get; set; }
 }
 
 public sealed class StripeConnectRequirementErrorSnapshot
@@ -105,9 +116,31 @@ public static class StripeConnectAccountState
         StripeConnectAccountStateSnapshot snapshot,
         bool detailsSubmitted,
         bool chargesEnabled,
-        bool payoutsEnabled)
+        bool payoutsEnabled,
+        string? restaurantName = null,
+        string? legalBusinessName = null)
     {
         var restrictions = new List<StripeConnectRestrictionResponse>();
+
+        // Listed first because it is the one a customer meets. Everything else here is between the
+        // restaurant and Stripe; this one is the name on the card page, and it was wrong on a live
+        // account with every requirement satisfied — which is exactly why nothing caught it.
+        var identityMismatch = StripeMerchantIdentity.Describe(
+            snapshot.BusinessProfileName,
+            restaurantName,
+            legalBusinessName);
+        if (identityMismatch is not null)
+        {
+            restrictions.Add(new StripeConnectRestrictionResponse
+            {
+                Code = "merchant_identity_mismatch",
+                Title = "Customers will see a different business name",
+                Message = identityMismatch,
+                Severity = "Error",
+                Requirement = "business_profile.name",
+                ActionRequired = true
+            });
+        }
         var representedRequirements = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var error in snapshot.Errors.Where(error => !string.IsNullOrWhiteSpace(error.Requirement)))
@@ -240,6 +273,10 @@ public static class StripeConnectAccountState
 
     private static StripeConnectAccountStateSnapshot CreateSnapshot(Account account) => new()
     {
+        // Falls back to the dashboard display name: an account can be trading under a name it set
+        // there before its business profile is complete, and that is still what customers read.
+        BusinessProfileName = account.BusinessProfile?.Name
+            ?? account.Settings?.Dashboard?.DisplayName,
         DisabledReason = account.Requirements?.DisabledReason,
         CurrentDeadline = account.Requirements?.CurrentDeadline,
         CurrentlyDue = Clean(account.Requirements?.CurrentlyDue),

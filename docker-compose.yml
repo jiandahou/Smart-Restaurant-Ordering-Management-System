@@ -80,6 +80,14 @@ services:
       Email__From: ${AUTH_EMAIL_FROM:-noreply@theunknownfish.com}
       Email__Server: ${EMAIL_SERVER:-}
       Email__ResendApiKey: ${RESEND_API_KEY:-}
+      # The legal identity printed in every transactional email footer. Documented in .env.example
+      # but never reached the container, so all mail went out with no operator name, ABN or support
+      # address — the one thing that tells a recipient the message is from a real business.
+      Compliance__OperatorName: ${COMPLIANCE_OPERATOR_NAME:-}
+      Compliance__OperatorAbn: ${COMPLIANCE_OPERATOR_ABN:-}
+      Compliance__OperatorAddress: ${COMPLIANCE_OPERATOR_ADDRESS:-}
+      Compliance__PrivacyEmail: ${COMPLIANCE_PRIVACY_EMAIL:-}
+      Compliance__SupportEmail: ${COMPLIANCE_SUPPORT_EMAIL:-}
       Email__FrontendBaseUrl: ${FRONTEND_BASE_URL:-http://localhost:5173}
       EMAIL_FROM: ${EMAIL_FROM:-noreply@theunknownfish.com}
       AUTH_EMAIL_FROM: ${AUTH_EMAIL_FROM:-noreply@theunknownfish.com}
@@ -132,6 +140,10 @@ services:
       SeedOwner__Email: ${SEED_OWNER_EMAIL:-owner@dineflow.com}
       SeedOwner__Password: ${SEED_OWNER_PASSWORD:-ChangeMe123!}
       SeedOwner__FullName: ${SEED_OWNER_FULL_NAME:-DineFlow Owner}
+      # Local stack only. Both default to off in Production regardless of what is set here:
+      # migrations belong to a release task, and demo data is refused outright.
+      Database__MigrateOnStartup: ${DATABASE_MIGRATE_ON_STARTUP:-true}
+      Seed__DemoData: ${SEED_DEMO_DATA:-true}
       QzPrint__CertificatePemBase64: ${QZ_CERT_PEM_B64:-}
       QzPrint__PrivateKeyPemBase64: ${QZ_PRIVATE_KEY_PEM_B64:-}
     ports:
@@ -154,8 +166,18 @@ services:
       backend:
         condition: service_healthy
     environment:
+      # Only the dev proxy knows where the backend is. The app itself calls relative /api paths on
+      # its own origin, in dev and deployed alike — there is no API base URL to configure.
       VITE_API_PROXY_TARGET: http://backend:8080
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:5000}
+      # Keep local MinIO images on the same browser origin. This is required when another device
+      # opens Vite over the LAN because localhost:9000 would otherwise refer to that device.
+      VITE_ASSET_PROXY_TARGET: http://minio:9000
+      # The sign-in prefill. Documented in .env.example but not reachable from here until now, so
+      # a run under Compose had no way to start from empty fields — set VITE_DEMO_LOGIN=off for an
+      # auth pass that should behave like a deployed build.
+      VITE_DEMO_LOGIN: ${VITE_DEMO_LOGIN:-on}
+      VITE_DEMO_LOGIN_EMAIL: ${VITE_DEMO_LOGIN_EMAIL:-owner@dineflow.com}
+      VITE_DEMO_LOGIN_PASSWORD: ${VITE_DEMO_LOGIN_PASSWORD:-ChangeMe123!}
       CHOKIDAR_USEPOLLING: "true"
       WATCHPACK_POLLING: "true"
     volumes:

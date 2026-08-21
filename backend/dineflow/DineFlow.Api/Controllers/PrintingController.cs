@@ -23,6 +23,25 @@ public class PrintingController : ControllerBase
     private const int MaximumClaimSize = 10;
     private const int MaximumAutomaticAttempts = 10;
     private static readonly TimeSpan StationLeaseDuration = TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// How long a station may be silent before the tickets it owns go back into the pool.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A job keeps the station that last handled it, and the claim offers a job only to its own
+    /// station or to none. A station is per-browser, so closing a tab retires one for good — and the
+    /// tickets it owned became unclaimable by every other station in the kitchen. One sat Pending for
+    /// a week beside a working printer, with no button to press: Retry only shows on a failed job,
+    /// and this one was Pending.
+    /// </para>
+    /// <para>
+    /// Generous next to the forty-five second lease, because the cost of being wrong runs one way. A
+    /// station that is merely slow reclaims its own job on its next poll; one that is gone must not
+    /// take a ticket with it.
+    /// </para>
+    /// </remarks>
+    private static readonly TimeSpan AbandonedStationAfter = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan JobLeaseDuration = TimeSpan.FromSeconds(90);
 
     private readonly AppDbContext _dbContext;
@@ -189,6 +208,8 @@ public class PrintingController : ControllerBase
             PrintJobState.PrinterResponded
         };
 
+        var abandonedBefore = now - AbandonedStationAfter;
+
         var jobs = await _dbContext.PrintJobs
             .Include(job => job.Order)
                 .ThenInclude(order => order.OrderItems)
@@ -200,7 +221,13 @@ public class PrintingController : ControllerBase
             .Include(job => job.Order.Restaurant)
             .Include(job => job.Order.Table)
             .Where(job => job.RestaurantId == access.RestaurantId)
-            .Where(job => job.StationId == null || job.StationId == station.Id)
+            .Where(job =>
+                job.StationId == null
+                || job.StationId == station.Id
+                // Owned by a station that has stopped polling: the ticket is nobody's now, and
+                // leaving it there means no printer in the building can pick it up.
+                || job.Station!.LastSeenAt == null
+                || job.Station.LastSeenAt < abandonedBefore)
             .Where(job => station.AutoPrintEnabled || job.Trigger != PrintJobTrigger.Automatic)
             .Where(job =>
                 job.State == PrintJobState.Pending ||
@@ -356,7 +383,14 @@ public class PrintingController : ControllerBase
         }
 
         var jobs = await query
-            .OrderByDescending(job => job.UpdatedAt)
+            // Anything still needing attention comes first, before the window is applied. The counts
+            // below are taken over every job in the restaurant while this list was only the most
+            // recently updated few, so a failure old enough to be pushed out reported as "1 failed"
+            // with nothing in the list to show for it — the badge and the list have to describe the
+            // same jobs.
+            .OrderByDescending(job =>
+                job.State == PrintJobState.Failed || job.State == PrintJobState.DeadLetter)
+            .ThenByDescending(job => job.UpdatedAt)
             .ThenByDescending(job => job.Id)
             .Take(Math.Clamp(take, 1, 200))
             .ToListAsync(cancellationToken);
@@ -445,6 +479,14 @@ public class PrintingController : ControllerBase
         job.LastStatusDetail = NormalizeOptional(request.Reason, 2_000) ?? "Manual retry requested.";
         job.UpdatedAt = DateTime.UtcNow;
         ClearJobLease(job);
+
+        // Back into the pool, not just off its lease. A job keeps the station that last handled it,
+        // and stations are per-browser — closing one and opening another makes a new one. So a
+        // ticket that failed last week stayed owned by a station that will never poll again: the
+        // claim only offers a job to its own station or to none, and a manual retry left it Pending
+        // for ever with a working printer sitting right there. Somebody pressing Retry is asking for
+        // it to print from where they are now.
+        job.StationId = null;
         await _dbContext.SaveChangesAsync(cancellationToken);
         return Ok(MapJob(job));
     }
@@ -559,7 +601,10 @@ public class PrintingController : ControllerBase
                     .ThenInclude(payment => payment.Refunds)
             .Include(job => job.Order.Customer)
             .Include(job => job.Order.Restaurant)
-            .Include(job => job.Order.Table);
+            .Include(job => job.Order.Table)
+            // Which printer the ticket was meant for. Without it "a ticket failed" leaves someone
+            // walking a kitchen looking for the machine that did not print.
+            .Include(job => job.Station);
 
     private async Task<(Guid RestaurantId, ActionResult? Error)> ResolveRestaurantAsync(
         Guid? requestedRestaurantId,
@@ -669,6 +714,8 @@ public class PrintingController : ControllerBase
             CreatedAt = job.CreatedAt,
             UpdatedAt = job.UpdatedAt,
             CompletedAt = job.CompletedAt,
+            StationName = job.Station?.Name,
+            PrinterName = job.Station?.PrinterName,
             Order = AdminOrdersController.MapToAdminResponse(job.Order)
         };
 

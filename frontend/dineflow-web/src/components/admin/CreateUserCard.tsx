@@ -25,17 +25,14 @@ import { Input } from '../ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
 import { Switch } from '../ui/switch'
 import { creatableRoles, roleRank, userRoleLabels } from './userRoles'
+import { PasswordRequirements } from '../auth/PasswordRequirements'
+import { fullNameSchema } from '@/lib/nameFields'
+import { passwordSchema } from '@/lib/passwordPolicy'
 
-const temporaryPasswordSchema = z
-  .string()
-  .min(6, 'Password must be at least 6 characters.')
-  .regex(/[0-9]/, 'Password must include a number.')
-  .regex(/[a-z]/, 'Password must include a lowercase letter.')
-  .regex(/[A-Z]/, 'Password must include an uppercase letter.')
-  .regex(/[^a-zA-Z0-9]/, 'Password must include a symbol.')
+const temporaryPasswordSchema = passwordSchema
 
 const createUserSchema = z.object({
-  fullName: z.string(),
+  fullName: fullNameSchema(),
   email: z.email('Enter a valid email address.'),
   password: z.string(),
   sendPasswordSetupEmail: z.boolean(),
@@ -132,7 +129,7 @@ function CreateUserForm({
         email: values.email.trim(),
         password: values.sendPasswordSetupEmail ? '' : values.password,
         sendPasswordSetupEmail: values.sendPasswordSetupEmail,
-        fullName: values.fullName.trim() || undefined,
+        fullName: values.fullName,
         restaurantId: needsRestaurantId ? values.restaurantId.trim() : undefined,
         role: values.role,
       })
@@ -218,8 +215,9 @@ function CreateUserForm({
               <FormItem>
                 <FormLabel>Temporary password</FormLabel>
                 <FormControl>
-                  <Input type="password" autoComplete="new-password" placeholder="ChangeMe123!" {...field} />
+                  <Input type="password" autoComplete="new-password" placeholder="At least 8 characters" {...field} />
                 </FormControl>
+                <PasswordRequirements password={field.value} />
                 <p className="create-user-password-help">Share this password securely and ask the user to change it after signing in.</p>
                 <FormMessage />
               </FormItem>

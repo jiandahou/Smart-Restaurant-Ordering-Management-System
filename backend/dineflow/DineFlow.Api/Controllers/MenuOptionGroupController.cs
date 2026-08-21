@@ -53,6 +53,9 @@ public class MenuOptionGroupController : ControllerBase
         AdjustmentType = (int)o.AdjustmentType,
         MaxQuantity = o.MaxQuantity,
         DisplayOrder = o.DisplayOrder,
+        Allergens = o.Allergens,
+        MayContainAllergens = o.MayContainAllergens,
+        CrossContactStatement = o.CrossContactStatement,
         IsAvailable = o.IsAvailable,
         CreatedAt = o.CreatedAt,
         UpdatedAt = o.UpdatedAt
@@ -267,6 +270,42 @@ public class MenuOptionGroupController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>Trims a disclosure and treats whitespace as nothing declared, matching menu items.</summary>
+    private static string? NormalizeDisclosure(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    /// <summary>
+    /// Held to the same limits as the dish's own fields, so a declaration cannot be truncated on
+    /// one and not the other.
+    /// </summary>
+    private static string? DescribeDisclosureProblem(string? allergens, string? mayContain, string? crossContact)
+    {
+        if (allergens?.Trim().Length > 500 || mayContain?.Trim().Length > 500)
+            return "Allergens and may-contain allergens must not exceed 500 characters.";
+
+        return crossContact?.Trim().Length > 1_000
+            ? "Cross-contact statement must not exceed 1,000 characters."
+            : null;
+    }
+
+    /// <summary>The adjustment types that exist, named and numbered, for an error message.</summary>
+    private static string DescribeAdjustmentTypes() =>
+        string.Join(", ", Enum.GetValues<OptionAdjustmentType>().Select(value => $"{(int)value} ({value})"));
+
+    /// <summary>
+    /// Why this restaurant cannot charge this adjustment, or null when it can.
+    /// </summary>
+    private async Task<string?> DescribePriceProblemAsync(Guid restaurantId, decimal amount)
+    {
+        var currency = await _db.Restaurants
+            .AsNoTracking()
+            .Where(restaurant => restaurant.Id == restaurantId)
+            .Select(restaurant => restaurant.Currency)
+            .FirstOrDefaultAsync();
+
+        return CurrencyPrecision.DescribeProblem(amount, currency, "Price adjustment");
+    }
+
     // ── option endpoints ─────────────────────────────────────────────────────
 
     [HttpGet("{groupId:guid}/options")]
@@ -295,6 +334,17 @@ public class MenuOptionGroupController : ControllerBase
         var item = await LoadItemForTenantAsync(itemId);
         if (item is null) return Forbid();
 
+        // A raw cast turns any int into the enum, so 99 became a stored "adjustment type" that no
+        // pricing rule recognises. The customer's browser fell through to its Add branch and showed
+        // +A$1.00; the server's switch fell through to its default and charged nothing extra. The
+        // displayed price and the charged price came from the same row and disagreed.
+        if (!Enum.IsDefined(typeof(OptionAdjustmentType), request.AdjustmentType))
+            return BadRequest(new
+            {
+                message = $"AdjustmentType must be one of: {DescribeAdjustmentTypes()}.",
+                code = "invalid_adjustment_type"
+            });
+
         var adjustmentType = (OptionAdjustmentType)request.AdjustmentType;
 
         // Remove type must have non-positive adjustment; Add/Replace must be non-negative
@@ -307,6 +357,19 @@ public class MenuOptionGroupController : ControllerBase
         if (request.MaxQuantity < 1)
             return BadRequest(new { message = "MaxQuantity must be at least 1." });
 
+        var disclosureProblem = DescribeDisclosureProblem(request.Allergens, request.MayContainAllergens, request.CrossContactStatement);
+
+        if (disclosureProblem is not null)
+            return BadRequest(new { message = disclosureProblem });
+
+        // An adjustment finer than a cent has the same problem as a price finer than a cent: it is
+        // added to the unit price and then has to be charged, and no column or conversion downstream
+        // can carry the remainder.
+        var adjustmentProblem = await DescribePriceProblemAsync(item.RestaurantId, request.PriceAdjustment);
+
+        if (adjustmentProblem is not null)
+            return BadRequest(new { message = adjustmentProblem, code = "price_precision" });
+
         var option = new MenuItemOption
         {
             GroupId = groupId,
@@ -316,7 +379,10 @@ public class MenuOptionGroupController : ControllerBase
             PriceAdjustment = request.PriceAdjustment,
             AdjustmentType = adjustmentType,
             MaxQuantity = request.MaxQuantity,
-            DisplayOrder = request.DisplayOrder
+            DisplayOrder = request.DisplayOrder,
+            Allergens = NormalizeDisclosure(request.Allergens),
+            MayContainAllergens = NormalizeDisclosure(request.MayContainAllergens),
+            CrossContactStatement = NormalizeDisclosure(request.CrossContactStatement)
         };
 
         _db.MenuItemOptions.Add(option);
@@ -396,6 +462,17 @@ public class MenuOptionGroupController : ControllerBase
         var item = await LoadItemForTenantAsync(itemId);
         if (item is null) return Forbid();
 
+        // A raw cast turns any int into the enum, so 99 became a stored "adjustment type" that no
+        // pricing rule recognises. The customer's browser fell through to its Add branch and showed
+        // +A$1.00; the server's switch fell through to its default and charged nothing extra. The
+        // displayed price and the charged price came from the same row and disagreed.
+        if (!Enum.IsDefined(typeof(OptionAdjustmentType), request.AdjustmentType))
+            return BadRequest(new
+            {
+                message = $"AdjustmentType must be one of: {DescribeAdjustmentTypes()}.",
+                code = "invalid_adjustment_type"
+            });
+
         var adjustmentType = (OptionAdjustmentType)request.AdjustmentType;
 
         if (adjustmentType == OptionAdjustmentType.Remove && request.PriceAdjustment > 0)
@@ -407,6 +484,19 @@ public class MenuOptionGroupController : ControllerBase
         if (request.MaxQuantity < 1)
             return BadRequest(new { message = "MaxQuantity must be at least 1." });
 
+        var disclosureProblem = DescribeDisclosureProblem(request.Allergens, request.MayContainAllergens, request.CrossContactStatement);
+
+        if (disclosureProblem is not null)
+            return BadRequest(new { message = disclosureProblem });
+
+        // An adjustment finer than a cent has the same problem as a price finer than a cent: it is
+        // added to the unit price and then has to be charged, and no column or conversion downstream
+        // can carry the remainder.
+        var adjustmentProblem = await DescribePriceProblemAsync(item.RestaurantId, request.PriceAdjustment);
+
+        if (adjustmentProblem is not null)
+            return BadRequest(new { message = adjustmentProblem, code = "price_precision" });
+
         var group = await _db.MenuItemOptionGroups
             .AsNoTracking()
             .FirstOrDefaultAsync(g => g.Id == groupId && g.MenuItemId == itemId);
@@ -417,6 +507,9 @@ public class MenuOptionGroupController : ControllerBase
         option.AdjustmentType = adjustmentType;
         option.MaxQuantity = request.MaxQuantity;
         option.DisplayOrder = request.DisplayOrder;
+        option.Allergens = NormalizeDisclosure(request.Allergens);
+        option.MayContainAllergens = NormalizeDisclosure(request.MayContainAllergens);
+        option.CrossContactStatement = NormalizeDisclosure(request.CrossContactStatement);
         option.IsAvailable = request.IsAvailable;
         option.UpdatedAt = DateTime.UtcNow;
 

@@ -6,7 +6,6 @@ import {
 } from '@microsoft/signalr'
 import { getStoredToken } from '@/api/auth'
 
-const realtimeBaseUrl = (import.meta.env.VITE_SIGNALR_BASE_URL || '').replace(/\/$/, '')
 
 export type OrderRealtimeUpdate = {
   reason: string
@@ -38,7 +37,7 @@ export type OrderRealtimeClient = {
 
 export function createOrderRealtimeClient(handlers: OrderRealtimeHandlers): OrderRealtimeClient {
   const connection = new HubConnectionBuilder()
-    .withUrl(`${realtimeBaseUrl}/api/hubs/orders`, {
+    .withUrl('/api/hubs/orders', {
       accessTokenFactory: () => getStoredToken() ?? '',
     })
     .withAutomaticReconnect([0, 2_000, 5_000, 10_000, 30_000])

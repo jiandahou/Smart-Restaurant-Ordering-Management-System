@@ -1,6 +1,6 @@
 using System.Security.Claims;
 using System.Security.Cryptography;
-using System.Text.Encodings.Web;
+using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Auth;
 using DineFlow.Api.Services;
 using DineFlow.Application.Authentication;
@@ -9,7 +9,9 @@ using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using OtpNet;
 
 namespace DineFlow.Api.Controllers;
@@ -32,6 +34,7 @@ public sealed class MfaController : ControllerBase
     private readonly IMfaLoginChallengeStore _loginChallengeStore;
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly ReportLogWriter _reportLogWriter;
+    private readonly TransactionalEmailLayout _emailLayout;
 
     public MfaController(
         AppDbContext dbContext,
@@ -41,7 +44,8 @@ public sealed class MfaController : ControllerBase
         IRefreshTokenService refreshTokenService,
         IMfaLoginChallengeStore loginChallengeStore,
         UserManager<ApplicationUser> userManager,
-        ReportLogWriter reportLogWriter)
+        ReportLogWriter reportLogWriter,
+        TransactionalEmailLayout emailLayout)
     {
         _dbContext = dbContext;
         _emailSender = emailSender;
@@ -51,6 +55,7 @@ public sealed class MfaController : ControllerBase
         _loginChallengeStore = loginChallengeStore;
         _userManager = userManager;
         _reportLogWriter = reportLogWriter;
+        _emailLayout = emailLayout;
     }
 
     [HttpGet("settings")]
@@ -66,8 +71,7 @@ public sealed class MfaController : ControllerBase
             });
         }
 
-        var settings = await GetOrCreateSettingsAsync(user.Id, cancellationToken);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        var settings = await GetSettingsOrDefaultAsync(user.Id, cancellationToken);
 
         return Ok(ToSettingsResponse(settings));
     }
@@ -91,7 +95,10 @@ public sealed class MfaController : ControllerBase
         var beforeSettings = SnapshotSettings(settings);
 
         settings.RequireForLogin = request.RequireForLogin;
-        settings.RequireForPayment = request.RequireForPayment;
+        // The payment scope was offered as a toggle and enforced nowhere: no payment or payout path
+        // ever read it, so switching it on protected nothing while looking like it did. Any value
+        // left on an account is cleared here rather than kept alive as a promise nothing keeps.
+        settings.RequireForPayment = false;
         settings.RequireForSensitiveActions = request.RequireForSensitiveActions;
         settings.UpdatedAt = DateTime.UtcNow;
 
@@ -125,7 +132,7 @@ public sealed class MfaController : ControllerBase
             });
         }
 
-        var settings = await GetOrCreateSettingsAsync(user.Id, cancellationToken);
+        var settings = await GetSettingsOrDefaultAsync(user.Id, cancellationToken);
 
         if (!settings.EmailEnabled)
         {
@@ -222,7 +229,7 @@ public sealed class MfaController : ControllerBase
         settings.TotpEnabled = true;
         settings.PreferredMethod = MfaMethods.Totp;
 
-        if (!settings.RequireForLogin && !settings.RequireForPayment && !settings.RequireForSensitiveActions)
+        if (!settings.RequireForLogin && !settings.RequireForSensitiveActions)
         {
             settings.RequireForLogin = true;
         }
@@ -326,7 +333,7 @@ public sealed class MfaController : ControllerBase
             settings.PreferredMethod = MfaMethods.Email;
         }
 
-        if (!settings.RequireForLogin && !settings.RequireForPayment && !settings.RequireForSensitiveActions)
+        if (!settings.RequireForLogin && !settings.RequireForSensitiveActions)
         {
             settings.RequireForLogin = true;
         }
@@ -388,7 +395,8 @@ public sealed class MfaController : ControllerBase
         {
             return BadRequest(new
             {
-                message = "MFA verification is required to disable MFA."
+                message = "MFA verification is required to disable MFA.",
+                code = MfaVerificationCodes.SensitiveActionRequired
             });
         }
 
@@ -466,6 +474,7 @@ public sealed class MfaController : ControllerBase
     }
 
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.Authentication)]
     [HttpPost("login/verify")]
     public async Task<IActionResult> VerifyLogin(
         VerifyMfaLoginRequest request,
@@ -473,9 +482,11 @@ public sealed class MfaController : ControllerBase
     {
         if (!_loginChallengeStore.TryGet(request.ChallengeId, out var challenge))
         {
+            // Distinct from a wrong code: there is nothing to retype, the sign-in has to start over.
             return BadRequest(new
             {
-                message = "MFA challenge is invalid or expired."
+                message = "This verification step expired. Sign in again to get a new code.",
+                code = MfaVerificationCodes.ChallengeExpired
             });
         }
 
@@ -495,7 +506,17 @@ public sealed class MfaController : ControllerBase
         {
             return BadRequest(new
             {
-                message = "MFA challenge is invalid."
+                message = "This verification step expired. Sign in again to get a new code.",
+                code = MfaVerificationCodes.ChallengeExpired
+            });
+        }
+
+        if (await _userManager.IsLockedOutAsync(user))
+        {
+            return StatusCode(StatusCodes.Status423Locked, new
+            {
+                message = "Too many incorrect codes. This account is locked for a while.",
+                code = MfaVerificationCodes.AccountLocked
             });
         }
 
@@ -525,12 +546,29 @@ public sealed class MfaController : ControllerBase
 
         if (!isValid)
         {
+            // A six-digit code is the whole second factor, so a wrong one has to count against the
+            // account lockout. Without this, holding the password buys unlimited guesses at it.
+            await _userManager.AccessFailedAsync(user);
+
+            // Locking out on this attempt is the thing worth saying: "wrong code" invites another
+            // try, and there may not be another try.
+            if (await _userManager.IsLockedOutAsync(user))
+            {
+                return StatusCode(StatusCodes.Status423Locked, new
+                {
+                    message = "Too many incorrect codes. This account is locked for a while.",
+                    code = MfaVerificationCodes.AccountLocked
+                });
+            }
+
             return BadRequest(new
             {
-                message = "MFA code is invalid or expired."
+                message = "That code is not right. Check the latest code and try again.",
+                code = MfaVerificationCodes.CodeInvalid
             });
         }
 
+        await _userManager.ResetAccessFailedCountAsync(user);
         _loginChallengeStore.TryConsume(request.ChallengeId, out _);
 
         return await BuildAuthenticatedResponseAsync(user, "MFA verification successful.");
@@ -557,16 +595,47 @@ public sealed class MfaController : ControllerBase
             return settings;
         }
 
-        settings = new UserMfaSettings
-        {
-            UserId = userId,
-            CreatedAt = DateTime.UtcNow
-        };
+        settings = CreateDefaultSettings(userId);
 
         _dbContext.UserMfaSettings.Add(settings);
 
-        return settings;
+        try
+        {
+            // Persist the default row before the caller applies its mutation. This turns the
+            // check-then-insert into a concurrency-safe operation: if another request creates the
+            // same user's row first, the unique-key conflict below is recovered by re-reading it.
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            return settings;
+        }
+        catch (DbUpdateException exception) when (IsConcurrentSettingsInsert(exception))
+        {
+            _dbContext.Entry(settings).State = EntityState.Detached;
+
+            return await _dbContext.UserMfaSettings
+                .SingleAsync(mfaSettings => mfaSettings.UserId == userId, cancellationToken);
+        }
     }
+
+    private async Task<UserMfaSettings> GetSettingsOrDefaultAsync(
+        string userId,
+        CancellationToken cancellationToken) =>
+        await _dbContext.UserMfaSettings
+            .AsNoTracking()
+            .FirstOrDefaultAsync(mfaSettings => mfaSettings.UserId == userId, cancellationToken)
+        ?? CreateDefaultSettings(userId);
+
+    private static UserMfaSettings CreateDefaultSettings(string userId) => new()
+    {
+        UserId = userId,
+        CreatedAt = DateTime.UtcNow
+    };
+
+    private static bool IsConcurrentSettingsInsert(DbUpdateException exception) =>
+        exception.InnerException is PostgresException
+        {
+            SqlState: PostgresErrorCodes.UniqueViolation,
+            ConstraintName: "PK_UserMfaSettings"
+        };
 
     private static object ToSettingsResponse(UserMfaSettings settings)
     {
@@ -590,7 +659,6 @@ public sealed class MfaController : ControllerBase
             requiredFor = new
             {
                 login = settings.RequireForLogin,
-                payment = settings.RequireForPayment,
                 sensitiveActions = settings.RequireForSensitiveActions
             },
             totp = new
@@ -666,15 +734,12 @@ public sealed class MfaController : ControllerBase
             throw new InvalidOperationException("User email is required to send an MFA code.");
         }
 
-        await _emailSender.SendAsync(
+        await SendCodeEmailAsync(
             user.Email,
             "Enable DineFlow email MFA",
-            $"""
-            <p>Use this code to enable email MFA for your DineFlow account.</p>
-            <p><strong style="font-size: 24px; letter-spacing: 0.2em;">{HtmlEncoder.Default.Encode(code)}</strong></p>
-            <p>This code expires in ten minutes.</p>
-            """,
-            $"Use this code to enable DineFlow email MFA: {code}. It expires in ten minutes.",
+            "Enable email verification",
+            "Use this code to enable email MFA for your DineFlow account.",
+            code,
             cancellationToken);
     }
 
@@ -688,15 +753,42 @@ public sealed class MfaController : ControllerBase
             throw new InvalidOperationException("User email is required to send an MFA code.");
         }
 
-        await _emailSender.SendAsync(
+        await SendCodeEmailAsync(
             user.Email,
             "Your DineFlow sensitive action code",
-            $"""
-            <p>Use this code to confirm a sensitive DineFlow account action.</p>
-            <p><strong style="font-size: 24px; letter-spacing: 0.2em;">{HtmlEncoder.Default.Encode(code)}</strong></p>
-            <p>This code expires in ten minutes.</p>
-            """,
-            $"Your DineFlow sensitive action code is {code}. It expires in ten minutes.",
+            "Confirm this account change",
+            "Use this code to confirm a sensitive change to your DineFlow account.",
+            code,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// The two code emails differ only in wording. Both go through the shared layout so a recipient
+    /// can tell them from a forgery, and neither carries a link — a code email that asks you to
+    /// click something teaches exactly the habit that gets people phished.
+    /// </summary>
+    private Task SendCodeEmailAsync(
+        string recipient,
+        string subject,
+        string heading,
+        string explanation,
+        string code,
+        CancellationToken cancellationToken)
+    {
+        var email = new TransactionalEmail(
+            Heading: heading,
+            Paragraphs: [explanation, code],
+            Footnotes:
+            [
+                "This code expires in ten minutes.",
+                "DineFlow will never ask you to share this code with anyone."
+            ]);
+
+        return _emailSender.SendAsync(
+            recipient,
+            subject,
+            _emailLayout.RenderHtml(email),
+            _emailLayout.RenderText(email),
             cancellationToken);
     }
 

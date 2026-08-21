@@ -10,6 +10,7 @@ import {
 function order(overrides: Partial<AdminOrder> = {}): AdminOrder {
   return {
     id: 'order-1',
+    pendingRefundRequest: null,
     restaurantId: 'restaurant-1',
     restaurantName: 'Central Market Table',
     currency: 'AUD',

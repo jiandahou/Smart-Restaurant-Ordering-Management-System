@@ -1,4 +1,3 @@
-using System.Text.Encodings.Web;
 using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Payments;
 
@@ -6,12 +5,24 @@ namespace DineFlow.Api.Services;
 
 /// <summary>
 /// Customer-facing transactional mail for payments: the Stripe receipt and the outcome of a refund.
-/// Every send is best-effort — a mail failure must never roll back money that already moved, so
-/// failures are logged and swallowed rather than propagated to the caller.
 /// </summary>
+/// <remarks>
+/// <para>
+/// A mail failure must never roll back money that already moved, and for a long time that reasoning
+/// stopped one step early: the provider was called inline, the exception was caught, a line went to
+/// the log, and the email was gone. No retry, no record, and no way to answer "was the customer told
+/// their refund was approved?" other than asking them.
+/// </para>
+/// <para>
+/// Queued instead. The row is written in the caller's own transaction — so the notice exists exactly
+/// when the thing it describes does — and <see cref="EmailOutboxWorker"/> does the sending, with a
+/// retry schedule and a dead-letter state somebody can be alerted on.
+/// </para>
+/// </remarks>
 public sealed class PaymentNotificationService(
-    IEmailSender emailSender,
-    ILogger<PaymentNotificationService> logger)
+    TransactionalEmailOutbox outbox,
+    ILogger<PaymentNotificationService> logger,
+    TransactionalEmailLayout emailLayout)
 {
     /// Registered customers are the best address; guest checkouts only ever exist on the charge.
     public static string? ResolveRecipient(Order? order, Payment? payment, string? requesterEmail = null)
@@ -40,30 +51,39 @@ public sealed class PaymentNotificationService(
             return false;
         }
 
-        var orderNumber = HtmlEncoder.Default.Encode(order.OrderNumber);
-        var url = HtmlEncoder.Default.Encode(payment.ProviderReceiptUrl);
         var amount = FormatAmount(payment.AmountCents, payment.Currency);
 
-        await SendSafelyAsync(
+        await QueueAsync(
+            $"payment-receipt:{payment.Id}",
+            order,
             recipient,
             $"Your receipt for {order.OrderNumber}",
-            $"""
-            <p>Here is your receipt for order {orderNumber}.</p>
-            <p>Amount paid: <strong>{amount}</strong></p>
-            <p><a href="{url}">View your receipt</a></p>
-            """,
-            $"Your receipt for {order.OrderNumber} ({amount}): {payment.ProviderReceiptUrl}",
+            new TransactionalEmail(
+                Heading: "Your receipt",
+                Paragraphs:
+                [
+                    $"Here is your receipt for order {order.OrderNumber}.",
+                    $"Amount paid: {amount}"
+                ],
+                ActionLabel: "View your receipt",
+                ActionUrl: payment.ProviderReceiptUrl),
             cancellationToken);
 
         return true;
     }
 
+    /// <param name="customerExplanation">
+    /// Why the refund happened, in words meant for the customer. Only supplied by automated paths
+    /// that know the cause — a staff refund reason is an internal note and must not be forwarded.
+    /// Without it a refund the customer did not ask for arrives with no explanation at all.
+    /// </param>
     public Task SendRefundSucceededAsync(
         Order order,
         Payment payment,
         PaymentRefund refund,
         string? requesterEmail,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? customerExplanation = null)
     {
         var recipient = ResolveRecipient(order, payment, requesterEmail);
         if (string.IsNullOrWhiteSpace(recipient))
@@ -71,23 +91,30 @@ public sealed class PaymentNotificationService(
             return Task.CompletedTask;
         }
 
-        var orderNumber = HtmlEncoder.Default.Encode(order.OrderNumber);
         var refunded = FormatAmount(refund.AmountCents, refund.Currency);
-        // A partial refund has to say so, or the customer expects the full order value back.
-        var isPartial = refund.AmountCents < payment.AmountCents;
-        var context = isPartial
-            ? $"<p>This is a partial refund of your {FormatAmount(payment.AmountCents, payment.Currency)} order.</p>"
-            : string.Empty;
+        var paragraphs = new List<string> { $"We have refunded {refunded} for order {order.OrderNumber}." };
 
-        return SendSafelyAsync(
+        if (!string.IsNullOrWhiteSpace(customerExplanation))
+        {
+            paragraphs.Add(customerExplanation.Trim());
+        }
+
+        // A partial refund has to say so, or the customer expects the full order value back.
+        if (refund.AmountCents < payment.AmountCents)
+        {
+            paragraphs.Add(
+                $"This is a partial refund of your {FormatAmount(payment.AmountCents, payment.Currency)} order.");
+        }
+
+        return QueueAsync(
+            $"refund-succeeded:{refund.Id}",
+            order,
             recipient,
             $"Refund issued for {order.OrderNumber}",
-            $"""
-            <p>We have refunded <strong>{refunded}</strong> for order {orderNumber}.</p>
-            {context}
-            <p>It can take a few business days to appear on your statement, depending on your bank.</p>
-            """,
-            $"We have refunded {refunded} for order {order.OrderNumber}. It can take a few business days to appear on your statement.",
+            new TransactionalEmail(
+                Heading: "Refund issued",
+                Paragraphs: paragraphs,
+                Footnotes: ["It can take a few business days to appear on your statement, depending on your bank."]),
             cancellationToken);
     }
 
@@ -104,17 +131,20 @@ public sealed class PaymentNotificationService(
             return Task.CompletedTask;
         }
 
-        var orderNumber = HtmlEncoder.Default.Encode(order.OrderNumber);
         var attempted = FormatAmount(refund.AmountCents, refund.Currency);
 
-        return SendSafelyAsync(
+        return QueueAsync(
+            $"refund-failed:{refund.Id}",
+            order,
             recipient,
             $"We could not complete your refund for {order.OrderNumber}",
-            $"""
-            <p>We tried to refund <strong>{attempted}</strong> for order {orderNumber}, but it did not go through.</p>
-            <p>No money has left our account. Please contact the restaurant so we can sort this out for you.</p>
-            """,
-            $"We tried to refund {attempted} for order {order.OrderNumber} but it did not go through. Please contact the restaurant.",
+            new TransactionalEmail(
+                Heading: "We could not complete your refund",
+                Paragraphs:
+                [
+                    $"We tried to refund {attempted} for order {order.OrderNumber}, but it did not go through.",
+                    "No money has left our account. Please contact the restaurant so we can sort this out for you."
+                ]),
             cancellationToken);
     }
 
@@ -131,39 +161,58 @@ public sealed class PaymentNotificationService(
             return Task.CompletedTask;
         }
 
-        var orderNumber = HtmlEncoder.Default.Encode(order.OrderNumber);
-        var reason = string.IsNullOrWhiteSpace(adminNote)
-            ? string.Empty
-            : $"<p>The restaurant said: {HtmlEncoder.Default.Encode(adminNote)}</p>";
+        var paragraphs = new List<string> { $"Your refund request for order {order.OrderNumber} was not approved." };
 
-        return SendSafelyAsync(
+        if (!string.IsNullOrWhiteSpace(adminNote))
+        {
+            paragraphs.Add($"The restaurant said: {adminNote.Trim()}");
+        }
+
+        return QueueAsync(
+            // Keyed on the payment when there is one, so a second rejection on a re-opened request
+            // is a different decision and still reaches the customer.
+            $"refund-rejected:{order.Id}:{payment?.Id.ToString() ?? "none"}",
+            order,
             recipient,
             $"Update on your refund request for {order.OrderNumber}",
-            $"""
-            <p>Your refund request for order {orderNumber} was not approved.</p>
-            {reason}
-            <p>If you think this is a mistake, please reply to the restaurant directly.</p>
-            """,
-            $"Your refund request for order {order.OrderNumber} was not approved."
-                + (string.IsNullOrWhiteSpace(adminNote) ? string.Empty : $" The restaurant said: {adminNote}"),
+            new TransactionalEmail(
+                Heading: "Update on your refund request",
+                Paragraphs: paragraphs,
+                Footnotes: ["If you think this is a mistake, please reply to the restaurant directly."]),
             cancellationToken);
     }
 
-    private async Task SendSafelyAsync(
+    /// <summary>
+    /// Queues one notification. The key names the decision, not the attempt, so a redelivered
+    /// webhook or a double-pressed button does not send the customer the same notice twice.
+    /// </summary>
+    private async Task QueueAsync(
+        string idempotencyKey,
+        Order order,
         string recipient,
         string subject,
-        string htmlBody,
-        string textBody,
+        TransactionalEmail email,
         CancellationToken cancellationToken)
     {
         try
         {
-            await emailSender.SendAsync(recipient, subject, htmlBody, textBody, cancellationToken);
+            await outbox.EnqueueAsync(
+                idempotencyKey,
+                "payment",
+                recipient,
+                subject,
+                emailLayout.RenderHtml(email),
+                emailLayout.RenderText(email),
+                order.Id,
+                order.RestaurantId,
+                cancellationToken);
         }
         catch (Exception ex)
         {
-            // Money has already moved by the time we get here; a bounced email must not undo it.
-            logger.LogError(ex, "Failed to send payment notification \"{Subject}\".", subject);
+            // Money has already moved by the time we get here; a failure to queue must not undo it.
+            // Unlike the send this replaces, reaching here means the database is unavailable, which
+            // is not a condition a retry inside this method would survive either.
+            logger.LogError(ex, "Failed to queue payment notification \"{Subject}\".", subject);
         }
     }
 

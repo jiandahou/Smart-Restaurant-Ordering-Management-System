@@ -14,6 +14,7 @@ import { Input } from '../ui/input'
 import { Textarea } from '../ui/textarea'
 import { parseRefundAmountCents } from './refundAmount'
 import { canConfirmRefundApproval } from './refundApproval'
+import { ProviderIdentifier } from '@/components/orders/ProviderIdentifier'
 
 export type RefundMode = 'full' | 'partial'
 
@@ -151,8 +152,12 @@ export function ApproveRefundRequestDialog({
               <div><dt>Previous refunds</dt><dd>{request.previousRefundCount}</dd></div>
               <div className="refund-approval-grid-wide">
                 <dt>Payment intent</dt>
-                <dd title={request.providerPaymentIntentId || undefined}>
-                  {request.providerPaymentIntentId || 'No Stripe payment intent'}
+                <dd>
+                  <ProviderIdentifier
+                    value={request.providerPaymentIntentId}
+                    fallback="No Stripe payment intent"
+                    label="payment intent id"
+                  />
                 </dd>
               </div>
               <div className="refund-approval-grid-wide">

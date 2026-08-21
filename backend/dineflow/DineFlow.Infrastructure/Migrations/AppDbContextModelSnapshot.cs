@@ -132,6 +132,34 @@ namespace DineFlow.Infrastructure.Migrations
                         });
                 });
 
+            modelBuilder.Entity("DineFlow.Infrastructure.Carts.CartMutation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CartId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt");
+
+                    b.HasIndex("CartId", "IdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("IX_CartMutations_CartId_IdempotencyKey");
+
+                    b.ToTable("CartMutations");
+                });
+
             modelBuilder.Entity("DineFlow.Infrastructure.Carts.CartParticipant", b =>
                 {
                     b.Property<Guid>("Id")
@@ -177,8 +205,14 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<string>("Id")
                         .HasColumnType("text");
 
+                    b.Property<string>("AcceptedCustomerTermsVersion")
+                        .HasColumnType("text");
+
                     b.Property<int>("AccessFailedCount")
                         .HasColumnType("integer");
+
+                    b.Property<string>("AcknowledgedPrivacyPolicyVersion")
+                        .HasColumnType("text");
 
                     b.Property<string>("AvatarUrl")
                         .HasColumnType("text");
@@ -201,6 +235,15 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasColumnType("text");
 
                     b.Property<DateTime?>("LastLoginAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LegalAcceptanceIpAddress")
+                        .HasColumnType("text");
+
+                    b.Property<string>("LegalAcceptanceUserAgent")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("LegalAcceptedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("LockoutEnabled")
@@ -254,6 +297,50 @@ namespace DineFlow.Infrastructure.Migrations
                     b.HasIndex("RestaurantId");
 
                     b.ToTable("AspNetUsers", (string)null);
+                });
+
+            modelBuilder.Entity("DineFlow.Infrastructure.Identity.PrivacyRequest", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Details")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<string>("RequestType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasMaxLength(450)
+                        .HasColumnType("character varying(450)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Status", "CreatedAt");
+
+                    b.HasIndex("UserId", "CreatedAt");
+
+                    b.ToTable("PrivacyRequests");
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Identity.RefreshToken", b =>
@@ -444,8 +531,12 @@ namespace DineFlow.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<DateTime?>("AllergenInfoLastVerifiedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("Allergens")
-                        .HasColumnType("text");
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
 
                     b.Property<int?>("Calories")
                         .HasColumnType("integer");
@@ -455,6 +546,10 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CrossContactStatement")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
 
                     b.Property<string>("Description")
                         .HasColumnType("text");
@@ -492,12 +587,16 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<bool>("IsWatched")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("MayContainAllergens")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("text");
 
                     b.Property<decimal>("Price")
-                        .HasColumnType("numeric");
+                        .HasColumnType("numeric(10,2)");
 
                     b.Property<Guid>("RestaurantId")
                         .HasColumnType("uuid");
@@ -539,8 +638,16 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<int>("AdjustmentType")
                         .HasColumnType("integer");
 
+                    b.Property<string>("Allergens")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CrossContactStatement")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
 
                     b.Property<int>("DisplayOrder")
                         .HasColumnType("integer");
@@ -553,6 +660,10 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.Property<int>("MaxQuantity")
                         .HasColumnType("integer");
+
+                    b.Property<string>("MayContainAllergens")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
 
                     b.Property<Guid>("MenuItemId")
                         .HasColumnType("uuid");
@@ -568,6 +679,9 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<Guid>("RestaurantId")
                         .HasColumnType("uuid");
 
+                    b.Property<int?>("StockQuantity")
+                        .HasColumnType("integer");
+
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -579,7 +693,10 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.HasIndex("RestaurantId");
 
-                    b.ToTable("MenuItemOptions");
+                    b.ToTable("MenuItemOptions", t =>
+                        {
+                            t.HasCheckConstraint("CK_MenuItemOptions_AdjustmentType", "\"AdjustmentType\" IN (0, 1, 2)");
+                        });
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Menu.MenuItemOptionGroup", b =>
@@ -629,10 +746,96 @@ namespace DineFlow.Infrastructure.Migrations
                     b.ToTable("MenuItemOptionGroups");
                 });
 
+            modelBuilder.Entity("DineFlow.Infrastructure.Messaging.OutboxEmail", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("HtmlBody")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<DateTime?>("NextAttemptAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("OrderId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Recipient")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
+                    b.Property<Guid?>("RestaurantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("SentAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Subject")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
+
+                    b.Property<string>("TextBody")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("Status", "NextAttemptAt");
+
+                    b.ToTable("OutboxEmails");
+                });
+
             modelBuilder.Entity("DineFlow.Infrastructure.Orders.Order", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AcceptedCustomerTermsVersion")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("AcknowledgedAllergenNoticeVersion")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("AcknowledgedPrivacyPolicyVersion")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid?>("CartId")
                         .HasColumnType("uuid");
 
                     b.Property<DateTime>("CreatedAt")
@@ -648,6 +851,17 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<string>("GuestAccessTokenHash")
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
+
+                    b.Property<string>("LegalAcceptanceIpAddress")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("LegalAcceptanceUserAgent")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<DateTime?>("LegalAcceptedAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("OrderNumber")
                         .IsRequired()
@@ -690,12 +904,17 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasDefaultValue(1);
 
                     b.Property<decimal>("TotalAmount")
-                        .HasColumnType("numeric");
+                        .HasColumnType("numeric(10,2)");
 
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("CartId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_Orders_CartId_Unique")
+                        .HasFilter("\"CartId\" IS NOT NULL");
 
                     b.HasIndex("CustomerId");
 
@@ -729,6 +948,10 @@ namespace DineFlow.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("AllergensSnapshot")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
                     b.Property<string>("AllergyInfo")
                         .HasColumnType("text");
 
@@ -738,8 +961,16 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("CrossContactStatementSnapshot")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
                     b.Property<string>("ItemInstructions")
                         .HasColumnType("text");
+
+                    b.Property<string>("MayContainAllergensSnapshot")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
 
                     b.Property<Guid?>("MenuItemId")
                         .HasColumnType("uuid");
@@ -774,13 +1005,25 @@ namespace DineFlow.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("AllergensSnapshot")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CrossContactStatementSnapshot")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
 
                     b.Property<string>("GroupNameSnapshot")
                         .IsRequired()
                         .HasMaxLength(120)
                         .HasColumnType("character varying(120)");
+
+                    b.Property<string>("MayContainAllergensSnapshot")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
 
                     b.Property<Guid?>("MenuItemOptionId")
                         .HasColumnType("uuid");
@@ -1100,6 +1343,46 @@ namespace DineFlow.Infrastructure.Migrations
                     b.ToTable("PaymentRefunds", t =>
                         {
                             t.HasCheckConstraint("CK_PaymentRefunds_AmountCents", "\"AmountCents\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("DineFlow.Infrastructure.Payments.PaymentRefundItem", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("AmountCents")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("MenuItemNameSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(240)
+                        .HasColumnType("character varying(240)");
+
+                    b.Property<Guid>("OrderItemId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PaymentRefundId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrderItemId");
+
+                    b.HasIndex("PaymentRefundId");
+
+                    b.HasIndex("PaymentRefundId", "OrderItemId")
+                        .IsUnique();
+
+                    b.ToTable("PaymentRefundItems", t =>
+                        {
+                            t.HasCheckConstraint("CK_PaymentRefundItems_AmountCents", "\"AmountCents\" > 0");
+
+                            t.HasCheckConstraint("CK_PaymentRefundItems_Quantity", "\"Quantity\" > 0");
                         });
                 });
 
@@ -1498,6 +1781,43 @@ namespace DineFlow.Infrastructure.Migrations
                     b.ToTable("AuditLogs");
                 });
 
+            modelBuilder.Entity("DineFlow.Infrastructure.Reporting.LegalHold", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("OrderId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("PlacedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PlacedBy")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("RecordType")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("ReleasedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ReleasedBy")
+                        .HasColumnType("text");
+
+                    b.Property<Guid?>("RestaurantId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("LegalHolds");
+                });
+
             modelBuilder.Entity("DineFlow.Infrastructure.Reporting.OrderEventLog", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1668,6 +1988,10 @@ namespace DineFlow.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("Abn")
+                        .HasMaxLength(11)
+                        .HasColumnType("character varying(11)");
+
                     b.Property<bool>("AcceptingOrders")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
@@ -1683,6 +2007,11 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<bool>("AutoAcceptOrders")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("BusinessContactEmail")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
                     b.Property<string>("CountryCode")
                         .IsRequired()
                         .ValueGeneratedOnAdd()
@@ -1697,12 +2026,24 @@ namespace DineFlow.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("CustomerSurchargeNotice")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
+
+                    b.Property<bool>("GstRegistered")
+                        .HasColumnType("boolean");
+
                     b.Property<string>("ImageUrl")
                         .HasMaxLength(2048)
                         .HasColumnType("character varying(2048)");
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
+
+                    b.Property<string>("LegalBusinessName")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -1748,6 +2089,14 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<string>("Phone")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<bool>("PricesIncludeGst")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("RefundContactEmail")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
 
                     b.Property<string>("SpecialOpeningDaysJson")
                         .IsRequired()
@@ -2077,6 +2426,17 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Navigation("MenuItem");
                 });
 
+            modelBuilder.Entity("DineFlow.Infrastructure.Carts.CartMutation", b =>
+                {
+                    b.HasOne("DineFlow.Infrastructure.Carts.Cart", "Cart")
+                        .WithMany()
+                        .HasForeignKey("CartId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Cart");
+                });
+
             modelBuilder.Entity("DineFlow.Infrastructure.Carts.CartParticipant", b =>
                 {
                     b.HasOne("DineFlow.Infrastructure.Carts.Cart", "Cart")
@@ -2102,6 +2462,17 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasForeignKey("RestaurantId");
 
                     b.Navigation("Restaurant");
+                });
+
+            modelBuilder.Entity("DineFlow.Infrastructure.Identity.PrivacyRequest", b =>
+                {
+                    b.HasOne("DineFlow.Infrastructure.Identity.ApplicationUser", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Identity.RefreshToken", b =>
@@ -2273,6 +2644,17 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Navigation("Payment");
                 });
 
+            modelBuilder.Entity("DineFlow.Infrastructure.Payments.PaymentRefundItem", b =>
+                {
+                    b.HasOne("DineFlow.Infrastructure.Payments.PaymentRefund", "PaymentRefund")
+                        .WithMany("Items")
+                        .HasForeignKey("PaymentRefundId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("PaymentRefund");
+                });
+
             modelBuilder.Entity("DineFlow.Infrastructure.Payments.PaymentRefundRequest", b =>
                 {
                     b.HasOne("DineFlow.Infrastructure.Orders.Order", "Order")
@@ -2441,6 +2823,11 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Navigation("RefundRequests");
 
                     b.Navigation("Refunds");
+                });
+
+            modelBuilder.Entity("DineFlow.Infrastructure.Payments.PaymentRefund", b =>
+                {
+                    b.Navigation("Items");
                 });
 
             modelBuilder.Entity("DineFlow.Infrastructure.Payments.PaymentRefundRequest", b =>

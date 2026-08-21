@@ -4,15 +4,32 @@ using DineFlow.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Stripe;
+using Stripe.Checkout;
 
 namespace DineFlow.Api.Services;
 
-public sealed record PaymentSyncResult(bool IsSuccess, int StatusCode, string? Message = null)
+public sealed record PaymentSyncResult(
+    bool IsSuccess,
+    int StatusCode,
+    string? Message = null,
+    bool StateIsSettled = false)
 {
     public static PaymentSyncResult Success() => new(true, StatusCodes.Status200OK);
 
     public static PaymentSyncResult Failure(int statusCode, string message) =>
         new(false, statusCode, message);
+
+    /// <summary>
+    /// Nothing more will be collected, and the record now says so.
+    /// </summary>
+    /// <remarks>
+    /// A checkout flow has to treat this as a refusal — there is no money and it must not proceed —
+    /// while someone who pressed Re-sync got exactly what they asked for: a definite answer, written
+    /// down. Reporting it to them as a failure left the screen showing the state they had just
+    /// corrected.
+    /// </remarks>
+    public static PaymentSyncResult Settled(int statusCode, string message) =>
+        new(false, statusCode, message, StateIsSettled: true);
 }
 
 /// <summary>
@@ -24,10 +41,102 @@ public sealed class PaymentSyncService(
     AppDbContext dbContext,
     IStripeClient stripeClient,
     IOptions<StripeOptions> stripeOptions,
+    OrderAutoAcceptanceService orderAutoAcceptanceService,
+    OrderRealtimeNotifier orderRealtimeNotifier,
     ReportLogWriter reportLogWriter,
     ILogger<PaymentSyncService> logger)
 {
     private readonly StripeOptions _stripeOptions = stripeOptions.Value;
+
+    public async Task<PaymentSyncResult> SyncCheckoutSessionAsync(
+        Payment payment,
+        string? actorUserId,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_stripeOptions.SecretKey))
+        {
+            return PaymentSyncResult.Failure(StatusCodes.Status503ServiceUnavailable, "Stripe is not configured.");
+        }
+
+        if (string.IsNullOrWhiteSpace(payment.ProviderCheckoutSessionId))
+        {
+            return await SyncAsync(payment, actorUserId, cancellationToken);
+        }
+
+        try
+        {
+            var session = await new SessionService(stripeClient).GetAsync(
+                payment.ProviderCheckoutSessionId,
+                new SessionGetOptions(),
+                new RequestOptions { StripeAccount = payment.StripeAccountId },
+                cancellationToken);
+
+            if (!string.IsNullOrWhiteSpace(session.PaymentIntentId))
+            {
+                payment.ProviderPaymentIntentId = session.PaymentIntentId;
+            }
+
+            // A session Stripe has expired will never produce a payment intent, and the check below
+            // would have kept answering "not yet" forever. Left Pending, the order is invisible to
+            // the abandoned-order sweeper — which deliberately spares Pending, on the reasoning that
+            // the customer may be on the card form — so it holds its stock for good. One was found
+            // still holding a portion four hours after Stripe had closed the session.
+            if (session.Status == "expired")
+            {
+                payment.Status = PaymentStatus.Expired;
+                payment.UpdatedAt = DateTime.UtcNow;
+
+                if (payment.Order is not null
+                    && payment.Order.PaymentStatus == PaymentStatus.Pending)
+                {
+                    payment.Order.PaymentStatus = PaymentStatus.Expired;
+                    payment.Order.UpdatedAt = DateTime.UtcNow;
+                }
+
+                // The state moved and the audit did not, so Orders and Payments showed Expired
+                // while the payment timeline still ended at checkout_session.created / Pending.
+                // A timeline that stops before the terminal transition cannot answer the only
+                // question it is ever asked: when did this stop being payable, and who decided.
+                reportLogWriter.AddPaymentEvent(
+                    payment.Order,
+                    payment,
+                    refund: null,
+                    "checkout_session.expired",
+                    providerEventId: payment.ProviderCheckoutSessionId,
+                    status: nameof(PaymentStatus.Expired),
+                    "Stripe closed the checkout session without payment.",
+                    data: new
+                    {
+                        sessionId = payment.ProviderCheckoutSessionId,
+                        source = "checkout-session-sync",
+                        providerStatus = session.Status,
+                        providerExpiresAt = session.ExpiresAt,
+                    });
+
+                await dbContext.SaveChangesAsync(cancellationToken);
+
+                return PaymentSyncResult.Settled(
+                    StatusCodes.Status409Conflict,
+                    "The Stripe Checkout session expired without payment.");
+            }
+
+            if (string.IsNullOrWhiteSpace(payment.ProviderPaymentIntentId))
+            {
+                return PaymentSyncResult.Failure(
+                    StatusCodes.Status409Conflict,
+                    "Stripe has not created a payment intent for this checkout session yet.");
+            }
+
+            return await SyncAsync(payment, actorUserId, cancellationToken);
+        }
+        catch (StripeException ex)
+        {
+            logger.LogWarning(ex, "Stripe checkout session sync failed for payment {PaymentId}.", payment.Id);
+            return PaymentSyncResult.Failure(
+                StatusCodes.Status502BadGateway,
+                ex.StripeError?.Message ?? "Stripe could not be reached.");
+        }
+    }
 
     public async Task<PaymentSyncResult> SyncAsync(
         Payment payment,
@@ -96,10 +205,16 @@ public sealed class PaymentSyncService(
             payment.LastSyncedAt = now;
             payment.UpdatedAt = now;
 
-            if (payment.Order is not null && payment.Status != previousStatus)
+            var statusChanged = payment.Status != previousStatus;
+            if (payment.Order is not null && statusChanged)
             {
                 payment.Order.PaymentStatus = payment.Status;
                 payment.Order.UpdatedAt = now;
+
+                if (payment.Status == PaymentStatus.Paid)
+                {
+                    await orderAutoAcceptanceService.TryAcceptAsync(payment.Order, cancellationToken);
+                }
             }
 
             reportLogWriter.AddAudit(
@@ -122,6 +237,11 @@ public sealed class PaymentSyncService(
                 });
 
             await dbContext.SaveChangesAsync(cancellationToken);
+
+            if (payment.Order is not null && statusChanged)
+            {
+                await orderRealtimeNotifier.OrderPaymentUpdatedAsync(payment.Order, cancellationToken);
+            }
 
             logger.LogInformation(
                 "Synced payment {PaymentId} from Stripe: {Previous} -> {Current}.",

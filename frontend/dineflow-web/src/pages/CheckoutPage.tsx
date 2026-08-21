@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertCircle, ArrowLeft, Banknote, CheckCircle, CreditCard, Loader2, Receipt, ShoppingBag, Utensils } from 'lucide-react'
 import { toast } from 'sonner'
 import { createPublicPaymentSession, selectOrderPaymentMethod, type SubmittedOrder } from '@/api/carts'
@@ -9,6 +9,17 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { rememberGuestOrder } from '@/lib/guestOrders'
 import { buildRestaurantMenuPath } from '@/lib/customerMenuNavigation'
+import { beginHostedCheckoutHandoff } from '@/lib/hostedCheckoutHandoff'
+import { resolveCheckoutResumeState } from '@/lib/checkoutPageState'
+import { buildCheckoutViewFromOrder, isCheckoutReopenable } from '@/lib/checkoutFromOrder'
+import {
+  changeOrderPaymentMethod,
+  createOrderCheckoutSession,
+  getGuestOrders,
+  getMyOrders,
+  getStoredToken,
+} from '@/api/auth'
+import { getStoredGuestOrders } from '@/lib/guestOrders'
 
 export type CheckoutNavigationState = {
   order: SubmittedOrder
@@ -16,6 +27,12 @@ export type CheckoutNavigationState = {
   participantToken: string
   currency: string
   restaurantName: string
+  restaurantLegalBusinessName: string
+  restaurantAbn: string | null
+  gstRegistered: boolean
+  pricesIncludeGst: boolean
+  refundContactEmail: string
+  customerSurchargeNotice: string | null
   tableNumber: string | null
   paymentPolicy: 'PrepayRequired' | 'PayAtCounterAllowed'
   onlinePaymentsEnabled: boolean
@@ -25,20 +42,89 @@ export type CheckoutNavigationState = {
 type PageState =
   | { status: 'ready' }
   | { status: 'paying'; method: 'online' | 'counter' }
+  /** Checkout is open in another tab and this one is the way back if it goes wrong. */
+  | { status: 'awaiting_online_payment' }
   | { status: 'pay_offline' }
   | { status: 'error'; message: string }
 
 export function CheckoutPage() {
   const location = useLocation()
   const navigate = useNavigate()
-  const routerState = location.state as CheckoutNavigationState | null
-  const [pageState, setPageState] = useState<PageState>({ status: 'ready' })
+  const [searchParams] = useSearchParams()
+  const handedOver = location.state as CheckoutNavigationState | null
+  /**
+   * An order id in the URL means this page was reopened from My Orders or the menu prompt rather
+   * than reached at the end of a cart. Everything it needs is on the order itself — except the
+   * cart, which is why the payment actions below fall back to the order-level routes.
+   */
+  const reopenOrderId = searchParams.get('order')
+  const [reopened, setReopened] = useState<CheckoutNavigationState | null>(null)
+  const [reopenError, setReopenError] = useState<string | null>(null)
+  const routerState = handedOver ?? reopened
+
+  useEffect(() => {
+    if (handedOver || !reopenOrderId) {
+      return
+    }
+
+    let cancelled = false
+
+    async function reopen() {
+      try {
+        // Read straight from storage rather than through the auth context: this page is mostly
+        // used by guests, and pulling in Redux for one boolean would make it unmountable without
+        // a store.
+        const orders = getStoredToken()
+          ? await getMyOrders()
+          : await (async () => {
+              const stored = getStoredGuestOrders()
+              return stored.length > 0 ? await getGuestOrders(stored) : []
+            })()
+        const order = orders.find((candidate) => candidate.id === reopenOrderId)
+
+        if (cancelled) return
+
+        if (!order) {
+          setReopenError('That order could not be found on this device.')
+          return
+        }
+
+        if (!isCheckoutReopenable(order)) {
+          setReopenError('This order has already been dealt with.')
+          return
+        }
+
+        setReopened(buildCheckoutViewFromOrder(order) as unknown as CheckoutNavigationState)
+      } catch (error) {
+        if (!cancelled) {
+          setReopenError(error instanceof Error ? error.message : 'Could not load this order.')
+        }
+      }
+    }
+
+    void reopen()
+
+    return () => {
+      cancelled = true
+    }
+  }, [handedOver, reopenOrderId])
+  // Derived, not defaulted: a refresh must not offer to take payment for an order the customer
+  // already chose to settle at the counter.
+  const [pageState, setPageState] = useState<PageState>(
+    () => ({ status: resolveCheckoutResumeState(routerState?.order) }),
+  )
 
   useEffect(() => {
     rememberGuestOrder(routerState?.order.id)
   }, [routerState?.order.id])
 
   if (!routerState?.order) {
+    // Still fetching, or the fetch failed: either way there is nothing to bill for yet, and
+    // redirecting mid-load would throw away an order the customer asked to reopen.
+    if (reopenOrderId) {
+      return <CheckoutReopenScreen error={reopenError} onLeave={() => navigate('/my-orders')} />
+    }
+
     return <Navigate to="/" replace />
   }
 
@@ -48,6 +134,11 @@ export function CheckoutPage() {
     participantToken,
     currency,
     restaurantName,
+    restaurantLegalBusinessName,
+    restaurantAbn,
+    gstRegistered,
+    refundContactEmail,
+    customerSurchargeNotice,
     tableNumber,
     paymentPolicy,
     onlinePaymentsEnabled,
@@ -63,13 +154,38 @@ export function CheckoutPage() {
       : 'Takeaway'
   const currencyFormatter = createCurrencyFormatter(currency)
 
+  /**
+   * What proves a guest owns this order once the cart behind it is gone. Orders saved before tokens
+   * existed are stored with a null one, which is the same as having none to send.
+   */
+  const guestAccessTokenForOrder = (): string | undefined =>
+    getStoredGuestOrders().find((entry) => entry.orderId === order.id)?.guestAccessToken ?? undefined
+
   const handlePay = async () => {
+    // Claimed before the await: browsers only honour window.open while the click is still being
+    // handled, and creating the session is a round trip.
+    const handoff = beginHostedCheckoutHandoff()
     setPageState({ status: 'paying', method: 'online' })
     try {
-      const result = await createPublicPaymentSession(cartId, participantToken)
+      // No cart when the page was reopened from an order, so the order-level route is used. It
+      // reuses a live checkout session rather than minting a second one, same as the cart route.
+      const result = cartId && participantToken
+        ? await createPublicPaymentSession(cartId, participantToken)
+        : await createOrderCheckoutSession({
+            orderId: order.id,
+            returnTo: returnPath,
+            guestAccessToken: guestAccessTokenForOrder(),
+          })
       rememberGuestOrder(result.orderId)
-      window.location.assign(result.checkoutUrl)
+
+      if (handoff.complete(result.checkoutUrl) === 'new-tab') {
+        // This page survives, so a customer who meets Stripe's expired dead end still has somewhere
+        // to come back to. When the popup was blocked we are navigating away and must not touch
+        // state — there is no page left to render it on.
+        setPageState({ status: 'awaiting_online_payment' })
+      }
     } catch (error) {
+      handoff.abort()
       const message = error instanceof Error ? error.message : 'Could not start payment'
       setPageState({ status: 'error', message })
       toast.error('Payment failed', { description: message })
@@ -79,8 +195,17 @@ export function CheckoutPage() {
   const handlePayAtCounter = async () => {
     setPageState({ status: 'paying', method: 'counter' })
     try {
-      const result = await selectOrderPaymentMethod(cartId, participantToken, 'PayAtCounter')
+      const updated = cartId && participantToken
+        ? (await selectOrderPaymentMethod(cartId, participantToken, 'PayAtCounter')).order
+        : await changeOrderPaymentMethod(order.id, 'PayAtCounter', guestAccessTokenForOrder())
+      const result = { order: updated }
       rememberGuestOrder(result.order.id)
+      // Written back into history state so a reload reads the order as it now stands. Without this
+      // the page would reopen from the snapshot taken at checkout, which still says Online.
+      navigate(location.pathname, {
+        replace: true,
+        state: { ...routerState, order: result.order } satisfies CheckoutNavigationState,
+      })
       setPageState({ status: 'pay_offline' })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not select counter payment'
@@ -91,6 +216,55 @@ export function CheckoutPage() {
 
   const handleBack = () => {
     navigate(returnPath)
+  }
+
+  if (pageState.status === 'awaiting_online_payment') {
+    return (
+      <main className="flex min-h-svh flex-col items-center justify-start bg-background px-4 pt-6 pb-12">
+        <div className="w-full max-w-lg space-y-4">
+          <CheckoutBackButton onClick={handleBack} />
+          <OrderContextHeader restaurantName={restaurantName} tableNumber={displayedTableNumber} isDineIn={isDineIn} />
+          <Card size="sm">
+            <CardContent className="flex flex-col items-center gap-4 p-6 text-center">
+              <div className="flex size-12 items-center justify-center rounded-full bg-blue-100 text-blue-600">
+                <CreditCard className="size-6" />
+              </div>
+              <div className="space-y-1">
+                <h2 className="font-heading text-lg font-semibold">Payment opened in a new tab</h2>
+                <p className="text-sm leading-5 text-muted-foreground">
+                  Finish paying for <span className="font-medium text-foreground">{order.orderNumber}</span> there.
+                  Keep this page open — if the payment page expires or you close it by mistake, come back here.
+                </p>
+              </div>
+              <Badge variant="secondary" className="h-8 px-3 text-sm">
+                {currencyFormatter.format(order.totalAmount)}
+              </Badge>
+              <div className="flex w-full flex-col gap-2">
+                <Button
+                  type="button"
+                  className="h-12 w-full rounded-xl"
+                  onClick={() => void handlePay()}
+                >
+                  Start payment again
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-12 w-full rounded-xl"
+                  onClick={() => navigate('/my-orders')}
+                >
+                  <Receipt className="size-4" />
+                  Check this order
+                </Button>
+              </div>
+              <p className="text-xs leading-4 text-muted-foreground">
+                Starting again replaces the previous payment page, so you are only ever asked to pay once.
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      </main>
+    )
   }
 
   if (pageState.status === 'pay_offline') {
@@ -192,8 +366,17 @@ export function CheckoutPage() {
                 {currencyFormatter.format(order.totalAmount)}
               </span>
             </div>
+            {/* Consumer prices in Australia are shown GST-inclusive, so the charged total is the
+                only honest base — pricesIncludeGst does not change what was charged. */}
+            {gstRegistered ? <p className="text-right text-xs text-muted-foreground">Total price includes GST</p> : null}
           </CardContent>
         </Card>
+
+        <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          <p>Supplier: {restaurantLegalBusinessName || restaurantName}{restaurantAbn ? ` · ABN ${restaurantAbn}` : ''}</p>
+          {customerSurchargeNotice ? <p className="font-semibold text-foreground">{customerSurchargeNotice}</p> : null}
+          {refundContactEmail ? <p>Refund enquiries: {refundContactEmail}</p> : null}
+        </div>
 
         {pageState.status === 'error' ? (
           <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2">
@@ -235,20 +418,24 @@ export function CheckoutPage() {
           <Button
             type="button"
             variant="outline"
-            className="h-auto min-h-14 w-full items-center justify-center gap-3 rounded-xl px-5 py-2.5 text-left font-normal"
+            // Stacked so the icon travels with the title as one centred row, the way the online
+            // button above carries its own icon and label. Keeping the icon beside the whole text
+            // block instead let the wrapping second line stretch the block to full width, which
+            // pinned the icon to the left edge and left the two choices visibly out of line.
+            className="h-auto min-h-14 w-full flex-col justify-center gap-1 rounded-xl px-3 py-3 text-center font-normal whitespace-normal sm:px-5 sm:py-2.5"
             disabled={isPaying}
             onClick={() => void handlePayAtCounter()}
           >
-            <span className="flex size-5 shrink-0 items-center justify-center">
-              {isCounterPaying ? <Loader2 className="size-5 animate-spin" /> : <Banknote className="size-5" />}
+            <span className="flex min-w-0 max-w-full items-center justify-center gap-2 sm:gap-3">
+              <span className="flex size-5 shrink-0 items-center justify-center">
+                {isCounterPaying ? <Loader2 className="size-5 animate-spin" /> : <Banknote className="size-5" />}
+              </span>
+              <span className="min-w-0 break-words text-base font-medium leading-5">
+                {isDineIn ? 'Pay at counter after your meal' : 'Pay at counter on pickup'}
+              </span>
             </span>
-            <span className="flex flex-col items-start gap-0.5 leading-none">
-              <span className="text-base font-medium leading-5">
-                {isDineIn ? 'Enjoy your meal now' : 'Place your order now'}
-              </span>
-              <span className="text-xs font-normal leading-4 text-muted-foreground">
-                {isDineIn ? 'Pay at the counter when you are ready' : 'Pay at the counter when you pick it up'}
-              </span>
+            <span className="w-full break-words text-xs font-normal leading-4 text-muted-foreground">
+              {isDineIn ? 'Confirm this order now and settle the bill when you are ready' : 'Confirm this order now and pay when you collect it'}
             </span>
           </Button>
         ) : null}
@@ -262,7 +449,52 @@ export function CheckoutPage() {
             ? 'Online payment is required before the restaurant can process this order.'
             : 'Choose secure online payment or settle this order at the counter.'}
         </p>
+        <p className="text-center text-xs leading-5 text-muted-foreground">
+          Your acceptance was recorded when the order was submitted.{' '}
+          <a className="underline" href="/terms/customer" target="_blank">Terms</a>
+          {' · '}
+          <a className="underline" href="/privacy" target="_blank">Privacy</a>
+          {' · '}
+          <a className="underline" href="/refunds-and-cancellations" target="_blank">Refunds &amp; cancellations</a>
+          {' · '}
+          <a className="underline" href="/allergen-information" target="_blank">Allergen information</a>
+        </p>
       </div>
+    </main>
+  )
+}
+
+/**
+ * Shown while an order is being fetched back, and when it cannot be.
+ *
+ * <p>
+ * Redirecting on a failed load would silently drop the customer somewhere else with no idea why
+ * the order they tapped did not open.
+ * </p>
+ */
+function CheckoutReopenScreen({ error, onLeave }: { error: string | null; onLeave: () => void }) {
+  return (
+    <main className="flex min-h-svh flex-col items-center justify-center bg-background px-4">
+      <Card size="sm" className="w-full max-w-sm">
+        <CardContent className="flex flex-col items-center gap-4 p-6 text-center">
+          {error ? (
+            <>
+              <div className="flex size-12 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+                <AlertCircle className="size-6" />
+              </div>
+              <p className="text-sm leading-5 text-muted-foreground">{error}</p>
+              <Button type="button" className="h-11 w-full rounded-xl" onClick={onLeave}>
+                Go to my orders
+              </Button>
+            </>
+          ) : (
+            <>
+              <Loader2 className="size-6 animate-spin text-muted-foreground" />
+              <p className="text-sm leading-5 text-muted-foreground">Opening your order…</p>
+            </>
+          )}
+        </CardContent>
+      </Card>
     </main>
   )
 }
@@ -298,12 +530,14 @@ function OrderContextHeader({
       </div>
       <div className="min-w-0">
         <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Checkout</p>
-        <p className="font-heading truncate text-lg font-semibold leading-tight">
+        {/* The page heading: a screen reader arriving here needs to know which restaurant and
+            table this checkout belongs to, not just that it is a checkout. */}
+        <h1 className="font-heading truncate text-lg font-semibold leading-tight">
           {restaurantName}
           {tableNumber ? (
             <span className="font-sans text-sm font-normal text-muted-foreground"> · Table {tableNumber}</span>
           ) : null}
-        </p>
+        </h1>
       </div>
     </div>
   )
