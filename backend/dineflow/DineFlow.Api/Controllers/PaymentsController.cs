@@ -636,13 +636,55 @@ public class PaymentsController : ControllerBase
             return Conflict(new { message = "Refund request is missing its order." });
         }
 
-        var approvedAmountCents = request?.AmountCents ?? refundRequest.RequestedAmountCents;
-        if (!RefundAmountPolicy.IsWithinRequestedAmount(refundRequest.RequestedAmountCents, approvedAmountCents))
+        var requestedAllocations = refundRequest.Items
+            .Select(item => new RefundItemAllocation(
+                item.OrderItemId,
+                item.MenuItemNameSnapshot,
+                item.Quantity,
+                item.AmountCents))
+            .ToList();
+
+        long approvedAmountCents;
+        IReadOnlyList<RefundItemAllocation> approvedAllocations;
+
+        if (request?.Items is { Count: > 0 } chosenItems)
         {
-            return BadRequest(new
+            // Two answers to "how much" is a mistake to surface rather than one to pick a winner for.
+            if (request.AmountCents is not null)
             {
-                message = $"Approved amount must be greater than zero and cannot exceed the requested amount ({refundRequest.RequestedAmountCents} cents)."
-            });
+                return BadRequest(new
+                {
+                    message = "Send either a total or a per-item breakdown, not both."
+                });
+            }
+
+            var chosen = RefundRequestItemPolicy.AllocateStaffChosenRefund(
+                requestedAllocations,
+                chosenItems.Select(item => (item.OrderItemId, item.AmountCents)).ToList());
+
+            if (!chosen.IsValid)
+            {
+                return BadRequest(new { message = chosen.Error });
+            }
+
+            approvedAmountCents = chosen.ApprovedAmountCents;
+            approvedAllocations = chosen.Allocations;
+        }
+        else
+        {
+            approvedAmountCents = request?.AmountCents ?? refundRequest.RequestedAmountCents;
+
+            if (!RefundAmountPolicy.IsWithinRequestedAmount(refundRequest.RequestedAmountCents, approvedAmountCents))
+            {
+                return BadRequest(new
+                {
+                    message = $"Approved amount must be greater than zero and cannot exceed the requested amount ({refundRequest.RequestedAmountCents} cents)."
+                });
+            }
+
+            approvedAllocations = RefundRequestItemPolicy.AllocateApprovedRefund(
+                approvedAmountCents,
+                requestedAllocations);
         }
 
         var claimedAt = DateTime.UtcNow;
@@ -685,15 +727,7 @@ public class PaymentsController : ControllerBase
                 $"refund-request-{refundRequest.Id:N}",
                 approvedAmountCents,
                 refundRequest.Id,
-                RefundRequestItemPolicy.AllocateApprovedRefund(
-                    approvedAmountCents,
-                    refundRequest.Items
-                        .Select(item => new RefundItemAllocation(
-                            item.OrderItemId,
-                            item.MenuItemNameSnapshot,
-                            item.Quantity,
-                            item.AmountCents))
-                        .ToList()));
+                approvedAllocations);
         }
         catch
         {
@@ -1562,6 +1596,7 @@ public class PaymentsController : ControllerBase
             Items = request.Items
                 .Select(item => new AdminRefundRequestItemResponse
                 {
+                    OrderItemId = item.OrderItemId,
                     MenuItemNameSnapshot = item.MenuItemNameSnapshot,
                     Quantity = item.Quantity,
                     AmountCents = item.AmountCents

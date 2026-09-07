@@ -1403,6 +1403,8 @@ export type AdminRefundRequest = {
 }
 
 export type AdminRefundRequestItem = {
+  /** Which order line this is, so an approval can name an amount for it. */
+  orderItemId: string
   menuItemNameSnapshot: string
   quantity: number
   amountCents: number
@@ -1508,7 +1510,10 @@ export type CancelCustomerOrderRequest = {
 
 export type ReviewRefundRequestRequest = {
   note?: string
+  /** One total for the whole request. Not sent together with `items`; the server refuses both. */
   amountCents?: number
+  /** What staff approved for each line. Lines left out are not refunded. */
+  items?: { orderItemId: string; amountCents: number }[]
 }
 
 type PublicKeyCredentialDescriptorJson = Omit<PublicKeyCredentialDescriptor, 'id'> & {

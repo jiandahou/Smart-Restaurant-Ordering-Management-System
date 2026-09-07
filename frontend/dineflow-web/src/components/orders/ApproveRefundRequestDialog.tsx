@@ -14,9 +14,19 @@ import { Input } from '../ui/input'
 import { Textarea } from '../ui/textarea'
 import { parseRefundAmountCents } from './refundAmount'
 import { canConfirmRefundApproval } from './refundApproval'
+import { sumPerItemApproval } from './perItemApproval'
 import { ProviderIdentifier } from '@/components/orders/ProviderIdentifier'
 
-export type RefundMode = 'full' | 'partial'
+/**
+ * How much of a refund request staff are approving.
+ *
+ * <p>
+ * 'items' is the one that says which dish. With only a total, a partial approval was spread across
+ * every line the customer selected by proportion — figures nobody decided, which then became the
+ * balance every later refund on those lines was measured against.
+ * </p>
+ */
+export type RefundMode = 'full' | 'partial' | 'items'
 
 function formatPaymentAmount(amountCents: number, currencyCode?: string | null) {
   return new Intl.NumberFormat('en-AU', {
@@ -31,11 +41,13 @@ export function ApproveRefundRequestDialog({
   note,
   mode,
   amount,
+  itemAmounts,
   confirmation,
   submitting,
   onNoteChange,
   onModeChange,
   onAmountChange,
+  onItemAmountChange,
   onConfirmationChange,
   onOpenChange,
   onConfirm,
@@ -45,11 +57,13 @@ export function ApproveRefundRequestDialog({
   note: string
   mode: RefundMode
   amount: string
+  itemAmounts: Record<string, string>
   confirmation: string
   submitting: boolean
   onNoteChange: (value: string) => void
   onModeChange: (mode: RefundMode) => void
   onAmountChange: (value: string) => void
+  onItemAmountChange: (orderItemId: string, value: string) => void
   onConfirmationChange: (value: string) => void
   onOpenChange: (open: boolean) => void
   onConfirm: () => void
@@ -58,7 +72,12 @@ export function ApproveRefundRequestDialog({
   const ceilingAmountCents = request
     ? Math.min(request.requestedAmountCents, request.refundableAmountCents)
     : 0
-  const confirmAmountCents = mode === 'full' ? ceilingAmountCents : parseRefundAmountCents(amount)
+  const perItemTotalCents = sumPerItemApproval(request?.items ?? [], itemAmounts)
+  const confirmAmountCents = mode === 'full'
+    ? ceilingAmountCents
+    : mode === 'items'
+      ? perItemTotalCents
+      : parseRefundAmountCents(amount)
   const canConfirm = canConfirmRefundApproval(request, environmentMode, confirmation, confirmAmountCents)
 
   return (
@@ -89,10 +108,10 @@ export function ApproveRefundRequestDialog({
               </div>
             </div>
 
-            {request.items.length > 0 && (
+            {request.items.length > 0 && mode !== 'items' && (
               <dl className="refund-approval-item-list">
                 {request.items.map((item, index) => (
-                  <div key={`${item.menuItemNameSnapshot}-${index}`}>
+                  <div key={`${item.orderItemId}-${index}`}>
                     <dt>{item.menuItemNameSnapshot} × {item.quantity}</dt>
                     <dd>{formatPaymentAmount(item.amountCents, request.currency)}</dd>
                   </div>
@@ -122,7 +141,49 @@ export function ApproveRefundRequestDialog({
                 >
                   Refund partial amount
                 </Button>
+                {request.items.length > 0 ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={mode === 'items' ? 'default' : 'outline'}
+                    aria-pressed={mode === 'items'}
+                    disabled={submitting}
+                    onClick={() => onModeChange('items')}
+                  >
+                    Choose per item
+                  </Button>
+                ) : null}
               </div>
+              {mode === 'items' ? (
+                <div className="refund-approval-item-amounts">
+                  <p className="text-xs text-muted-foreground">
+                    Set what each item is being refunded. Leave one at zero to refund nothing for it.
+                  </p>
+                  {request.items.map((item) => (
+                    <div key={item.orderItemId} className="space-y-1">
+                      <label className="text-sm font-semibold" htmlFor={`refund-item-${item.orderItemId}`}>
+                        {item.menuItemNameSnapshot} × {item.quantity}
+                      </label>
+                      <Input
+                        id={`refund-item-${item.orderItemId}`}
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        inputMode="decimal"
+                        value={itemAmounts[item.orderItemId] ?? ''}
+                        onChange={(event) => onItemAmountChange(item.orderItemId, event.target.value)}
+                        disabled={submitting}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Customer asked for {formatPaymentAmount(item.amountCents, request.currency)}.
+                      </p>
+                    </div>
+                  ))}
+                  <p className="text-sm font-semibold">
+                    Approving {formatPaymentAmount(perItemTotalCents, request.currency)} in total.
+                  </p>
+                </div>
+              ) : null}
               {mode === 'partial' ? (
                 <div className="space-y-1">
                   <label className="text-sm font-semibold" htmlFor="refund-approval-amount">Refund amount</label>

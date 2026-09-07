@@ -10089,6 +10089,16 @@ button.menu-metric[aria-pressed='true'] {
   margin: 0;
 }
 
+/* The same lines, now with an amount each rather than one total to be divided among them. */
+.refund-approval-item-amounts {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: color-mix(in oklab, var(--subtle) 40%, transparent);
+}
+
 .refund-approval-item-list > div {
   display: flex;
   align-items: center;

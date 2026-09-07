@@ -133,4 +133,101 @@ public class RefundRequestItemPolicyTests
 
         Assert.Empty(result);
     }
+
+    /// <summary>
+    /// Staff naming an amount per line is the whole point: it is how "the wings were cold, the
+    /// spring rolls were fine" gets said. Before this the only lever was the total, and the split
+    /// was worked out by proportion — figures nobody chose, which then became the balance every
+    /// later refund on those lines was measured against.
+    /// </summary>
+    [Fact]
+    public void AllocateStaffChosenRefund_TakesTheAmountStaffGaveEachLine()
+    {
+        var wings = Guid.NewGuid();
+        var rolls = Guid.NewGuid();
+        var requested = new List<RefundItemAllocation>
+        {
+            new(wings, "Chicken Wings", 1, 1_600),
+            new(rolls, "Veg Spring Rolls", 1, 1_024),
+        };
+
+        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(
+            requested,
+            [(wings, 1_600), (rolls, 0)]);
+
+        Assert.True(result.IsValid);
+        Assert.Equal(1_600, result.ApprovedAmountCents);
+        var only = Assert.Single(result.Allocations);
+        Assert.Equal(wings, only.OrderItemId);
+        Assert.Equal(1_600, only.AmountCents);
+    }
+
+    /// <summary>A line left out of the breakdown is a line staff chose not to refund.</summary>
+    [Fact]
+    public void AllocateStaffChosenRefund_DoesNotRefundLinesLeftOut()
+    {
+        var wings = Guid.NewGuid();
+        var rolls = Guid.NewGuid();
+        var requested = new List<RefundItemAllocation>
+        {
+            new(wings, "Chicken Wings", 1, 1_600),
+            new(rolls, "Veg Spring Rolls", 1, 1_024),
+        };
+
+        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(rolls, 500)]);
+
+        Assert.True(result.IsValid);
+        Assert.Equal(500, result.ApprovedAmountCents);
+        Assert.Equal(rolls, Assert.Single(result.Allocations).OrderItemId);
+    }
+
+    /// <summary>
+    /// Approving more than was asked for is not an adjustment; it refunds something nobody claimed.
+    /// </summary>
+    [Fact]
+    public void AllocateStaffChosenRefund_RefusesMoreThanTheCustomerAskedForOnALine()
+    {
+        var wings = Guid.NewGuid();
+        var requested = new List<RefundItemAllocation> { new(wings, "Chicken Wings", 1, 1_600) };
+
+        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(wings, 1_601)]);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("Chicken Wings", result.Error);
+        Assert.Empty(result.Allocations);
+    }
+
+    [Fact]
+    public void AllocateStaffChosenRefund_RefusesLinesThatWereNeverRequested()
+    {
+        var requested = new List<RefundItemAllocation> { new(Guid.NewGuid(), "Chicken Wings", 1, 1_600) };
+
+        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(Guid.NewGuid(), 100)]);
+
+        Assert.False(result.IsValid);
+    }
+
+    [Fact]
+    public void AllocateStaffChosenRefund_RefusesNegativeAndDuplicateLines()
+    {
+        var wings = Guid.NewGuid();
+        var requested = new List<RefundItemAllocation> { new(wings, "Chicken Wings", 1, 1_600) };
+
+        Assert.False(RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(wings, -1)]).IsValid);
+        Assert.False(RefundRequestItemPolicy
+            .AllocateStaffChosenRefund(requested, [(wings, 100), (wings, 200)]).IsValid);
+    }
+
+    /// <summary>Zeroing every line is a rejection, and should be made as one.</summary>
+    [Fact]
+    public void AllocateStaffChosenRefund_RefusesAnApprovalWorthNothing()
+    {
+        var wings = Guid.NewGuid();
+        var requested = new List<RefundItemAllocation> { new(wings, "Chicken Wings", 1, 1_600) };
+
+        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(wings, 0)]);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("reject", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
 }

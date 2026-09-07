@@ -55,6 +55,15 @@ public sealed class AdminRefundRequestResponse
 
 public sealed class AdminRefundRequestItemResponse
 {
+    /// <summary>
+    /// Which order line this is, so an approval can name an amount for it.
+    /// </summary>
+    /// <remarks>
+    /// Left out while the only lever was the total: the screen showed the lines and had no way to
+    /// act on any one of them, so their identity was of no use to it.
+    /// </remarks>
+    public Guid OrderItemId { get; set; }
+
     public string MenuItemNameSnapshot { get; set; } = string.Empty;
 
     public int Quantity { get; set; }

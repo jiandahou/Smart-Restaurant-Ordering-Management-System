@@ -48,8 +48,12 @@ import {
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
-import { ApproveRefundRequestDialog } from '../components/orders/ApproveRefundRequestDialog'
+import {
+  ApproveRefundRequestDialog,
+  type RefundMode as RefundApprovalMode,
+} from '../components/orders/ApproveRefundRequestDialog'
 import { OrderRefundDialog, type RefundMode } from '../components/orders/OrderRefundDialog'
+import { prefillPerItemApproval } from '../components/orders/perItemApproval'
 import { parseRefundAmountCents } from '../components/orders/refundAmount'
 import { OrderStatusBadge, getOrderStatusLabel, orderStatusOptions } from '../components/orders/OrderStatusBadge'
 import { PaymentRefundHistory } from '../components/orders/PaymentRefundHistory'
@@ -287,8 +291,10 @@ export function AdminPaymentsPage() {
   const [refundMode, setRefundMode] = useState<RefundMode>('full')
   const [refundAmount, setRefundAmount] = useState('')
   const [refundApprovalNote, setRefundApprovalNote] = useState('')
-  const [refundApprovalMode, setRefundApprovalMode] = useState<RefundMode>('full')
+  const [refundApprovalMode, setRefundApprovalMode] = useState<RefundApprovalMode>('full')
   const [refundApprovalAmount, setRefundApprovalAmount] = useState('')
+  // Keyed by order item so zeroing one line leaves the others exactly as staff typed them.
+  const [refundApprovalItemAmounts, setRefundApprovalItemAmounts] = useState<Record<string, string>>({})
   const [refundApprovalConfirmation, setRefundApprovalConfirmation] = useState('')
   const [refundRequestRejectNote, setRefundRequestRejectNote] = useState('')
   const [search, setSearch] = useState(initialUrlState.search)
@@ -908,7 +914,16 @@ export function AdminPaymentsPage() {
     try {
       await approveAdminRefundRequest(refundRequest.id, {
         note: refundApprovalNote.trim() || undefined,
-        amountCents: refundApprovalMode === 'full' ? undefined : (parseRefundAmountCents(refundApprovalAmount) ?? undefined),
+        // One or the other, never both: the server refuses two answers to "how much".
+        amountCents: refundApprovalMode === 'partial'
+          ? (parseRefundAmountCents(refundApprovalAmount) ?? undefined)
+          : undefined,
+        items: refundApprovalMode === 'items'
+          ? refundRequest.items.map((item) => ({
+            orderItemId: item.orderItemId,
+            amountCents: parseRefundAmountCents(refundApprovalItemAmounts[item.orderItemId] ?? '') ?? 0,
+          }))
+          : undefined,
       })
       await Promise.all([loadRefundRequests(), loadOrders()])
       toast.success('Refund request approved', {
@@ -2307,11 +2322,22 @@ export function AdminPaymentsPage() {
         note={refundApprovalNote}
         mode={refundApprovalMode}
         amount={refundApprovalAmount}
+        itemAmounts={refundApprovalItemAmounts}
         confirmation={refundApprovalConfirmation}
         submitting={reviewingRefundRequestId !== null}
         onNoteChange={setRefundApprovalNote}
-        onModeChange={setRefundApprovalMode}
+        onModeChange={(nextMode) => {
+          // Opening the per-item view starts from what the customer asked for, so the common
+          // "everything except this one" is a single edit rather than several.
+          if (nextMode === 'items' && approvingRefundRequest) {
+            setRefundApprovalItemAmounts(prefillPerItemApproval(approvingRefundRequest.items))
+          }
+          setRefundApprovalMode(nextMode)
+        }}
         onAmountChange={setRefundApprovalAmount}
+        onItemAmountChange={(orderItemId, value) => {
+          setRefundApprovalItemAmounts((current) => ({ ...current, [orderItemId]: value }))
+        }}
         onConfirmationChange={setRefundApprovalConfirmation}
         onOpenChange={(open) => {
           if (!open && reviewingRefundRequestId === null) {
@@ -2319,6 +2345,7 @@ export function AdminPaymentsPage() {
             setRefundApprovalNote('')
             setRefundApprovalMode('full')
             setRefundApprovalAmount('')
+            setRefundApprovalItemAmounts({})
             setRefundApprovalConfirmation('')
           }
         }}
