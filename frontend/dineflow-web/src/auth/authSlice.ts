@@ -31,6 +31,18 @@ type AuthState = {
   token: string | null
   refreshToken: string | null
   loading: boolean
+  /**
+   * Set when the session ended without the user asking, so somebody can say so.
+   *
+   * <p>
+   * Signing out used to be entirely silent. On the pages that require a login that is survivable —
+   * the next screen is a login form, which explains itself. On the pages that serve guests too it
+   * is not: My Orders simply swapped the customer's orders for whatever the browser had saved for
+   * guests and carried on, and a customer who had just paid came back to a list that no longer had
+   * their order in it.
+   * </p>
+   */
+  endedUnexpectedly: boolean
 }
 
 const initialToken = getStoredToken()
@@ -40,6 +52,7 @@ const initialState: AuthState = {
   token: initialToken,
   refreshToken: getStoredRefreshToken(),
   loading: Boolean(initialToken),
+  endedUnexpectedly: false,
 }
 
 export const loadCurrentUser = createAsyncThunk('auth/loadCurrentUser', async (_, { rejectWithValue }) => {
@@ -152,6 +165,11 @@ const authSlice = createSlice({
       state.refreshToken = null
       state.user = null
       state.loading = false
+      state.endedUnexpectedly = false
+    },
+    /** The notice has been shown; do not show it again on the next render. */
+    acknowledgeSessionEnded(state) {
+      state.endedUnexpectedly = false
     },
     setToken(state, action: PayloadAction<string | null>) {
       state.token = action.payload
@@ -193,6 +211,8 @@ const authSlice = createSlice({
         state.token = null
         state.refreshToken = null
         state.user = null
+        // Only here. Signing out on purpose is not unexpected, and does not need telling.
+        state.endedUnexpectedly = true
       })
       .addCase(loginUser.pending, (state) => {
         state.loading = true
@@ -284,5 +304,5 @@ const authSlice = createSlice({
   },
 })
 
-export const { logout, setAuthenticated, setToken } = authSlice.actions
+export const { acknowledgeSessionEnded, logout, setAuthenticated, setToken } = authSlice.actions
 export default authSlice.reducer

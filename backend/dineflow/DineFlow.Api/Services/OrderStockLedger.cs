@@ -1,4 +1,6 @@
 using DineFlow.Infrastructure.Orders;
+using DineFlow.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
 
 namespace DineFlow.Api.Services;
 
@@ -28,7 +30,7 @@ public sealed record OrderStockShortage(string Name, bool IsModifier);
 /// leaves the stock moved and the order not.
 /// </para>
 /// </remarks>
-public sealed class OrderStockLedger(MenuItemStockService stockService)
+public sealed class OrderStockLedger(AppDbContext dbContext, MenuItemStockService stockService)
 {
     /// <summary>
     /// Gives back everything the order reserved, once.
@@ -42,6 +44,31 @@ public sealed class OrderStockLedger(MenuItemStockService stockService)
     public async Task<bool> ReleaseAsync(Order order, DateTime now, CancellationToken cancellationToken)
     {
         if (order.StockReleasedAt is not null)
+        {
+            return false;
+        }
+
+        // The tracked property above is only a fast path. It cannot be the concurrency guard:
+        // two cancellation requests can load the same null value before either commits. Claim the
+        // release in PostgreSQL instead, in the caller's transaction. The conditional UPDATE takes
+        // the row lock; after the winner commits, the loser wakes, rechecks the predicate and
+        // affects zero rows, so it must not add the portions a second time.
+        if (dbContext.Database.CurrentTransaction is null)
+        {
+            throw new InvalidOperationException(
+                "Order stock must be released inside the transaction that closes the order.");
+        }
+
+        var claimed = await dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"""
+            UPDATE "Orders"
+            SET "StockReleasedAt" = {now}
+            WHERE "Id" = {order.Id}
+              AND "StockReleasedAt" IS NULL
+            """,
+            cancellationToken);
+
+        if (claimed == 0)
         {
             return false;
         }

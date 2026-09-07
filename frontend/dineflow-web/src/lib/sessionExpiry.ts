@@ -16,10 +16,23 @@ import { ApiError } from '../api/auth'
  * already been attempted mean the credentials are no longer good. Everything else — no response, a
  * 5xx, a timeout — leaves the session alone and lets the page retry.
  * </p>
+ *
+ * <p>
+ * "After a refresh has already been attempted" was the part that did not hold. The attempt can end
+ * without a verdict: a sibling tab rotates the shared token first, and the server answers 409 with
+ * retry:true precisely to say the session is fine. That outcome arrived here as an ordinary 401 and
+ * ended the session anyway — the customer who had just paid came back to My Orders signed out, with
+ * their order replaced by whatever the browser had saved for guests, and no message to say why.
+ * A refresh that never got an answer is not an answer.
+ * </p>
  */
 export function isSessionRejected(error: unknown): boolean {
   if (!(error instanceof ApiError)) {
     // No status at all: the request never got an answer. Nothing was rejected.
+    return false
+  }
+
+  if (error.sessionVerdictUnknown) {
     return false
   }
 

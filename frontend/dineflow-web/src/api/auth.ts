@@ -1652,7 +1652,7 @@ export function clearStoredRefreshToken() {
 // token means only the first one to land would succeed — the rest would get
 // "reused token" failures and force a real logout. Concurrent callers instead
 // await the same in-flight attempt and share its result.
-let refreshInFlight: Promise<boolean> | null = null
+let refreshInFlight: Promise<RefreshOutcome> | null = null
 
 /**
  * Exchange the stored refresh token for a new access token + refresh token
@@ -1662,13 +1662,34 @@ let refreshInFlight: Promise<boolean> | null = null
  * retry. Clears both tokens on failure so the app falls back to a real login.
  */
 /**
- * How hard to try when a sibling tab beat us to rotating the token we share. Two short attempts:
- * the sibling has either stored its replacement by then or is not going to.
+ * What a refresh attempt settled, which is not the same question as whether it worked.
+ *
+ * <p>
+ * 'dead' is the only outcome that means the session is over — the server looked at the refresh
+ * token and rejected it. 'unavailable' means we never got that verdict: a sibling tab rotated the
+ * token and had not stored its replacement in time, or the network failed. Collapsing the two into
+ * `false` is what signed people out of a live session: the caller could not tell "you are logged
+ * out" from "ask again in a moment", so it treated both as the former.
+ * </p>
  */
-const rotationRaceRetries = 2
-const rotationRaceRetryDelayMs = 250
+export type RefreshOutcome = 'refreshed' | 'dead' | 'unavailable'
 
-export function refreshAccessToken(): Promise<boolean> {
+/** How hard to try when a sibling tab beat us to rotating the token we share. */
+const rotationRaceRetries = 2
+
+/**
+ * How long to wait for the sibling to store its replacement.
+ *
+ * <p>
+ * It used to be 250ms and a single look afterwards, which made the retry budget above a fiction:
+ * a sibling still mid-request had written nothing, so the first attempt gave up and the second
+ * never happened. The wait is now on the storage event — the sibling's write wakes us the moment
+ * it lands — with this only as the ceiling.
+ * </p>
+ */
+const rotationRaceWaitMs = 2_000
+
+export function refreshAccessToken(): Promise<RefreshOutcome> {
   if (!refreshInFlight) {
     refreshInFlight = performTokenRefresh().finally(() => {
       refreshInFlight = null
@@ -1677,10 +1698,51 @@ export function refreshAccessToken(): Promise<boolean> {
   return refreshInFlight
 }
 
-async function performTokenRefresh(attempt = 0): Promise<boolean> {
+/**
+ * Waits for another tab to store the token that replaced ours.
+ *
+ * <p>
+ * The storage event fires in every tab except the one that wrote, so the loser of a rotation race
+ * is exactly who hears it. Storage is checked first in case the sibling finished before we started
+ * listening.
+ * </p>
+ */
+function waitForRotatedRefreshToken(previous: string, timeoutMs: number): Promise<string | null> {
+  const alreadyThere = getStoredRefreshToken()
+  if (alreadyThere && alreadyThere !== previous) {
+    return Promise.resolve(alreadyThere)
+  }
+
+  return new Promise((resolve) => {
+    let timer = 0
+
+    const settle = (value: string | null) => {
+      window.removeEventListener('storage', onStorage)
+      window.clearTimeout(timer)
+      resolve(value)
+    }
+
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== refreshTokenKey) {
+        return
+      }
+
+      const next = getStoredRefreshToken()
+      if (next && next !== previous) {
+        settle(next)
+      }
+    }
+
+    window.addEventListener('storage', onStorage)
+    timer = window.setTimeout(() => settle(null), timeoutMs)
+  })
+}
+
+async function performTokenRefresh(attempt = 0): Promise<RefreshOutcome> {
   const refreshToken = getStoredRefreshToken()
   if (!refreshToken) {
-    return false
+    // Nothing to refresh with. Not a verdict on the session, and nothing to clear.
+    return 'unavailable'
   }
 
   try {
@@ -1690,31 +1752,34 @@ async function performTokenRefresh(attempt = 0): Promise<boolean> {
       body: JSON.stringify({ refreshToken }),
     })
 
-    // Another tab of this browser rotated the token we share, moments ago. Nothing is wrong with
-    // the session: its replacement is already in local storage, so read it and go again. Clearing
-    // here is what used to sign a restaurant's till out in the middle of service.
-    if (response.status === 409 && attempt < rotationRaceRetries) {
-      await new Promise((resolve) => setTimeout(resolve, rotationRaceRetryDelayMs))
+    // Another tab of this browser rotated the token we share, moments ago. The server says so in
+    // as many words — 409, retry:true — because nothing is wrong with the session. Never clear
+    // here, and never replay the token we just presented: the server treats a replay outside its
+    // grace window as a stolen token and signs every device out.
+    if (response.status === 409) {
+      const replacement = attempt < rotationRaceRetries
+        ? await waitForRotatedRefreshToken(refreshToken, rotationRaceWaitMs)
+        : null
 
-      // Only worth retrying if the sibling actually wrote one; otherwise we would replay the same
-      // token and land right back here.
-      return getStoredRefreshToken() === refreshToken ? false : performTokenRefresh(attempt + 1)
+      return replacement ? performTokenRefresh(attempt + 1) : 'unavailable'
     }
 
     if (!response.ok) {
+      // The server looked at the token and rejected it: revoked, reused, or expired. This is the
+      // one outcome that means the session is genuinely over.
       clearStoredToken()
       clearStoredRefreshToken()
-      return false
+      return 'dead'
     }
 
     const payload = await response.json() as LoginResponse
     storeToken(payload.token)
     storeRefreshToken(payload.refreshToken)
-    return true
+    return 'refreshed'
   } catch {
     // Network failure: leave existing tokens in place and let the caller's
     // original request fail normally — a transient blip shouldn't log anyone out.
-    return false
+    return 'unavailable'
   }
 }
 
@@ -1756,14 +1821,33 @@ export class ApiError extends Error {
    */
   readonly details?: unknown
 
+  /**
+   * Set when this 401 was met by a refresh that never reached a verdict — a sibling tab held the
+   * rotation, or the network failed.
+   *
+   * <p>
+   * Without it a 401 is indistinguishable from a dead session, and the app tore the session down on
+   * a refresh that had merely been unlucky. The server had already said the opposite in as many
+   * words (409, retry:true), and the answer was thrown away here.
+   * </p>
+   */
+  readonly sessionVerdictUnknown: boolean
+
   // Written out rather than as constructor parameter properties: this project builds with
   // `erasableSyntaxOnly`, which rules those out.
-  constructor(message: string, status: number, code?: string, details?: unknown) {
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    details?: unknown,
+    sessionVerdictUnknown = false,
+  ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.details = details
+    this.sessionVerdictUnknown = sessionVerdictUnknown
   }
 }
 
@@ -1795,10 +1879,17 @@ export async function request<T>(path: string, options: RequestInit = {}) {
   // rather than bouncing the user to the login screen. This is the core of
   // "stay logged in" — as long as the refresh token is still valid, an expired
   // access token is invisible to the user.
+  let sessionVerdictUnknown = false
+
   if (response.status === 401 && !isAuthRetryExempt(path)) {
-    const refreshed = await refreshAccessToken()
-    if (refreshed) {
+    const outcome = await refreshAccessToken()
+
+    if (outcome === 'refreshed') {
       response = await performFetch()
+    } else {
+      // Carried on the error rather than decided here: only the caller knows whether a 401 should
+      // end the session, and it must not end one on a refresh that never got an answer.
+      sessionVerdictUnknown = outcome === 'unavailable'
     }
   }
 
@@ -1825,6 +1916,7 @@ export async function request<T>(path: string, options: RequestInit = {}) {
       response.status,
       typeof errorBody?.code === 'string' ? errorBody.code : undefined,
       errorBody,
+      sessionVerdictUnknown,
     )
   }
 
@@ -1852,10 +1944,17 @@ async function requestBlob(path: string, options: RequestInit = {}) {
 
   let response = await performFetch()
 
+  let sessionVerdictUnknown = false
+
   if (response.status === 401 && !isAuthRetryExempt(path)) {
-    const refreshed = await refreshAccessToken()
-    if (refreshed) {
+    const outcome = await refreshAccessToken()
+
+    if (outcome === 'refreshed') {
       response = await performFetch()
+    } else {
+      // Carried on the error rather than decided here: only the caller knows whether a 401 should
+      // end the session, and it must not end one on a refresh that never got an answer.
+      sessionVerdictUnknown = outcome === 'unavailable'
     }
   }
 
@@ -1872,7 +1971,7 @@ async function requestBlob(path: string, options: RequestInit = {}) {
       }
     }
 
-    throw new Error(message)
+    throw new ApiError(message, response.status, undefined, undefined, sessionVerdictUnknown)
   }
 
   return {

@@ -35,3 +35,38 @@ describe('deciding whether a failed request ended the session', () => {
     expect(isSessionRejected('boom')).toBe(false)
   })
 })
+
+/**
+ * A refresh can end without a verdict.
+ *
+ * <p>
+ * Two tabs share one refresh token. When both wake after the access token expires, both present it;
+ * one rotates and the other is answered 409 with retry:true — the server saying, in as many words,
+ * that nothing is wrong with this session. If the sibling has not stored its replacement by the
+ * time we look, the original request is still a 401, and that 401 used to end the session. A
+ * customer who had just paid came back to My Orders signed out, their order replaced by whatever
+ * the browser had saved for guests, with no message to say why.
+ * </p>
+ */
+describe('when the refresh never reached a verdict', () => {
+  it('keeps the session, even though the request itself was a 401', () => {
+    const unresolved = new ApiError('Unauthorized', 401, undefined, undefined, true)
+
+    expect(isSessionRejected(unresolved)).toBe(false)
+  })
+
+  it('keeps the session on a 403 for the same reason', () => {
+    expect(isSessionRejected(new ApiError('Forbidden', 403, undefined, undefined, true))).toBe(false)
+  })
+
+  /** A verdict was reached and it was "no". That is still the end of the session. */
+  it('still ends the session when the refresh was actually rejected', () => {
+    expect(isSessionRejected(new ApiError('Unauthorized', 401, undefined, undefined, false))).toBe(true)
+  })
+
+  /** Errors raised before any refresh was attempted default to carrying a verdict. */
+  it('treats an ordinary 401 as it always did', () => {
+    expect(new ApiError('Unauthorized', 401).sessionVerdictUnknown).toBe(false)
+    expect(isSessionRejected(new ApiError('Unauthorized', 401))).toBe(true)
+  })
+})

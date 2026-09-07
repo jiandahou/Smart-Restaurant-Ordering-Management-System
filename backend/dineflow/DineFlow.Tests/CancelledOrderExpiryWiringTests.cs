@@ -82,6 +82,28 @@ public sealed class CancelledOrderExpiryWiringTests
     }
 
     /// <summary>
+    /// A property check in one DbContext is not an idempotency guard. Two requests can both load
+    /// null and then add the same portions back. The order row must award exactly one transaction
+    /// the right to release before either item or modifier stock is incremented.
+    /// </summary>
+    [Fact]
+    public void ReleasingStockIsClaimedAtomicallyBeforeAnyPortionMoves()
+    {
+        var body = Source("Services", "OrderStockLedger.cs");
+        var claim = body.IndexOf("UPDATE \"Orders\"", StringComparison.Ordinal);
+        var onlyOnce = body.IndexOf("\"StockReleasedAt\" IS NULL", StringComparison.Ordinal);
+        var releaseItems = body.IndexOf("stockService.ReleaseAsync", StringComparison.Ordinal);
+        var releaseOptions = body.IndexOf("stockService.ReleaseOptionsAsync", StringComparison.Ordinal);
+
+        Assert.True(claim >= 0, "Stock release is not claimed in the database.");
+        Assert.True(onlyOnce > claim, "The database claim is not conditional on an unreleased order.");
+        Assert.True(releaseItems > onlyOnce, "Item stock moves before this transaction owns the release.");
+        Assert.True(releaseOptions > onlyOnce, "Modifier stock moves before this transaction owns the release.");
+        Assert.Contains("claimed == 0", body[onlyOnce..releaseItems], StringComparison.Ordinal);
+        Assert.Contains("CurrentTransaction is null", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Two things learn that a payment succeeded and they race: the browser returning to the success
     /// page asks the API to sync, and Stripe's webhook arrives on its own. Both reach the landing
     /// within a few hundred milliseconds. Only one refund is ever created — the processor's own
