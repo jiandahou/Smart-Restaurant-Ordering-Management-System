@@ -155,3 +155,56 @@ describe('reopening a finished order', () => {
     expect(getStaffRecoveryAction(closed)).toBe('Reopen')
   })
 })
+
+/**
+ * An order the restaurant turned away that is still holding the customer's money.
+ *
+ * <p>
+ * It happens when a refund fails, and when a payment lands after the decision — cancelling asks
+ * Stripe to close the checkout page, that request can fail, and a customer with the tab still open
+ * pays for an order that no longer exists. Both were silent: a paid order read as eligible for the
+ * kitchen, a closed one showed no payment message at all, and the card said "Closed".
+ * </p>
+ */
+describe('an order closed while still holding the money', () => {
+  it.each(['Cancelled', 'Rejected'] as const)('is a payment hold when %s and paid', (status) => {
+    const value = order({ status, paymentStatus: 'Paid' })
+
+    expect(getStaffPaymentState(value)).toBe('unsettledClosure')
+    expect(isStaffPaymentHold(value)).toBe(true)
+    expect(canStaffProcessOrder(value)).toBe(false)
+  })
+
+  it('says what is outstanding and what to do', () => {
+    expect(getStaffPaymentMessage(order({ status: 'Rejected', paymentStatus: 'Paid' })))
+      .toMatch(/rejected but the customer has still paid/i)
+    expect(getStaffPaymentMessage(order({ status: 'Cancelled', paymentStatus: 'Paid' })))
+      .toMatch(/cancelled but the customer has still paid/i)
+  })
+
+  it('counts a partial refund, which still leaves money behind', () => {
+    expect(getStaffPaymentState(order({ status: 'Rejected', paymentStatus: 'PartiallyRefunded' })))
+      .toBe('unsettledClosure')
+  })
+
+  it('lets go once the refund lands', () => {
+    const value = order({ status: 'Rejected', paymentStatus: 'Refunded' })
+
+    expect(getStaffPaymentState(value)).toBe('refunded')
+  })
+
+  /** Keeping the money is the whole point of a completed order. */
+  it('says nothing about a completed order', () => {
+    const value = order({ status: 'Completed', paymentStatus: 'Paid' })
+
+    expect(getStaffPaymentState(value)).toBe('eligible')
+    expect(getStaffPaymentMessage(value)).toBeNull()
+  })
+
+  /** Counter money never came through the platform, so there is nothing here to send back. */
+  it('says nothing about a counter order', () => {
+    const value = order({ status: 'Rejected', paymentStatus: 'Paid', paymentMethod: 'PayAtCounter' })
+
+    expect(getStaffPaymentState(value)).not.toBe('unsettledClosure')
+  })
+})

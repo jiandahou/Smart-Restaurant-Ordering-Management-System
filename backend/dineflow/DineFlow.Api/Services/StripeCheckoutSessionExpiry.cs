@@ -54,6 +54,22 @@ public sealed class StripeCheckoutSessionExpiry(
 
         foreach (var payment in order.Payments.Where(IsStillChargeable))
         {
+            // Stripe will not keep a Checkout Session payable for longer than a day, whatever we
+            // asked for when we made it. Past that the page is dead as a matter of arithmetic, and
+            // saying so here costs nothing and rescues the orders Stripe can no longer be asked
+            // about — a session created under an account that has since changed, or one from
+            // another environment's data, answers resource_missing forever. Left waiting on an
+            // answer that will never come, those orders held their stock for good and, being the
+            // oldest, sat at the front of every batch and crowded newer ones out of it.
+            if (payment.CreatedAt <= now - HostedCheckoutExpiry.Maximum)
+            {
+                payment.Status = PaymentStatus.Expired;
+                payment.UpdatedAt = now;
+                RecordExpiry(order, payment, reason, "past-stripes-maximum-session-lifetime");
+                closed += 1;
+                continue;
+            }
+
             try
             {
                 await new SessionService(stripeClient).ExpireAsync(

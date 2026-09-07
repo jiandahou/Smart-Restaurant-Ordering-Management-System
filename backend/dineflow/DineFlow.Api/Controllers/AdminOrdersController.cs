@@ -36,6 +36,7 @@ public class AdminOrdersController : ControllerBase
     private readonly OrderAutoAcceptanceService _orderAutoAcceptanceService;
     private readonly OrderRefundProcessor _orderRefundProcessor;
     private readonly StripeCheckoutSessionExpiry _checkoutSessionExpiry;
+    private readonly OrderStockLedger _orderStockLedger;
     private readonly ReportLogWriter _reportLogWriter;
 
     public AdminOrdersController(
@@ -45,6 +46,7 @@ public class AdminOrdersController : ControllerBase
         OrderAutoAcceptanceService orderAutoAcceptanceService,
         OrderRefundProcessor orderRefundProcessor,
         StripeCheckoutSessionExpiry checkoutSessionExpiry,
+        OrderStockLedger orderStockLedger,
         ReportLogWriter reportLogWriter)
     {
         _dbContext = dbContext;
@@ -53,6 +55,7 @@ public class AdminOrdersController : ControllerBase
         _orderAutoAcceptanceService = orderAutoAcceptanceService;
         _orderRefundProcessor = orderRefundProcessor;
         _checkoutSessionExpiry = checkoutSessionExpiry;
+        _orderStockLedger = orderStockLedger;
         _reportLogWriter = reportLogWriter;
     }
 
@@ -703,6 +706,35 @@ public class AdminOrdersController : ControllerBase
 
         var previousStatus = order.Status;
         var now = DateTime.UtcNow;
+
+        // The stock moves through raw UPDATEs that land immediately, while the status moves through
+        // the change tracker. Without a transaction around both, a failure between them leaves an
+        // order that was never closed holding nothing, or one that was closed holding everything.
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+        // Reviving a closed order takes its portions back before anything else commits. They were
+        // handed to whoever wanted them when it closed, and an order reopened onto stock that is
+        // gone is one the kitchen cannot make — better to say so here than at the pass.
+        if (previousStatus is OrderStatus.Cancelled or OrderStatus.Rejected)
+        {
+            var shortages = await _orderStockLedger.TryReserveAsync(order, cancellationToken);
+
+            if (shortages.Count > 0)
+            {
+                // Rolled back rather than reported and kept: the ledger reserves item by item and
+                // cannot undo the ones that succeeded, so leaving them would oversell the very
+                // dishes this is guarding.
+                await transaction.RollbackAsync(cancellationToken);
+                return Conflict(new
+                {
+                    message = "There is no longer enough stock to reopen this order.",
+                    shortages = shortages
+                        .Select(shortage => new { name = shortage.Name, isModifier = shortage.IsModifier })
+                        .ToList(),
+                });
+            }
+        }
+
         order.Status = nextStatus;
         order.UpdatedAt = now;
 
@@ -715,6 +747,12 @@ public class AdminOrdersController : ControllerBase
                 order,
                 action.ToString(),
                 cancellationToken);
+
+            // The portions go back with the order. Without this the order was tidied away while
+            // everything it reserved stayed gone, and nothing came along afterwards to notice: the
+            // sweeper that releases abandoned orders only looks at Pending ones, so a rejected
+            // order held its stock for good.
+            await _orderStockLedger.ReleaseAsync(order, now, cancellationToken);
         }
 
         var statusHistory = new OrderStatusHistory
@@ -758,6 +796,11 @@ public class AdminOrdersController : ControllerBase
             });
 
         await _dbContext.SaveChangesAsync(cancellationToken);
+
+        // Committed before the refund, not after. The refund talks to Stripe, and holding a
+        // database transaction open across a third party's latency is how a busy service runs out
+        // of connections — and the refund must survive on its own terms anyway, as below.
+        await transaction.CommitAsync(cancellationToken);
 
         // The refund runs after the transition is saved, deliberately. The rejection is a decision
         // staff have made and is true whether or not Stripe co-operates; rolling it back on a

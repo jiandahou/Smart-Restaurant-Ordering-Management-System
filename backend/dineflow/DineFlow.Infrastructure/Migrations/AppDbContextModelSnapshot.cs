@@ -892,6 +892,9 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<int>("Status")
                         .HasColumnType("integer");
 
+                    b.Property<DateTime?>("StockReleasedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<Guid?>("TableId")
                         .HasColumnType("uuid");
 

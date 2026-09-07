@@ -10,6 +10,7 @@ export type StaffPaymentState =
   | 'awaiting'
   | 'failed'
   | 'refunded'
+  | 'unsettledClosure'
 
 const fulfillmentEligibleStatuses = new Set<AdminPaymentStatus>([
   'Paid',
@@ -27,7 +28,34 @@ const expectedNextAction: Partial<Record<AdminOrder['status'], OrderTransitionAc
   Ready: 'Complete',
 }
 
+/**
+ * An order the restaurant turned away that is still holding the customer's money.
+ *
+ * <p>
+ * Two things produce it and both used to be silent. A refund can fail, and a payment can land after
+ * the decision: cancelling asks Stripe to close the checkout page, that request can fail, and a
+ * customer with the tab still open pays for an order that no longer exists.
+ * </p>
+ *
+ * <p>
+ * Checked before anything else, because every other reading of a paid order says the kitchen may
+ * start — and this one is the opposite: the kitchen is already finished and it is the money that
+ * needs a person.
+ * </p>
+ */
+function isUnsettledClosure(order: AdminOrder) {
+  return (
+    (order.status === 'Cancelled' || order.status === 'Rejected') &&
+    order.paymentMethod === 'Online' &&
+    (order.paymentStatus === 'Paid' || order.paymentStatus === 'PartiallyRefunded')
+  )
+}
+
 export function getStaffPaymentState(order: AdminOrder): StaffPaymentState {
+  if (isUnsettledClosure(order)) {
+    return 'unsettledClosure'
+  }
+
   if (order.paymentStatus === 'Refunded') {
     return 'refunded'
   }
@@ -53,7 +81,12 @@ export function getStaffPaymentState(order: AdminOrder): StaffPaymentState {
 
 export function isStaffPaymentHold(order: AdminOrder) {
   const state = getStaffPaymentState(order)
-  return state === 'awaiting' || state === 'failed' || state === 'refunded'
+  return (
+    state === 'awaiting' ||
+    state === 'failed' ||
+    state === 'refunded' ||
+    state === 'unsettledClosure'
+  )
 }
 
 export function canStaffProcessOrder(order: AdminOrder) {
@@ -71,6 +104,12 @@ export function getStaffPaymentMessage(order: AdminOrder) {
       return order.status === 'Pending'
         ? 'Payment was fully refunded. Reject this order before fulfillment.'
         : 'Payment was fully refunded. Cancel this order before fulfillment.'
+    case 'unsettledClosure':
+      // Says what is true and what to do about it. The order is finished either way; the money is
+      // the open question, and nothing else on this card raises it.
+      return order.status === 'Rejected'
+        ? 'This order was rejected but the customer has still paid. Refund it.'
+        : 'This order was cancelled but the customer has still paid. Refund it.'
     default:
       return null
   }

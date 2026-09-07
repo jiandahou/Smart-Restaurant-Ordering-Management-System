@@ -1473,6 +1473,8 @@ export type CreateCheckoutSessionResponse = {
 export type ConfirmCheckoutSessionResponse = {
   paymentStatus: string
   confirmed: boolean
+  /** The money arrived for an order the restaurant had already turned away, and is being sent back. */
+  orderTurnedAway?: boolean
   message: string
 }
 

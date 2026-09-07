@@ -30,6 +30,7 @@ public class OrderController : ControllerBase
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
     private readonly OrderPickupNumberService _orderPickupNumberService;
     private readonly MenuItemStockService _menuItemStockService;
+    private readonly OrderStockLedger _orderStockLedger;
     private readonly OrderAutoAcceptanceService _orderAutoAcceptanceService;
     private readonly OrderRefundProcessor _orderRefundProcessor;
     private readonly StripeCheckoutSessionExpiry _checkoutSessionExpiry;
@@ -42,6 +43,7 @@ public class OrderController : ControllerBase
         OrderRealtimeNotifier orderRealtimeNotifier,
         OrderPickupNumberService orderPickupNumberService,
         MenuItemStockService menuItemStockService,
+        OrderStockLedger orderStockLedger,
         OrderAutoAcceptanceService orderAutoAcceptanceService,
         OrderRefundProcessor orderRefundProcessor,
         StripeCheckoutSessionExpiry checkoutSessionExpiry,
@@ -53,6 +55,7 @@ public class OrderController : ControllerBase
         _orderRealtimeNotifier = orderRealtimeNotifier;
         _orderPickupNumberService = orderPickupNumberService;
         _menuItemStockService = menuItemStockService;
+        _orderStockLedger = orderStockLedger;
         _orderAutoAcceptanceService = orderAutoAcceptanceService;
         _orderRefundProcessor = orderRefundProcessor;
         _checkoutSessionExpiry = checkoutSessionExpiry;
@@ -429,12 +432,7 @@ public class OrderController : ControllerBase
         // kitchen had already given away.
         await _checkoutSessionExpiry.ExpireOpenSessionsAsync(order, "customer-cancel", cancellationToken);
 
-        await _menuItemStockService.ReleaseAsync(
-            BuildRequestedQuantities(order.OrderItems),
-            cancellationToken);
-        await _menuItemStockService.ReleaseOptionsAsync(
-            OrderOptionStock.RequestedQuantities(order.OrderItems),
-            cancellationToken);
+        await _orderStockLedger.ReleaseAsync(order, now, cancellationToken);
 
         _dbContext.OrderStatusHistories.Add(new OrderStatusHistory
         {
@@ -912,22 +910,8 @@ public class OrderController : ControllerBase
     /// menu item has since been deleted carry no id and cannot be stock-tracked, so they are
     /// skipped.
     /// </summary>
-    internal static Dictionary<Guid, int> BuildRequestedQuantities(IEnumerable<OrderItem> orderItems)
-    {
-        var quantities = new Dictionary<Guid, int>();
-
-        foreach (var orderItem in orderItems)
-        {
-            if (orderItem.MenuItemId is not { } menuItemId)
-            {
-                continue;
-            }
-
-            quantities[menuItemId] = quantities.GetValueOrDefault(menuItemId) + orderItem.Quantity;
-        }
-
-        return quantities;
-    }
+    internal static Dictionary<Guid, int> BuildRequestedQuantities(IEnumerable<OrderItem> orderItems) =>
+        OrderItemStock.RequestedQuantities(orderItems);
 
     internal static IReadOnlyList<string> DescribeUnavailableItems(
         IReadOnlyList<Guid> menuItemIds,

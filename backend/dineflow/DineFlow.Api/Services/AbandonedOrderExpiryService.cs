@@ -52,7 +52,7 @@ public sealed class AbandonedOrderExpiryService(
         {
             using var scope = scopeFactory.CreateScope();
             var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            var stockService = scope.ServiceProvider.GetRequiredService<MenuItemStockService>();
+            var stockLedger = scope.ServiceProvider.GetRequiredService<OrderStockLedger>();
             var checkoutSessionExpiry = scope.ServiceProvider.GetRequiredService<StripeCheckoutSessionExpiry>();
 
             var now = DateTime.UtcNow;
@@ -72,7 +72,15 @@ public sealed class AbandonedOrderExpiryService(
                     (order.PaymentStatus == PaymentStatus.Unpaid ||
                      order.PaymentStatus == PaymentStatus.Failed ||
                      order.PaymentStatus == PaymentStatus.Expired ||
-                     order.PaymentStatus == PaymentStatus.Cancelled))
+                     order.PaymentStatus == PaymentStatus.Cancelled ||
+                     // Pending means a checkout session was created and nothing has come back. It
+                     // was excluded on the reasoning that the customer might be on the card form —
+                     // but that reasoning has no clock in it, and the exclusion held for as long as
+                     // Stripe kept the session alive. The deadline the customer is shown is twenty
+                     // minutes; reaching the payment screen quietly turned it into an hour, and the
+                     // portions stayed gone for the whole of it. Whether anyone is still paying is
+                     // now asked of Stripe rather than assumed, below.
+                     order.PaymentStatus == PaymentStatus.Pending))
                 .OrderBy(order => order.CreatedAt)
                 .Take(BatchSize)
                 .ToListAsync(cancellationToken);
@@ -84,16 +92,16 @@ public sealed class AbandonedOrderExpiryService(
                     break;
                 }
 
-                // The order-level status can lag a payment that is mid-flight, so the payment rows
-                // are checked too. Cancelling an order while its checkout session is live is how a
-                // customer ends up paying for something that no longer exists.
-                if (order.Payments.Any(payment =>
-                        payment.Status is PaymentStatus.Pending or PaymentStatus.Paid))
+                // Money already taken is the one state no sweep may touch, whatever the order says
+                // about itself. Everything else — including a live checkout session — is settled
+                // with Stripe inside the transaction below, where a session that turns out to have
+                // been paid can still call the whole thing off.
+                if (order.Payments.Any(payment => payment.Status == PaymentStatus.Paid))
                 {
                     continue;
                 }
 
-                if (await ExpireOrderAsync(dbContext, stockService, checkoutSessionExpiry, order, now, cancellationToken))
+                if (await ExpireOrderAsync(dbContext, stockLedger, checkoutSessionExpiry, order, now, cancellationToken))
                 {
                     expired++;
                 }
@@ -109,7 +117,7 @@ public sealed class AbandonedOrderExpiryService(
 
     private async Task<bool> ExpireOrderAsync(
         AppDbContext dbContext,
-        MenuItemStockService stockService,
+        OrderStockLedger stockLedger,
         StripeCheckoutSessionExpiry checkoutSessionExpiry,
         Order order,
         DateTime now,
@@ -125,8 +133,16 @@ public sealed class AbandonedOrderExpiryService(
             order.PaymentStatus = PaymentStatus.Cancelled;
             order.UpdatedAt = now;
 
+            // Closed alongside the order, including the ones whose status still reads Pending but
+            // which can take nothing: leaving a row that says a payment is in flight on an order
+            // that has been given up on is the inconsistency this sweep exists to clear, not one to
+            // leave behind.
             foreach (var payment in order.Payments.Where(payment =>
-                         AbandonedOrderPolicy.HasNoPaymentInFlight(payment.Status)))
+                         AbandonedOrderPolicy.HasNoPaymentInFlight(payment.Status)
+                         || !AbandonedOrderPolicy.CanStillTakeMoney(
+                             payment.Status,
+                             payment.ProviderCheckoutSessionId,
+                             payment.ProviderPaymentIntentId)))
             {
                 payment.Status = PaymentStatus.Cancelled;
                 payment.UpdatedAt = now;
@@ -135,16 +151,34 @@ public sealed class AbandonedOrderExpiryService(
             // Asked for before the portions go back. An order the sweeper has given up on can still
             // have a hosted page a customer left open, and until Stripe's own timeout that page is
             // chargeable for stock this line is about to hand to someone else.
-            await checkoutSessionExpiry.ExpireOpenSessionsAsync(order, "abandoned-order-sweep", cancellationToken);
+            //
+            // And the answer is now a condition rather than a courtesy. Every live session has to
+            // come back confirmed unchargeable before anything is released: Stripe is the only
+            // party that knows whether the customer finished paying in the seconds this sweep was
+            // deciding they had not, and it is the only party that can make the page stop working.
+            var liveSessions = order.Payments.Count(StripeCheckoutSessionExpiry.IsStillChargeable);
+            var closedSessions = await checkoutSessionExpiry.ExpireOpenSessionsAsync(
+                order,
+                "abandoned-order-sweep",
+                cancellationToken);
+
+            if (closedSessions < liveSessions)
+            {
+                // Either somebody paid while this ran, or Stripe could not be reached. Both mean
+                // the same thing here: this order is not ours to release yet. Rolled back rather
+                // than skipped so the half-applied expiries go with it, and tried again next sweep.
+                await transaction.RollbackAsync(cancellationToken);
+                logger.LogInformation(
+                    "Left {OrderNumber} alone: {Closed} of {Live} checkout sessions could be confirmed closed.",
+                    order.OrderNumber,
+                    closedSessions,
+                    liveSessions);
+                return false;
+            }
 
             // The whole point of the sweep. Without this the order is merely tidied away while the
             // portions it reserved stay gone.
-            await stockService.ReleaseAsync(
-                OrderController.BuildRequestedQuantities(order.OrderItems),
-                cancellationToken);
-            await stockService.ReleaseOptionsAsync(
-                OrderOptionStock.RequestedQuantities(order.OrderItems),
-                cancellationToken);
+            await stockLedger.ReleaseAsync(order, now, cancellationToken);
 
             dbContext.OrderStatusHistories.Add(new OrderStatusHistory
             {

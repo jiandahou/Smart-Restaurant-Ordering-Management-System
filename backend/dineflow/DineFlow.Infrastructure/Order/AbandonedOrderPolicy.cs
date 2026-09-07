@@ -44,6 +44,31 @@ public static class AbandonedOrderPolicy
             or PaymentStatus.Cancelled;
 
     /// <summary>
+    /// Whether a payment attempt can still take the customer's money.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A Pending attempt normally means a live checkout page, and releasing an order's stock out
+    /// from under one is how a customer ends up paying for food that has been given away. But a
+    /// Pending attempt with no provider identifier is a different thing wearing the same status:
+    /// creating the session at Stripe failed, and the row was committed still marked Pending with
+    /// the failure only in its reason text.
+    /// </para>
+    /// <para>
+    /// Nobody can pay that one. The identifier and the checkout URL arrive in the same response, so
+    /// a failure that cost us the id cost the customer the link — there is no page to open and no
+    /// session to charge. Treated as in-flight it vetoed the sweep forever: the order was a
+    /// perfectly good candidate, and this row held it, while the reconciliation sweeper skipped the
+    /// row for having no identifier to reconcile against. Two sweepers, one order, neither able to
+    /// touch it, and its portions gone for good.
+    /// </para>
+    /// </remarks>
+    public static bool CanStillTakeMoney(PaymentStatus status, string? checkoutSessionId, string? paymentIntentId) =>
+        status is PaymentStatus.Paid
+        || (status == PaymentStatus.Pending
+            && !(string.IsNullOrWhiteSpace(checkoutSessionId) && string.IsNullOrWhiteSpace(paymentIntentId)));
+
+    /// <summary>
     /// Whether the order is one this policy governs at all.
     /// </summary>
     /// <remarks>

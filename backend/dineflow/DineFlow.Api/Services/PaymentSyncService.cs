@@ -41,7 +41,7 @@ public sealed class PaymentSyncService(
     AppDbContext dbContext,
     IStripeClient stripeClient,
     IOptions<StripeOptions> stripeOptions,
-    OrderAutoAcceptanceService orderAutoAcceptanceService,
+    OrderPaymentLanding orderPaymentLanding,
     OrderRealtimeNotifier orderRealtimeNotifier,
     ReportLogWriter reportLogWriter,
     ILogger<PaymentSyncService> logger)
@@ -213,7 +213,10 @@ public sealed class PaymentSyncService(
 
                 if (payment.Status == PaymentStatus.Paid)
                 {
-                    await orderAutoAcceptanceService.TryAcceptAsync(payment.Order, cancellationToken);
+                    // Not TryAccept directly: the order may have been turned away while this
+                    // payment was in flight, and accepting it would put food nobody ordered on the
+                    // pass while the customer's money stayed.
+                    await orderPaymentLanding.OnPaidAsync(payment.Order, actorUserId, cancellationToken);
                 }
             }
 

@@ -41,7 +41,7 @@ public class PaymentsController : ControllerBase
     private readonly IStripeClient _stripeClient;
     private readonly StripeOptions _stripeOptions;
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
-    private readonly OrderAutoAcceptanceService _orderAutoAcceptanceService;
+    private readonly OrderPaymentLanding _orderPaymentLanding;
     private readonly OrderRefundProcessor _orderRefundProcessor;
     private readonly StripeOrderCheckoutService _stripeOrderCheckoutService;
     private readonly PaymentSyncService _paymentSyncService;
@@ -55,7 +55,7 @@ public class PaymentsController : ControllerBase
         IStripeClient stripeClient,
         IOptions<StripeOptions> stripeOptions,
         OrderRealtimeNotifier orderRealtimeNotifier,
-        OrderAutoAcceptanceService orderAutoAcceptanceService,
+        OrderPaymentLanding orderPaymentLanding,
         OrderRefundProcessor orderRefundProcessor,
         StripeOrderCheckoutService stripeOrderCheckoutService,
         PaymentSyncService paymentSyncService,
@@ -68,7 +68,7 @@ public class PaymentsController : ControllerBase
         _stripeClient = stripeClient;
         _stripeOptions = stripeOptions.Value;
         _orderRealtimeNotifier = orderRealtimeNotifier;
-        _orderAutoAcceptanceService = orderAutoAcceptanceService;
+        _orderPaymentLanding = orderPaymentLanding;
         _orderRefundProcessor = orderRefundProcessor;
         _stripeOrderCheckoutService = stripeOrderCheckoutService;
         _paymentSyncService = paymentSyncService;
@@ -107,6 +107,16 @@ public class PaymentsController : ControllerBase
             return NotFound(new { message = "Checkout session was not found." });
         }
 
+        // Already settled and already synced once, so there is nothing left for Stripe to tell us:
+        // the money has stopped moving, the settlement figures are on the row, and the only thing
+        // that can still change is the order's own status, which is ours. The page polls this while
+        // the customer waits — asking Stripe again each time would spend a round trip per open tab
+        // to re-read an answer we hold.
+        if (!NeedsProviderSync(payment))
+        {
+            return Ok(Describe(payment));
+        }
+
         var result = await _paymentSyncService.SyncCheckoutSessionAsync(
             payment,
             actorUserId: null,
@@ -117,18 +127,51 @@ public class PaymentsController : ControllerBase
             return StatusCode(result.StatusCode, new { message = result.Message });
         }
 
+        return Ok(Describe(payment));
+    }
+
+    /// <summary>
+    /// Whether Stripe still has something to say about this payment.
+    /// </summary>
+    /// <remarks>
+    /// A refunded or partially refunded payment is finished. A paid one is finished too, but only
+    /// once something has read the charge — the webhook records the status without the settlement
+    /// figures, so an unsynced payment still needs the round trip that fills them in.
+    /// </remarks>
+    private static bool NeedsProviderSync(Payment payment) =>
+        payment.Status switch
+        {
+            PaymentStatus.Refunded or PaymentStatus.PartiallyRefunded => false,
+            PaymentStatus.Paid => payment.LastSyncedAt is null,
+            _ => true,
+        };
+
+    private static ConfirmCheckoutSessionResponse Describe(Payment payment)
+    {
         var confirmed = payment.Status is PaymentStatus.Paid
             or PaymentStatus.PartiallyRefunded
             or PaymentStatus.Refunded;
 
-        return Ok(new ConfirmCheckoutSessionResponse
+        // The money can arrive for an order that no longer exists — a hosted page the restaurant
+        // could not close, finished by a customer who still had the tab open. The payment really
+        // did succeed, so every check above says confirmed, and saying only that left the customer
+        // reading "your payment and order status are now up to date" about an order the kitchen had
+        // rejected and a refund already on its way back to them.
+        var turnedAway = payment.Order is not null
+            && payment.Order.Status is OrderStatus.Cancelled or OrderStatus.Rejected;
+
+        return new ConfirmCheckoutSessionResponse
         {
             PaymentStatus = payment.Status.ToString(),
             Confirmed = confirmed,
-            Message = confirmed
-                ? "Payment confirmed."
-                : "Payment is still being processed by Stripe."
-        });
+            OrderTurnedAway = turnedAway,
+            // The same sentence the refund email carries, so the screen and the inbox agree.
+            Message = turnedAway
+                ? TurnedAwayOrderRefund.CustomerExplanation(payment.Order!.Status)
+                : confirmed
+                    ? "Payment confirmed."
+                    : "Payment is still being processed by Stripe."
+        };
     }
 
     /// Manual recovery path: pulls the authoritative state from Stripe for a payment stranded by a
@@ -1924,7 +1967,9 @@ public class PaymentsController : ControllerBase
             payment.Order.UpdatedAt = DateTime.UtcNow;
             if (status == PaymentStatus.Paid)
             {
-                await _orderAutoAcceptanceService.TryAcceptAsync(payment.Order, cancellationToken);
+                // Not TryAccept directly: a payment can land on an order the restaurant already
+                // turned away, and that money has to go back rather than be quietly kept.
+                await _orderPaymentLanding.OnPaidAsync(payment.Order, actorUserId: null, cancellationToken);
             }
         }
 
@@ -2061,7 +2106,9 @@ public class PaymentsController : ControllerBase
             payment.Order.UpdatedAt = DateTime.UtcNow;
             if (status == PaymentStatus.Paid)
             {
-                await _orderAutoAcceptanceService.TryAcceptAsync(payment.Order, cancellationToken);
+                // Not TryAccept directly: a payment can land on an order the restaurant already
+                // turned away, and that money has to go back rather than be quietly kept.
+                await _orderPaymentLanding.OnPaidAsync(payment.Order, actorUserId: null, cancellationToken);
             }
         }
 

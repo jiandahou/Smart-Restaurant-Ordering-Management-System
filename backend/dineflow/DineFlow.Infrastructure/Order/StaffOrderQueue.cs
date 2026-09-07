@@ -58,6 +58,32 @@ public static class StaffOrderQueue
         return true;
     }
 
+    /// <summary>
+    /// A closed order that is still holding the customer's money.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Turning an order away refunds it, but the refund and the closing are not one act: a payment
+    /// can land after the decision — a customer finishing on a checkout page the restaurant had
+    /// already rejected — and a refund can fail. Either way the order is finished and the money is
+    /// not, and until this existed nothing said so. The order left every working queue the moment it
+    /// closed, and a payment hold had to be live to count, so a rejected order sitting on a
+    /// customer's money appeared on no screen at all.
+    /// </para>
+    /// <para>
+    /// Completed orders are excluded: keeping the money is the whole point of a completed order.
+    /// Counter orders too — that money never came through the platform, so there is nothing here to
+    /// send back.
+    /// </para>
+    /// </remarks>
+    public static bool IsUnsettledClosure(
+        OrderStatus status,
+        PaymentStatus paymentStatus,
+        PaymentMethod paymentMethod) =>
+        status is OrderStatus.Cancelled or OrderStatus.Rejected
+        && paymentMethod == PaymentMethod.Online
+        && paymentStatus is PaymentStatus.Paid or PaymentStatus.PartiallyRefunded;
+
     /// <summary>Still open a day later — someone has to decide what to do with it.</summary>
     public static bool IsCarriedOver(OrderStatus status, DateTime createdAt, DateTime utcNow) =>
         IsLive(status) && utcNow - createdAt >= TimeSpan.FromHours(24);
@@ -110,7 +136,10 @@ public static class StaffOrderQueue
 
         if (!IsLive(status))
         {
-            return false;
+            // A closed order holding money still needs a person, so it belongs on the one tab that
+            // is about money rather than about cooking. It appears in Closed as well, which is
+            // correct: it is finished work with something outstanding, not work in progress.
+            return queue == "payment" && IsUnsettledClosure(status, paymentStatus, paymentMethod);
         }
 
         var hold = IsPaymentHold(status, paymentStatus, paymentMethod);
@@ -162,12 +191,18 @@ public static class StaffOrderQueue
         {
             PaymentStatus.Paid, PaymentStatus.PartiallyRefunded, PaymentStatus.NotRequired,
         };
+        var turnedAway = new[] { OrderStatus.Cancelled, OrderStatus.Rejected };
+        var holdsMoney = new[] { PaymentStatus.Paid, PaymentStatus.PartiallyRefunded };
 
         return queue switch
         {
-            "payment" => order => live.Contains(order.Status)
-                && (order.PaymentStatus == PaymentStatus.Refunded
-                    || (!settled.Contains(order.PaymentStatus) && order.PaymentMethod != PaymentMethod.PayAtCounter)),
+            "payment" => order => (live.Contains(order.Status)
+                    && (order.PaymentStatus == PaymentStatus.Refunded
+                        || (!settled.Contains(order.PaymentStatus) && order.PaymentMethod != PaymentMethod.PayAtCounter)))
+                // The closed half: turned away, and still holding the customer's money.
+                || (turnedAway.Contains(order.Status)
+                    && order.PaymentMethod == PaymentMethod.Online
+                    && holdsMoney.Contains(order.PaymentStatus)),
             "carried" => order => live.Contains(order.Status)
                 && order.PaymentStatus != PaymentStatus.Refunded
                 && (settled.Contains(order.PaymentStatus) || order.PaymentMethod == PaymentMethod.PayAtCounter)

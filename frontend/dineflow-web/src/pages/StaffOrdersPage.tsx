@@ -255,6 +255,12 @@ function getOrderSignal(order: AdminOrder, now: Date): {
   const carriedOver = isCarriedOverOrder(order, now)
   const isLate = getOrderAgeMinutes(order, now) >= 20 && !isClosedOrder(order) && !paymentHold && !carriedOver
 
+  // Ahead of Closed on purpose. The order is finished, so every label below would call it done —
+  // and the customer's money is the one thing still outstanding on it.
+  if (paymentState === 'unsettledClosure') {
+    return { label: 'Closed — refund owed', tone: 'blocked', isLate: false }
+  }
+
   if (isClosedOrder(order)) {
     return { label: 'Closed', tone: 'closed', isLate: false }
   }
@@ -798,7 +804,7 @@ export function StaffOrdersPage() {
 
           {viewMode === 'orders' ? (
             <Tabs value={queue} onValueChange={(value) => setQueue(value as Queue)}>
-              <TabsList className="staff-orders-queue-tabs h-11 w-full">
+              <TabsList className="staff-orders-queue-tabs w-full">
                 {(Object.keys(queueLabels) as Queue[]).map((value) => (
                   <TabsTrigger
                     key={value}
@@ -1200,9 +1206,13 @@ export function StaffOrdersPage() {
                         {paymentMessage ? (
                           <div className={cn(
                             'staff-order-payment-message',
-                            getStaffPaymentState(order) === 'refunded' && 'is-refunded',
+                            // Money that has moved, or is owed, reads louder than money that has
+                            // yet to arrive.
+                            (getStaffPaymentState(order) === 'refunded'
+                              || getStaffPaymentState(order) === 'unsettledClosure') && 'is-refunded',
                           )}>
                             {getStaffPaymentState(order) === 'refunded'
+                              || getStaffPaymentState(order) === 'unsettledClosure'
                               ? <ShieldAlert className="mt-0.5 size-4 shrink-0" />
                               : <AlertCircle className="mt-0.5 size-4 shrink-0" />}
                             <span className="text-sm">{paymentMessage}</span>

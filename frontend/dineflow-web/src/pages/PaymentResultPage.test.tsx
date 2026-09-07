@@ -308,3 +308,88 @@ describe('when the session is one we have never heard of', () => {
     expect(confirmStripeCheckoutSession.mock.calls.length).toBeGreaterThan(1)
   })
 })
+
+/**
+ * The money arrives for an order that no longer exists.
+ *
+ * <p>
+ * Cancelling an order asks Stripe to close its checkout page, and that request can fail — Stripe
+ * unreachable, the session already gone. The page stays chargeable, and a customer who still has
+ * the tab open pays for an order the restaurant has already rejected. The payment genuinely
+ * succeeds, so every check on this page said confirmed and it told them "your payment and order
+ * status are now up to date" — while the refund was already on its way and no food was coming.
+ * </p>
+ */
+describe('when the payment lands on an order that was turned away', () => {
+  const turnedAway = {
+    confirmed: true,
+    orderTurnedAway: true,
+    paymentStatus: 'Refunded',
+    message: 'The restaurant could not accept this order, so it has been refunded in full.',
+  }
+
+  it('does not tell the customer everything is fine', async () => {
+    confirmStripeCheckoutSession.mockResolvedValue(turnedAway)
+
+    renderPage()
+
+    expect(await screen.findByRole('heading', { name: 'Order not accepted' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Payment confirmed' })).not.toBeInTheDocument()
+  })
+
+  it('says the money is coming back', async () => {
+    confirmStripeCheckoutSession.mockResolvedValue(turnedAway)
+
+    renderPage()
+
+    expect(await screen.findByText(/being refunded in full/i)).toBeInTheDocument()
+    expect(screen.getByText(/refund on its way/i)).toBeInTheDocument()
+  })
+
+  /** The same sentence the refund email carries, so the screen and the inbox agree. */
+  it('passes on the explanation the restaurant gave', async () => {
+    confirmStripeCheckoutSession.mockResolvedValue(turnedAway)
+
+    renderPage()
+
+    expect(
+      await screen.findByText(/could not accept this order, so it has been refunded in full/i),
+    ).toBeInTheDocument()
+  })
+
+  /**
+   * The order is not always turned away before the money lands. Staff reject it seconds after,
+   * because the kitchen is out of something or the restaurant is closing — and the page had already
+   * stopped looking, so it held a green tick over an order that no longer existed.
+   */
+  it('corrects itself when the order is turned away after the payment confirmed', async () => {
+    confirmStripeCheckoutSession.mockResolvedValue({ confirmed: true, message: 'Payment confirmed.' })
+
+    renderPage()
+    await screen.findByRole('heading', { name: 'Payment confirmed' })
+
+    confirmStripeCheckoutSession.mockResolvedValue(turnedAway)
+    document.dispatchEvent(new Event('visibilitychange'))
+
+    expect(await screen.findByRole('heading', { name: 'Order not accepted' })).toBeInTheDocument()
+  })
+
+  /** Until this the page stopped looking on the customer's behalf and gave them no way to ask. */
+  it('offers a way to ask again once the payment has settled', async () => {
+    confirmStripeCheckoutSession.mockResolvedValue({ confirmed: true, message: 'Payment confirmed.' })
+
+    renderPage()
+    await screen.findByRole('heading', { name: 'Payment confirmed' })
+
+    expect(screen.getByRole('button', { name: /check again/i })).toBeInTheDocument()
+  })
+
+  it('settles there rather than falling back to a reassuring state', async () => {
+    confirmStripeCheckoutSession.mockResolvedValue(turnedAway)
+
+    renderPage()
+
+    await screen.findByRole('heading', { name: 'Order not accepted' })
+    expect(confirmStripeCheckoutSession).toHaveBeenCalledTimes(1)
+  })
+})

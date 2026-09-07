@@ -179,7 +179,7 @@ public sealed class StripePaymentRecoveryIntegrationTests
             context,
             stripeClient,
             stripeOptions,
-            new OrderAutoAcceptanceService(context, reportLogWriter),
+            TestServiceStubs.CreateOrderPaymentLanding(context, stripeClient, stripeOptions),
             notifier,
             reportLogWriter,
             NullLogger<PaymentSyncService>.Instance);
@@ -285,7 +285,7 @@ public sealed class StripePaymentRecoveryIntegrationTests
             context,
             stripeClient,
             stripeOptions,
-            new OrderAutoAcceptanceService(context, reportLogWriter),
+            TestServiceStubs.CreateOrderPaymentLanding(context, stripeClient, stripeOptions),
             notifier,
             reportLogWriter,
             NullLogger<PaymentSyncService>.Instance);

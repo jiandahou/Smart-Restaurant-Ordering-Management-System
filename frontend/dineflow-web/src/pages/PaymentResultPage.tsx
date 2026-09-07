@@ -4,7 +4,12 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { confirmStripeCheckoutSession } from '../api/auth'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
-import { confirmationDelaysMs, isTerminalConfirmationFailure } from '../lib/paymentConfirmationPolling'
+import {
+  confirmationDelaysMs,
+  isTerminalConfirmationFailure,
+  settledRecheckIntervalMs,
+  shouldRecheckSettled,
+} from '../lib/paymentConfirmationPolling'
 import { getSafeMenuReturnPath } from '../lib/customerMenuNavigation'
 
 type PaymentResultPageProps = {
@@ -28,9 +33,12 @@ export function PaymentResultPage({ result }: PaymentResultPageProps) {
       ? 'This return link did not carry a usable Stripe session id, so the payment could not be confirmed here. Your order updates automatically from Stripe.'
       : 'The Stripe Checkout Session id is missing. Your order will still update from the payment notification.'
   const [confirmation, setConfirmation] = useState<
-    'confirming' | 'confirmed' | 'processing' | 'failed' | 'unmatched'
+    'confirming' | 'confirmed' | 'processing' | 'failed' | 'unmatched' | 'turnedAway'
   >(isSuccess && !unusableSessionMessage ? 'confirming' : 'failed')
   const [confirmationMessage, setConfirmationMessage] = useState('')
+  // When the page first settled, so the quiet recheck below can be measured from there rather than
+  // from mount — a slow webhook must not eat the window in which an order can still be turned away.
+  const settledAtRef = useRef<number | null>(null)
   // Set while a run is in flight, so a tab regaining focus or a second click cannot start a
   // parallel one that races the first to set the outcome.
   const runningRef = useRef(false)
@@ -51,7 +59,9 @@ export function PaymentResultPage({ result }: PaymentResultPageProps) {
 
     runningRef.current = true
     setConfirmation((current) =>
-      current === 'confirmed' || current === 'unmatched' ? current : 'confirming',
+      current === 'confirmed' || current === 'unmatched' || current === 'turnedAway'
+        ? current
+        : 'confirming',
     )
 
     try {
@@ -69,7 +79,11 @@ export function PaymentResultPage({ result }: PaymentResultPageProps) {
           setConfirmationMessage(response.message)
 
           if (response.confirmed) {
-            setConfirmation('confirmed')
+            // Checked before 'confirmed', which it also is. The payment succeeded — that is exactly
+            // why this case is dangerous: every reassuring state below is technically true, and
+            // together they told the customer their order was fine while it was being refunded.
+            settledAtRef.current ??= Date.now()
+            setConfirmation(response.orderTurnedAway ? 'turnedAway' : 'confirmed')
             return
           }
         } catch (error) {
@@ -92,7 +106,9 @@ export function PaymentResultPage({ result }: PaymentResultPageProps) {
 
       if (!signal?.cancelled) {
         setConfirmation((current) =>
-          current === 'confirmed' || current === 'unmatched' ? current : 'processing',
+          current === 'confirmed' || current === 'unmatched' || current === 'turnedAway'
+            ? current
+            : 'processing',
         )
       }
     } finally {
@@ -139,6 +155,35 @@ export function PaymentResultPage({ result }: PaymentResultPageProps) {
     return () => document.removeEventListener('visibilitychange', recheckOnReturn)
   }, [confirmPayment, isSuccess, sessionId])
 
+  // Confirming the payment is not the end of the story. Staff can turn the order away seconds after
+  // the money lands, and the page used to stop looking the moment it could show a green tick — so
+  // the customer sat in front of a confirmation while the refund went to an inbox they might not
+  // read for hours. A settled payment is answered from our own records, so this costs no round trip
+  // to Stripe; it is bounded because this is a page people leave open.
+  useEffect(() => {
+    if (!isSuccess || !sessionId || confirmation !== 'confirmed') {
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      // Nothing is watching a hidden tab, and coming back already triggers a look of its own.
+      if (document.visibilityState !== 'visible') {
+        return
+      }
+
+      const elapsed = Date.now() - (settledAtRef.current ?? Date.now())
+
+      if (!shouldRecheckSettled(confirmation, elapsed)) {
+        window.clearInterval(timer)
+        return
+      }
+
+      void confirmPayment()
+    }, settledRecheckIntervalMs)
+
+    return () => window.clearInterval(timer)
+  }, [confirmPayment, confirmation, isSuccess, sessionId])
+
   const paymentConfirmed = isSuccess && confirmation === 'confirmed'
   const confirmationFailed = isSuccess && confirmation === 'failed'
   // The budget ran out without an answer. Distinct from 'confirming' on purpose: it used to render
@@ -148,8 +193,13 @@ export function PaymentResultPage({ result }: PaymentResultPageProps) {
   // from every other state because it is the one that must not reassure — "Payment received" over
   // a session nobody has heard of is a claim we cannot make.
   const sessionUnmatched = isSuccess && confirmation === 'unmatched'
+  // The payment succeeded and the order it was for no longer exists. Kept apart from every other
+  // state because it is the only one where reassurance is the wrong answer: the restaurant turned
+  // the order away, the money is going back, and no food is coming.
+  const orderTurnedAway = isSuccess && confirmation === 'turnedAway'
   const inProgress = isSuccess && !paymentConfirmed && !confirmationFailed && !sessionUnmatched
-  const Icon = !isSuccess || confirmationFailed || sessionUnmatched
+    && !orderTurnedAway
+  const Icon = !isSuccess || confirmationFailed || sessionUnmatched || orderTurnedAway
     ? CircleX
     : paymentConfirmed
       ? CircleCheck
@@ -158,17 +208,21 @@ export function PaymentResultPage({ result }: PaymentResultPageProps) {
         : Loader2
   const title = !isSuccess
     ? 'Payment cancelled'
-    : paymentConfirmed
-      ? 'Payment confirmed'
-      : sessionUnmatched
-        ? 'Payment could not be matched'
-        : confirmationFailed
-          ? 'Payment received'
-          : stillProcessing
+    : orderTurnedAway
+      ? 'Order not accepted'
+      : paymentConfirmed
+        ? 'Payment confirmed'
+        : sessionUnmatched
+          ? 'Payment could not be matched'
+          : confirmationFailed
             ? 'Payment received'
-            : 'Confirming payment'
+            : stillProcessing
+              ? 'Payment received'
+              : 'Confirming payment'
   const description = !isSuccess
     ? 'No payment was taken. You can return to your account and try again when ready.'
+    : orderTurnedAway
+      ? 'Your payment went through, but the restaurant had already closed this order. It is being refunded in full — allow a few business days for it to reach your statement.'
     : paymentConfirmed
       ? 'Thanks. Your payment and order status are now up to date.'
       : sessionUnmatched
@@ -188,7 +242,7 @@ export function PaymentResultPage({ result }: PaymentResultPageProps) {
           <CardDescription>{description}</CardDescription>
         </CardHeader>
         <CardContent className="form-grid">
-          <div className={`confirm-status ${isSuccess && !confirmationFailed && !sessionUnmatched ? 'success' : 'error'}`}>
+          <div className={`confirm-status ${isSuccess && !confirmationFailed && !sessionUnmatched && !orderTurnedAway ? 'success' : 'error'}`}>
             {/* The spinner is the progress claim. It stops when the answer is in, whichever answer
                 it is — a turning spinner over a settled error is what made this page read as busy
                 for the rest of the budget. */}
@@ -196,6 +250,8 @@ export function PaymentResultPage({ result }: PaymentResultPageProps) {
             <span>
               {!isSuccess
                 ? 'Payment was cancelled'
+                : orderTurnedAway
+                  ? 'Order closed — refund on its way'
                 : paymentConfirmed
                   ? 'Payment confirmed'
                   : sessionUnmatched
@@ -215,7 +271,10 @@ export function PaymentResultPage({ result }: PaymentResultPageProps) {
           {isSuccess ? (
             <p className="auth-note">Your receipt is available from My orders.</p>
           ) : null}
-          {stillProcessing ? (
+          {/* Offered on the settled states too. A confirmed payment can still belong to an order
+              that is turned away a moment later, and until this the page gave the customer no way
+              to ask — it had stopped looking on their behalf as well. */}
+          {stillProcessing || paymentConfirmed || orderTurnedAway ? (
             <Button variant="outline" onClick={() => void confirmPayment()}>
               <RefreshCw size={18} />
               Check again

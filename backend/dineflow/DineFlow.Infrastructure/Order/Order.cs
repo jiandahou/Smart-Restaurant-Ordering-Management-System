@@ -75,6 +75,24 @@ public class Order
 
     public DateTime? UpdatedAt { get; set; }
 
+    /// <summary>
+    /// When this order gave back the stock it reserved at checkout, or null while it still holds it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Whether an order is holding portions used to be inferred from its status, and the inference
+    /// was wrong: two of the three paths that closed an order released its stock and the third —
+    /// staff rejecting at the counter — did not, so Cancelled meant "released" for some rows and
+    /// "still held" for others with nothing to tell them apart. Reopening one of the second kind
+    /// would have reserved a second time for portions never given back.
+    /// </para>
+    /// <para>
+    /// So the row says it. Release and re-reservation both read and write this field, which makes
+    /// each of them idempotent and makes the leaked orders findable rather than merely suspected.
+    /// </para>
+    /// </remarks>
+    public DateTime? StockReleasedAt { get; set; }
+
     public int TicketRevision { get; set; } = 1;
 
     public ICollection<OrderItem> OrderItems { get; set; } = [];

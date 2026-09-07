@@ -1045,9 +1045,23 @@
   grid-auto-flow: column;
   grid-auto-columns: minmax(max-content, 1fr);
   justify-content: start;
+  align-items: stretch;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
   scrollbar-width: thin;
+  /* The strip scrolls sideways, and its scrollbar is laid out inside it rather than drawn over it.
+     A fixed height had to cover the tabs and that scrollbar together and only ever covered the
+     tabs: every label was clipped from below, the scrollbar sat across the text, and the selected
+     tab's chip stood proud of the strip. Height comes from the content now, with the gutter
+     reserved underneath it — eight queues never fit on a phone, so this strip always scrolls and
+     the gutter is never wasted space. */
+  height: auto;
+  padding-bottom: 10px;
+}
+
+.staff-orders-queue-tabs [data-slot='tabs-trigger'] {
+  /* Keeps a touch target once the height is the content's to decide. */
+  min-height: 34px;
 }
 
 .staff-kitchen-mobile-tabs {

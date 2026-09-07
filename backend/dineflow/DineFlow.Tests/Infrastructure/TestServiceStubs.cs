@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.EntityFrameworkCore;
+using Stripe;
 
 namespace DineFlow.Tests.Infrastructure;
 
@@ -30,6 +31,35 @@ public static class TestServiceStubs
     /// <summary>Real layout, unconfigured operator: enough to render, nothing to assert against.</summary>
     public static TransactionalEmailLayout CreateEmailLayout() =>
         new(Options.Create(new ComplianceOptions()));
+
+    /// <summary>
+    /// What a payment landing on an order does, wired to a real refund processor.
+    /// </summary>
+    /// <remarks>
+    /// Takes the Stripe client because the interesting half is what happens when money arrives on an
+    /// order the restaurant already turned away, and that path refunds.
+    /// </remarks>
+    public static OrderPaymentLanding CreateOrderPaymentLanding(
+        AppDbContext context,
+        IStripeClient stripeClient,
+        IOptions<StripeOptions> stripeOptions)
+    {
+        var reportLogWriter = CreateReportLogWriter(context);
+
+        return new OrderPaymentLanding(
+            context,
+            new OrderAutoAcceptanceService(context, reportLogWriter),
+            new OrderRefundProcessor(
+                context,
+                stripeClient,
+                stripeOptions,
+                CreateOrderRealtimeNotifier(),
+                CreatePaymentNotificationService(context),
+                reportLogWriter,
+                NullLogger<OrderRefundProcessor>.Instance),
+            reportLogWriter,
+            NullLogger<OrderPaymentLanding>.Instance);
+    }
 
     public static PaymentNotificationService CreatePaymentNotificationService(AppDbContext? context = null) =>
         new(
