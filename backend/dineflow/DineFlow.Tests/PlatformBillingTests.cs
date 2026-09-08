@@ -31,11 +31,14 @@ public class PlatformBillingTests
             EnforcedFrom: enforcedFrom,
             FactsSyncedAt: syncedAt ?? Now);
 
-    /// <summary>A snapshot where every lock is open and only the clock decides.</summary>
+    /// <summary>
+    /// A snapshot where every lock is open and the moment has passed. Two days clear of the month
+    /// mark, so the quiet-hour rule has certainly been satisfied as well.
+    /// </summary>
     private static PlatformBillingSnapshot Overdue(TimeSpan by) =>
         Subscribed(
             status: "past_due",
-            delinquentSince: Now - PlatformBilling.GracePeriod - by,
+            delinquentSince: Now - PlatformBilling.GracePeriod - TimeSpan.FromDays(2) - by,
             enforcedFrom: Now.AddYears(-1));
 
     // ---- Nothing owed -------------------------------------------------------------------------
@@ -132,11 +135,49 @@ public class PlatformBillingTests
     }
 
     [Fact]
-    public void TheMomentGraceElapsesItSuspends()
+    public void OnceTheMomentHasPassedItSuspends()
     {
         Assert.Equal(
             PlatformBillingStanding.Suspended,
             PlatformBilling.Evaluate(Overdue(TimeSpan.Zero), Now));
+    }
+
+    /// <summary>
+    /// The month running out at dinner time does not take ordering down at dinner time. A billing
+    /// decision that stops tickets reaching the kitchen while there are people in the dining room
+    /// is an incident; waiting for the small hours costs a few more hours of unpaid trading.
+    /// </summary>
+    [Fact]
+    public void TheMonthRunningOutMidServiceWaitsForTheQuietHour()
+    {
+        // 19:30 in Sydney, which is 09:30 UTC in September.
+        var dinnerService = new DateTime(2026, 9, 8, 9, 30, 0, DateTimeKind.Utc);
+        var snapshot = Subscribed(
+            status: "past_due",
+            delinquentSince: dinnerService - PlatformBilling.GracePeriod,
+            enforcedFrom: dinnerService.AddYears(-1)) with { Timezone = "Australia/Sydney" };
+
+        Assert.Equal(
+            PlatformBillingStanding.PastDue,
+            PlatformBilling.Evaluate(snapshot with { FactsSyncedAt = dinnerService }, dinnerService));
+
+        var suspendsAt = PlatformBilling.SuspendsAt(
+            snapshot.DelinquentSince,
+            "Australia/Sydney");
+
+        Assert.NotNull(suspendsAt);
+        var local = DineFlow.Infrastructure.Time.RestaurantClock.ToLocal(
+            suspendsAt!.Value,
+            "Australia/Sydney");
+        Assert.Equal(PlatformBilling.SuspensionHourLocal, local.Hour);
+        Assert.True(suspendsAt > dinnerService, "suspension must be pushed forward, never back");
+
+        // And once that morning arrives, it does suspend.
+        Assert.Equal(
+            PlatformBillingStanding.Suspended,
+            PlatformBilling.Evaluate(
+                snapshot with { FactsSyncedAt = suspendsAt },
+                suspendsAt.Value));
     }
 
     /// <summary>An unpaid restaurant nobody has started a clock on is not overdue by default.</summary>
@@ -231,16 +272,38 @@ public class PlatformBillingTests
         Assert.Null(PlatformBilling.GraceEndsAt(null));
     }
 
+    /// <summary>
+    /// The countdown must point at the moment ordering actually stops, not at the month mark.
+    /// Reaching zero hours before anything happens reads as a broken warning the first time and as
+    /// one to ignore every time after.
+    /// </summary>
+    [Fact]
+    public void TheCountdownPointsAtTheRealMomentNotTheMonthMark()
+    {
+        var since = Now;
+        var suspendsAt = PlatformBilling.SuspendsAt(since, "UTC");
+
+        Assert.Equal(suspendsAt, Now + PlatformBilling.TimeUntilSuspension(since, "UTC", Now));
+        Assert.True(suspendsAt >= PlatformBilling.GraceEndsAt(since));
+    }
+
     [Fact]
     public void TheCountdownNeverRunsBackwards()
     {
         var longPast = Now - PlatformBilling.GracePeriod - TimeSpan.FromDays(10);
 
-        Assert.Equal(TimeSpan.Zero, PlatformBilling.TimeUntilSuspension(longPast, Now));
-        Assert.Null(PlatformBilling.TimeUntilSuspension(null, Now));
-        Assert.Equal(
-            TimeSpan.FromDays(30),
-            PlatformBilling.TimeUntilSuspension(Now, Now));
+        Assert.Equal(TimeSpan.Zero, PlatformBilling.TimeUntilSuspension(longPast, "UTC", Now));
+        Assert.Null(PlatformBilling.TimeUntilSuspension(null, "UTC", Now));
+    }
+
+    /// <summary>
+    /// A restaurant whose time zone was typed wrong should be judged by a clock that still works,
+    /// not have every billing decision throw.
+    /// </summary>
+    [Fact]
+    public void AnUnknownTimeZoneStillProducesAMoment()
+    {
+        Assert.NotNull(PlatformBilling.SuspendsAt(Now, "Not/AZone"));
     }
 
     // ---- What each audience is told -----------------------------------------------------------

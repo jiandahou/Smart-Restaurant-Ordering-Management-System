@@ -23,7 +23,8 @@ public static class RestaurantBillingSnapshotExtensions
             SubscriptionCancelAtPeriodEnd: false,
             DelinquentSince: restaurant.PlatformBillingDelinquentSince,
             EnforcedFrom: restaurant.PlatformBillingEnforcedFrom,
-            FactsSyncedAt: restaurant.PlatformBillingSyncedAt);
+            FactsSyncedAt: restaurant.PlatformBillingSyncedAt,
+            Timezone: restaurant.Timezone);
 
     public static PlatformBillingStanding BillingStanding(
         this RestaurantEntity restaurant,

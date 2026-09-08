@@ -1,4 +1,5 @@
 using System.Globalization;
+using DineFlow.Infrastructure.Time;
 using System.Text.Json;
 using DineFlow.Infrastructure.Restaurant;
 
@@ -217,20 +218,8 @@ public sealed class RestaurantOperatingHoursService
         return runEnd >= horizonEnd ? null : runEnd;
     }
 
-    private static DateTime ConvertToUtc(DateTime localDateTime, string timezone)
-    {
-        var timeZoneInfo = ResolveTimeZone(timezone);
-        var unspecified = DateTime.SpecifyKind(localDateTime, DateTimeKind.Unspecified);
-
-        // A DST spring-forward can make a wall-clock time not exist; nudging past the gap is
-        // better than throwing at the caller.
-        if (timeZoneInfo.IsInvalidTime(unspecified))
-        {
-            unspecified = unspecified.AddHours(1);
-        }
-
-        return TimeZoneInfo.ConvertTimeToUtc(unspecified, timeZoneInfo);
-    }
+    private static DateTime ConvertToUtc(DateTime localDateTime, string timezone) =>
+        RestaurantClock.ToUtc(localDateTime, timezone);
 
     private static (List<OpeningInterval> Intervals, DateTime HorizonEnd) BuildOpeningIntervals(
         IReadOnlyList<RestaurantOpeningHoursDay> openingHours,
@@ -473,42 +462,8 @@ public sealed class RestaurantOperatingHoursService
         return new RestaurantResolvedOpeningDay(regularDay.IsOpen, regularDay.Windows);
     }
 
-    private static DateTime ConvertToRestaurantTime(DateTime utcNow, string timezone)
-    {
-        var utcDateTime = DateTime.SpecifyKind(utcNow, DateTimeKind.Utc);
-        var timeZoneInfo = ResolveTimeZone(timezone);
-        return TimeZoneInfo.ConvertTimeFromUtc(utcDateTime, timeZoneInfo);
-    }
-
-    private static TimeZoneInfo ResolveTimeZone(string timezone)
-    {
-        if (TimeZoneInfo.TryConvertIanaIdToWindowsId(timezone, out var windowsTimeZone))
-        {
-            try
-            {
-                return TimeZoneInfo.FindSystemTimeZoneById(windowsTimeZone);
-            }
-            catch (TimeZoneNotFoundException)
-            {
-            }
-            catch (InvalidTimeZoneException)
-            {
-            }
-        }
-
-        try
-        {
-            return TimeZoneInfo.FindSystemTimeZoneById(timezone);
-        }
-        catch (TimeZoneNotFoundException)
-        {
-            return TimeZoneInfo.Utc;
-        }
-        catch (InvalidTimeZoneException)
-        {
-            return TimeZoneInfo.Utc;
-        }
-    }
+    private static DateTime ConvertToRestaurantTime(DateTime utcNow, string timezone) =>
+        RestaurantClock.ToLocal(utcNow, timezone);
 
     private static List<RestaurantOpeningHoursDay> CreateDefaultOpeningHours()
     {

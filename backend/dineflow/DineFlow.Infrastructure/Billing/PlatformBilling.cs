@@ -1,3 +1,5 @@
+using DineFlow.Infrastructure.Time;
+
 namespace DineFlow.Infrastructure.Billing;
 
 /// <summary>What the platform charges this restaurant, if anything.</summary>
@@ -52,6 +54,10 @@ public enum PlatformBillingStanding
 /// When these facts were last confirmed against Stripe. Stale facts may warn but must never
 /// suspend.
 /// </param>
+/// <param name="Timezone">
+/// The restaurant's own zone, because the moment ordering stops is a wall-clock decision rather
+/// than a UTC one.
+/// </param>
 public readonly record struct PlatformBillingSnapshot(
     PlatformBillingModel Model,
     bool ActivationFeePaid,
@@ -59,7 +65,8 @@ public readonly record struct PlatformBillingSnapshot(
     bool SubscriptionCancelAtPeriodEnd,
     DateTime? DelinquentSince,
     DateTime? EnforcedFrom,
-    DateTime? FactsSyncedAt);
+    DateTime? FactsSyncedAt,
+    string Timezone = "UTC");
 
 /// <summary>
 /// Whether a restaurant is square with the platform, and what that means for its shop front.
@@ -112,6 +119,19 @@ public static class PlatformBilling
     public const string SuspendedReason = "billing_suspended";
 
     /// <summary>
+    /// The hour of the restaurant's own morning that a suspension is allowed to take effect.
+    /// </summary>
+    /// <remarks>
+    /// A deadline computed in UTC lands wherever it lands, and a month from an ordinary Tuesday
+    /// afternoon is an ordinary Thursday evening — which is to say, dinner service. Taking ordering
+    /// down mid-service turns a billing decision into an incident: tickets stop arriving while
+    /// there are people in the dining room waiting for food. Holding it to four in the morning
+    /// costs at most a few more hours of unpaid trading and means the shop is always closed when it
+    /// happens.
+    /// </remarks>
+    public const int SuspensionHourLocal = 4;
+
+    /// <summary>
     /// Stripe subscription statuses that mean the platform is being paid.
     /// </summary>
     /// <remarks>
@@ -144,6 +164,16 @@ public static class PlatformBilling
     private static bool IsBilled(PlatformBillingSnapshot snapshot) =>
         snapshot.Model is PlatformBillingModel.OneTimeActivation or PlatformBillingModel.Subscription;
 
+    /// <summary>
+    /// Whether the platform is currently being paid.
+    /// </summary>
+    /// <remarks>
+    /// The clock starts at the first failed charge — <c>past_due</c> — and not at the end of
+    /// Stripe's own retry ladder. Stripe spends two to three weeks retrying a declined card before
+    /// it gives up and marks a subscription <c>unpaid</c> or <c>canceled</c>, so anchoring there
+    /// would quietly turn a month of grace into six or seven weeks of free trading. A month should
+    /// mean a month, counted from the day the money first did not arrive.
+    /// </remarks>
     private static bool IsPaidUp(PlatformBillingSnapshot snapshot) => snapshot.Model switch
     {
         PlatformBillingModel.OneTimeActivation => snapshot.ActivationFeePaid,
@@ -171,8 +201,10 @@ public static class PlatformBilling
             return false;
         }
 
-        // The clock has to have been started by something. No start, no elapsed time, no closure.
-        if (snapshot.DelinquentSince is not DateTime since || utcNow < since + GracePeriod)
+        // The clock has to have been started by something, and the moment it points at has to have
+        // arrived. No start, no elapsed time, no closure.
+        if (SuspendsAt(snapshot.DelinquentSince, snapshot.Timezone) is not DateTime suspendsAt ||
+            utcNow < suspendsAt)
         {
             return false;
         }
@@ -202,14 +234,31 @@ public static class PlatformBilling
         delinquentSince is DateTime since ? since + GracePeriod : null;
 
     /// <summary>
+    /// The moment ordering actually stops: the first <see cref="SuspensionHourLocal"/> in the
+    /// restaurant's own morning at or after the month is up.
+    /// </summary>
+    /// <remarks>
+    /// This, not <see cref="GraceEndsAt"/>, is what a countdown should count towards. Showing the
+    /// raw month mark would have the screen reach zero hours before anything happens, which reads
+    /// as a broken warning the first time and as one to ignore every time after.
+    /// </remarks>
+    public static DateTime? SuspendsAt(DateTime? delinquentSince, string timezone) =>
+        GraceEndsAt(delinquentSince) is DateTime graceEnds
+            ? RestaurantClock.NextLocalHourAtOrAfter(graceEnds, timezone, SuspensionHourLocal)
+            : null;
+
+    /// <summary>
     /// How long is left before suspension, or null when nothing is counting down.
     /// </summary>
     /// <remarks>
-    /// Never negative: once the deadline has passed there is no time left, and a negative span
-    /// would render as a countdown running backwards on the screens that show it.
+    /// Never negative: once the moment has passed there is no time left, and a negative span would
+    /// render as a countdown running backwards on the screens that show it.
     /// </remarks>
-    public static TimeSpan? TimeUntilSuspension(DateTime? delinquentSince, DateTime utcNow) =>
-        GraceEndsAt(delinquentSince) is DateTime deadline
+    public static TimeSpan? TimeUntilSuspension(
+        DateTime? delinquentSince,
+        string timezone,
+        DateTime utcNow) =>
+        SuspendsAt(delinquentSince, timezone) is DateTime deadline
             ? deadline > utcNow ? deadline - utcNow : TimeSpan.Zero
             : null;
 
