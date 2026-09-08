@@ -151,17 +151,55 @@ public sealed class StaffOrderQueueCountTests : IAsyncLifetime
     /// Every order is somewhere. A queue that quietly drops orders would keep the tabs consistent with
     /// each other while still losing work.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Written as a sum of the four counts, which said two things at once: that no order is missing,
+    /// and that no order is in two places. The second stopped being true on purpose. A cancelled
+    /// order that was paid online still holds the customer's money, so it sits on Payment as well as
+    /// on Closed — finished work with something outstanding, and the one tab about money is where
+    /// somebody will look for it.
+    /// </para>
+    /// <para>
+    /// So the two claims are made separately: nothing may fall out of every queue, and the only
+    /// orders in more than one are the closures still holding money. An overlap that arrives by
+    /// accident still fails here.
+    /// </para>
+    /// </remarks>
     [RequiresPostgresFact]
     public async Task NoOrderFallsOutsideEveryQueue()
     {
         await using var context = _database.CreateContext();
         var orders = context.Orders.AsNoTracking().Where(order => order.RestaurantId == _restaurantId);
 
+        var everyOrder = await orders
+            .Select(order => new { order.Id, order.Status, order.PaymentStatus, order.PaymentMethod, order.CreatedAt })
+            .ToListAsync();
         var counts = await StaffOrderQueue.CountAsync(orders, Now, CancellationToken.None);
-        var total = await orders.CountAsync();
 
-        // "active" is the union of new, kitchen and ready, so counting it again would double up.
-        Assert.Equal(total, counts["active"] + counts["payment"] + counts["carried"] + counts["closed"]);
+        // "active" is the union of new, kitchen and ready; these four cover the board between them.
+        string[] covering = ["active", "payment", "carried", "closed"];
+        var missing = new List<string>();
+        var overlapping = new List<string>();
+
+        foreach (var order in everyOrder)
+        {
+            var held = covering.Count(queue => StaffOrderQueue.Matches(
+                queue, order.Status, order.PaymentStatus, order.PaymentMethod, order.CreatedAt, Now));
+            var shape = $"{order.Status}/{order.PaymentStatus}/{order.PaymentMethod}";
+
+            if (held == 0)
+            {
+                missing.Add(shape);
+            }
+            else if (held > 1 && !StaffOrderQueue.IsUnsettledClosure(
+                order.Status, order.PaymentStatus, order.PaymentMethod))
+            {
+                overlapping.Add($"{shape} is on {held} tabs at once");
+            }
+        }
+
+        Assert.Empty(missing);
+        Assert.Empty(overlapping);
         Assert.Equal(counts["active"], counts["new"] + counts["kitchen"] + counts["ready"]);
     }
 

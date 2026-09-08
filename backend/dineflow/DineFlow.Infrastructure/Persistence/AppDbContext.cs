@@ -735,9 +735,13 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         {
             entity.HasKey(item => item.Id);
             entity.Property(item => item.MenuItemNameSnapshot).HasMaxLength(240).IsRequired();
+            entity.Property(item => item.OptionNameSnapshot).HasMaxLength(200);
             entity.HasIndex(item => item.PaymentRefundId);
             entity.HasIndex(item => item.OrderItemId);
             entity.HasIndex(item => new { item.PaymentRefundId, item.OrderItemId }).IsUnique();
+            // Reading a line's settled grain asks whether any of that line's refund allocations were
+            // tagged with a modifier, which is answered from here.
+            entity.HasIndex(item => new { item.OrderItemId, item.OrderItemOptionId });
             entity.ToTable(table => table.HasCheckConstraint(
                 "CK_PaymentRefundItems_Quantity", "\"Quantity\" > 0"));
             entity.ToTable(table => table.HasCheckConstraint(
@@ -780,6 +784,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         {
             entity.HasKey(item => item.Id);
             entity.Property(item => item.MenuItemNameSnapshot).HasMaxLength(240).IsRequired();
+            entity.Property(item => item.OptionNameSnapshot).HasMaxLength(200);
             entity.HasIndex(item => item.PaymentRefundRequestId);
             entity.HasIndex(item => item.OrderItemId);
             entity.ToTable(table => table.HasCheckConstraint(
