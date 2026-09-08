@@ -22,6 +22,10 @@ import { canCustomerCancelForRefund, canCustomerCancelOrder } from '../component
 import {
   computeSelectedAmountCents,
   isValidRefundSelection,
+  canSelectExtras,
+  canSelectWholeLine,
+  parseRefundSelectionKey,
+  refundSelectionKey,
   setItemAmountCents,
   toggleItemSelection,
   type RefundItemSelection,
@@ -559,12 +563,17 @@ export function MyOrdersPage() {
     try {
       const refundRequest = await requestCustomerRefund(refundOrder.id, {
         reason: refundReason.trim() || undefined,
-        items: Object.entries(refundSelection).map(([orderItemId, amountCents]) => {
+        items: Object.entries(refundSelection).map(([key, amountCents]) => {
+          const { orderItemId, orderItemOptionId } = parseRefundSelectionKey(key)
           const item = refundOrder.orderItems.find((candidate) => candidate.id === orderItemId)!
+
           return {
             orderItemId,
+            orderItemOptionId: orderItemOptionId ?? undefined,
             amountCents,
-            quantity: getRefundRequestQuantity(item, amountCents),
+            // An extra is one of a line rather than a count of plates, so the quantity a
+            // whole-line refund derives from its amount does not describe it.
+            quantity: orderItemOptionId ? 1 : getRefundRequestQuantity(item, amountCents),
           }
         }),
         // Guest orders have no session behind them, so the stored token is the credential.
@@ -1168,9 +1177,16 @@ export function MyOrdersPage() {
               <ul className="refund-picker-list">
                 {refundOrder.orderItems.map((item) => {
                   const refundableAmountCents = item.refundableAmountCents
-                  const isFullyRefunded = refundableAmountCents === 0
-                  const isSelected = item.id in refundSelection
-                  const selectedAmountCents = refundSelection[item.id] ?? refundableAmountCents
+                  const wholeLineOpen = canSelectWholeLine(item.refundGranularity)
+                  const isFullyRefunded = refundableAmountCents === 0 || !wholeLineOpen
+                  const lineKey = refundSelectionKey(item.id)
+                  const isSelected = lineKey in refundSelection
+                  const selectedAmountCents = refundSelection[lineKey] ?? refundableAmountCents
+                  // Only extras with a share of their own, and only while this line has not
+                  // already been refunded whole.
+                  const refundableExtras = canSelectExtras(item.refundGranularity)
+                    ? item.selectedOptions.filter((option) => option.refundIneligibilityReason === null)
+                    : []
                   const imageUrl = resolvePublicAssetUrl(item.imageUrl)
                   const name = item.itemNameSnapshot || 'Menu item'
                   return (
@@ -1184,7 +1200,7 @@ export function MyOrdersPage() {
                           className="refund-picker-check"
                           checked={isSelected}
                           disabled={isFullyRefunded}
-                          onChange={() => setRefundSelection((current) => toggleItemSelection(current, item.id, refundableAmountCents))}
+                          onChange={() => setRefundSelection((current) => toggleItemSelection(current, lineKey, refundableAmountCents))}
                         />
                         <span className="refund-picker-thumb" aria-hidden="true">
                           {imageUrl ? (
@@ -1215,7 +1231,9 @@ export function MyOrdersPage() {
                           </small>
                         </span>
                         {isFullyRefunded ? (
-                          <span className="refund-picker-refunded-badge">Refunded</span>
+                          <span className="refund-picker-refunded-badge">
+                            {wholeLineOpen ? 'Refunded' : 'Extras refunded'}
+                          </span>
                         ) : (
                           <span className="refund-picker-amount">
                             {formatMoney((isSelected ? selectedAmountCents : refundableAmountCents) / 100, refundOrder.currency)}
@@ -1228,7 +1246,7 @@ export function MyOrdersPage() {
                           <div className="refund-picker-item-amount-control">
                             <span>{refundOrder.currency.toUpperCase()}</span>
                             <Input
-                              id={`refund-item-amount-${item.id}`}
+                              id={`refund-item-amount-${lineKey}`}
                               type="number"
                               min={0.01}
                               max={refundableAmountCents / 100}
@@ -1239,7 +1257,7 @@ export function MyOrdersPage() {
                               onChange={(event) => setRefundSelection((current) => (
                                 setItemAmountCents(
                                   current,
-                                  item.id,
+                                  lineKey,
                                   Math.round(Number(event.target.value) * 100) || 0,
                                   refundableAmountCents,
                                 )
@@ -1250,6 +1268,77 @@ export function MyOrdersPage() {
                             </span>
                           </div>
                         </div>
+                      ) : null}
+                      {refundableExtras.length > 0 && !isSelected ? (
+                        <ul className="refund-picker-extras">
+                          {refundableExtras.map((option) => {
+                            const extraKey = refundSelectionKey(item.id, option.id)
+                            const extraSelected = extraKey in refundSelection
+                            const extraAvailableCents = option.refundableAmountCents
+                            const extraAmountCents = refundSelection[extraKey] ?? extraAvailableCents
+                            const extraSpent = extraAvailableCents === 0
+
+                            return (
+                              <li key={option.id}>
+                                <label
+                                  className="refund-picker-extra"
+                                  data-selected={extraSelected ? 'true' : 'false'}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    className="refund-picker-check"
+                                    checked={extraSelected}
+                                    disabled={extraSpent}
+                                    onChange={() => setRefundSelection((current) => (
+                                      toggleItemSelection(current, extraKey, extraAvailableCents)
+                                    ))}
+                                  />
+                                  <span className="refund-picker-extra-copy">
+                                    <strong>{option.optionNameSnapshot}</strong>
+                                    <small>{option.groupNameSnapshot}</small>
+                                  </span>
+                                  <span className="refund-picker-extra-amount">
+                                    {extraSpent
+                                      ? 'Refunded'
+                                      : formatMoney(
+                                        (extraSelected ? extraAmountCents : extraAvailableCents) / 100,
+                                        refundOrder.currency,
+                                      )}
+                                  </span>
+                                </label>
+                                {extraSelected ? (
+                                  <div className="refund-picker-item-amount-editor">
+                                    <label htmlFor={`refund-item-amount-${extraKey}`}>Refund amount</label>
+                                    <div className="refund-picker-item-amount-control">
+                                      <span>{refundOrder.currency.toUpperCase()}</span>
+                                      <Input
+                                        id={`refund-item-amount-${extraKey}`}
+                                        type="number"
+                                        min={0.01}
+                                        max={extraAvailableCents / 100}
+                                        step={0.01}
+                                        inputMode="decimal"
+                                        aria-label={`Refund amount for ${option.optionNameSnapshot}`}
+                                        value={extraAmountCents > 0 ? extraAmountCents / 100 : ''}
+                                        onChange={(event) => setRefundSelection((current) => (
+                                          setItemAmountCents(
+                                            current,
+                                            extraKey,
+                                            Math.round(Number(event.target.value) * 100) || 0,
+                                            extraAvailableCents,
+                                          )
+                                        ))}
+                                      />
+                                      <span className="refund-picker-item-amount-max">
+                                        of {formatMoney(extraAvailableCents / 100, refundOrder.currency)} available
+                                      </span>
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </li>
+                            )
+                          })}
+                        </ul>
                       ) : null}
                     </li>
                   )

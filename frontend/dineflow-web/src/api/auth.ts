@@ -999,6 +999,11 @@ export type CustomerOrderItem = {
   refundedQuantity: number
   refundedAmountCents: number
   refundableAmountCents: number
+  /**
+   * Whether this line has been refunded as a whole, extra by extra, or not yet at all.
+   * A line is refunded one way or the other and never both.
+   */
+  refundGranularity: 'Untouched' | 'AsAWhole' | 'ByItsParts'
   /** Menu price for one unit before option adjustments. */
   basePriceSnapshot: number
   /** The dish's allergen declaration as it read when the order was placed. */
@@ -1019,6 +1024,12 @@ export type CustomerOrderItemOption = {
   groupNameSnapshot: string
   optionNameSnapshot: string
   priceAdjustmentSnapshot: number
+  /** What this extra added to the line, with both quantities already applied. */
+  contributionCents: number
+  refundedAmountCents: number
+  refundableAmountCents: number
+  /** Null when the extra can be refunded on its own; otherwise why it cannot, in words to show. */
+  refundIneligibilityReason: string | null
   allergensSnapshot?: string | null
   mayContainAllergensSnapshot?: string | null
   crossContactStatementSnapshot?: string | null
@@ -1498,6 +1509,8 @@ export type CreateCustomerRefundRequest = {
 
 export type CreateRefundRequestItemInput = {
   orderItemId: string
+  /** One extra on that line, when the refund is for the extra rather than the dish. */
+  orderItemOptionId?: string
   quantity: number
   amountCents: number
 }

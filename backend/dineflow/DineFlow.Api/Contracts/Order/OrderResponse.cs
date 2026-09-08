@@ -1,3 +1,4 @@
+using DineFlow.Infrastructure.Orders;
 namespace DineFlow.Api.Contracts.Order;
 
 public class OrderResponse
@@ -168,6 +169,16 @@ public class OrderItemResponse
     /// Money that can still be requested against this line before applying the order-wide cap.
     public long RefundableAmountCents { get; set; }
 
+    /// <summary>
+    /// Whether this line has been refunded as a whole, extra by extra, or not yet at all.
+    /// </summary>
+    /// <remarks>
+    /// A line is refunded one way or the other and never both, so the first refund on it settles
+    /// which choices remain. Sent so the screen can grey out the one that is closed rather than
+    /// offering it and having the request refused.
+    /// </remarks>
+    public string RefundGranularity { get; set; } = nameof(LineRefundGranularity.Untouched);
+
     public decimal UnitPrice { get; set; }
 
     public decimal TotalPrice => Quantity * UnitPrice;
@@ -196,6 +207,32 @@ public class OrderItemOptionResponse
     public string OptionNameSnapshot { get; set; } = string.Empty;
 
     public decimal PriceAdjustmentSnapshot { get; set; }
+
+    /// <summary>
+    /// What this extra contributed to the line, and how much of that is still refundable.
+    /// </summary>
+    /// <remarks>
+    /// Both quantities are already applied: two breads each with two lots of truffle contributed
+    /// four lots of its price, and a screen that showed one lot would let a customer ask for a
+    /// quarter of what they paid.
+    /// </remarks>
+    public long ContributionCents { get; set; }
+
+    public long RefundedAmountCents { get; set; }
+
+    public long RefundableAmountCents { get; set; }
+
+    /// <summary>
+    /// Null when this extra can be refunded on its own; otherwise the reason it cannot, in words
+    /// meant for the person reading them.
+    /// </summary>
+    /// <remarks>
+    /// Carried rather than derived on the client so there is one answer to this question. The
+    /// reasons are not obvious from the fields — that an extra which replaced the price has no
+    /// share, or that an order predating the type snapshot cannot be split at all — and a client
+    /// working them out again would eventually disagree with the server that has to enforce them.
+    /// </remarks>
+    public string? RefundIneligibilityReason { get; set; }
 
     /// <summary>The modifier's allergen declaration as it read when the order was placed.</summary>
     public string? AllergensSnapshot { get; set; }

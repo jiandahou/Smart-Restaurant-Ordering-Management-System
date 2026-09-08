@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  canSelectExtras,
+  canSelectWholeLine,
   computeSelectedAmountCents,
   isValidRefundSelection,
+  parseRefundSelectionKey,
+  refundSelectionKey,
   setItemAmountCents,
   toggleItemSelection,
 } from './refundItemSelection'
@@ -32,5 +36,60 @@ describe('refund item selection', () => {
     expect(isValidRefundSelection({})).toBe(false)
     expect(isValidRefundSelection({ 'item-1': 0 })).toBe(false)
     expect(isValidRefundSelection({ 'item-1': 1500 })).toBe(true)
+  })
+})
+
+/**
+ * "The wings" and "the sauce on the wings" are different requests for different money. Keyed by the
+ * line alone they would be the same entry, and picking one would silently replace the other.
+ */
+describe('picking a line or one of its extras', () => {
+  it('keeps a line and one of its extras apart', () => {
+    const line = refundSelectionKey('item-1')
+    const extra = refundSelectionKey('item-1', 'option-9')
+
+    expect(line).not.toBe(extra)
+
+    const selection = toggleItemSelection(toggleItemSelection({}, line, 1_711), extra, 74)
+
+    expect(selection).toEqual({ [line]: 1_711, [extra]: 74 })
+    expect(computeSelectedAmountCents(selection)).toBe(1_785)
+  })
+
+  it('reads back the line and extra a key was built from', () => {
+    expect(parseRefundSelectionKey(refundSelectionKey('item-1')))
+      .toEqual({ orderItemId: 'item-1', orderItemOptionId: null })
+    expect(parseRefundSelectionKey(refundSelectionKey('item-1', 'option-9')))
+      .toEqual({ orderItemId: 'item-1', orderItemOptionId: 'option-9' })
+  })
+
+  it('edits one without disturbing the other', () => {
+    const line = refundSelectionKey('item-1')
+    const extra = refundSelectionKey('item-1', 'option-9')
+    const selection = { [line]: 1_711, [extra]: 74 }
+
+    expect(setItemAmountCents(selection, extra, 50, 74)).toEqual({ [line]: 1_711, [extra]: 50 })
+  })
+
+  /**
+   * A line is refunded as a whole or by its parts and never both, so the first refund on it settles
+   * which choice remains. Offering the closed one only to have the server refuse it wastes the
+   * customer's time on something that was never available.
+   */
+  it('closes whichever way the line was already refunded', () => {
+    expect(canSelectWholeLine('Untouched')).toBe(true)
+    expect(canSelectExtras('Untouched')).toBe(true)
+
+    expect(canSelectWholeLine('ByItsParts')).toBe(false)
+    expect(canSelectExtras('ByItsParts')).toBe(true)
+
+    expect(canSelectWholeLine('AsAWhole')).toBe(true)
+    expect(canSelectExtras('AsAWhole')).toBe(false)
+  })
+
+  /** An order response from before this field existed leaves both open, as it always was. */
+  it('leaves both open when the line says nothing', () => {
+    expect(canSelectWholeLine(undefined)).toBe(true)
+    expect(canSelectExtras(undefined)).toBe(true)
   })
 })

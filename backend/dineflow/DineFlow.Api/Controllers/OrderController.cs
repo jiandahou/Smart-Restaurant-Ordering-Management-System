@@ -1385,12 +1385,16 @@ public class OrderController : ControllerBase
         IReadOnlyDictionary<Guid, string?>? menuImageUrls) => MapToResponse(
             order,
             menuImageUrls,
-            BuildAttributedRefundAmounts(order));
+            BuildAttributedRefundAmounts(order),
+            RefundRequestItemPolicy.BuildAttributedModifierAmounts(order),
+            RefundRequestItemPolicy.BuildSettledGranularity(order));
 
     private static OrderResponse MapToResponse(
         Order order,
         IReadOnlyDictionary<Guid, string?>? menuImageUrls,
-        IReadOnlyDictionary<Guid, long> refundedAmounts) => new()
+        IReadOnlyDictionary<Guid, long> refundedAmounts,
+        IReadOnlyDictionary<Guid, long> refundedModifierAmounts,
+        IReadOnlyDictionary<Guid, LineRefundGranularity> settledGranularity) => new()
     {
         Id = order.Id,
         RestaurantId = order.RestaurantId,
@@ -1481,6 +1485,9 @@ public class OrderController : ControllerBase
                     0,
                     PricingCalculator.ToMinorCurrencyUnits(item.UnitPrice * item.Quantity)
                         - refundedAmounts.GetValueOrDefault(item.Id)),
+                RefundGranularity = settledGranularity
+                    .GetValueOrDefault(item.Id, LineRefundGranularity.Untouched)
+                    .ToString(),
                 UnitPrice = item.UnitPrice,
                 ItemInstructions = item.ItemInstructions,
                 Note = item.ItemInstructions,
@@ -1496,6 +1503,18 @@ public class OrderController : ControllerBase
                         MenuItemOptionId = option.MenuItemOptionId,
                         GroupNameSnapshot = option.GroupNameSnapshot,
                         OptionNameSnapshot = option.OptionNameSnapshot,
+                        ContributionCents = OrderItemOptionRefund.ContributionCents(option, item.Quantity),
+                        RefundedAmountCents = Math.Min(
+                            OrderItemOptionRefund.ContributionCents(option, item.Quantity),
+                            refundedModifierAmounts.GetValueOrDefault(option.Id)),
+                        RefundableAmountCents = Math.Max(
+                            0,
+                            OrderItemOptionRefund.ContributionCents(option, item.Quantity)
+                                - refundedModifierAmounts.GetValueOrDefault(option.Id)),
+                        RefundIneligibilityReason =
+                            OrderItemOptionRefund.WhyNotRefundable(item, option) is { } reason
+                                ? OrderItemOptionRefund.Explain(reason, option.OptionNameSnapshot)
+                                : null,
                         AllergensSnapshot = option.AllergensSnapshot,
                         MayContainAllergensSnapshot = option.MayContainAllergensSnapshot,
                         CrossContactStatementSnapshot = option.CrossContactStatementSnapshot,
