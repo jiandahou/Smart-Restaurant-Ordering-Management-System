@@ -1111,6 +1111,10 @@ public class PublicCartsController(
                     GroupNameSnapshot = groupName,
                     OptionNameSnapshot = option.Name,
                     PriceAdjustmentSnapshot = option.PriceAdjustment,
+                    // Without this the adjustment above is a number with no unit: the same 3.00 is
+                    // a surcharge, a discount or the whole price depending on a type that lived
+                    // only on the menu row, which can be archived or edited afterwards.
+                    AdjustmentTypeSnapshot = option.AdjustmentType,
                     // Frozen with the name and the price: a receipt has to say what the customer
                     // was told, not what the menu says today.
                     AllergensSnapshot = option.Allergens,

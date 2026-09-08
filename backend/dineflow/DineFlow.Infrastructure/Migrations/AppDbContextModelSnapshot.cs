@@ -1008,6 +1008,9 @@ namespace DineFlow.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<int?>("AdjustmentTypeSnapshot")
+                        .HasColumnType("integer");
+
                     b.Property<string>("AllergensSnapshot")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
