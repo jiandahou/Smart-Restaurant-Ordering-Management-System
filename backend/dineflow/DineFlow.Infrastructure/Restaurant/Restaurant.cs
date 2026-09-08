@@ -1,3 +1,4 @@
+using DineFlow.Infrastructure.Billing;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Menu;
 
@@ -78,6 +79,48 @@ public class Restaurant
     public string? OneTimePlatformFeeIdempotencyKey { get; set; }
 
     public DateTime? OneTimePlatformFeePaidAt { get; set; }
+
+    /// <summary>
+    /// What the platform charges this restaurant. <see cref="PlatformBillingModel.None"/> — the
+    /// default, and what every restaurant predating billing carries — owes nothing and can never be
+    /// suspended.
+    /// </summary>
+    public PlatformBillingModel PlatformBillingModel { get; set; } = PlatformBillingModel.None;
+
+    /// <summary>
+    /// When the current spell of owing the platform money began, or null when nothing is owed.
+    /// </summary>
+    /// <remarks>
+    /// The only clock. The deadline is derived from it rather than stored, so the grace period can
+    /// be changed without rewriting history and two rows can never disagree about how long a month
+    /// is. Written by the reconciliation sweep alone — webhooks record what Stripe said, and the
+    /// sweep decides what it means, so events arriving out of order cannot leave a clock running
+    /// that should have stopped.
+    /// </remarks>
+    public DateTime? PlatformBillingDelinquentSince { get; set; }
+
+    /// <summary>
+    /// The date this restaurant was told enforcement would begin. Null means never.
+    /// </summary>
+    /// <remarks>
+    /// Per restaurant rather than one global switch, because the first restaurant worth enforcing
+    /// against should not drag every other one with it, and because "we told them, on this date" is
+    /// a thing that has to be answerable per tenant.
+    /// </remarks>
+    public DateTime? PlatformBillingEnforcedFrom { get; set; }
+
+    /// <summary>When ordering was actually suspended, for the audit trail. Null while trading.</summary>
+    public DateTime? PlatformBillingSuspendedAt { get; set; }
+
+    /// <summary>
+    /// When the billing facts above were last confirmed against Stripe.
+    /// </summary>
+    /// <remarks>
+    /// A suspension is only as good as the payment record behind it, and that record arrives by
+    /// webhook — which is to say, sometimes it does not. Nothing may be suspended on facts older
+    /// than <see cref="PlatformBilling.MaxFactAge"/>.
+    /// </remarks>
+    public DateTime? PlatformBillingSyncedAt { get; set; }
 
     public bool IsActive { get; set; } = true;
 

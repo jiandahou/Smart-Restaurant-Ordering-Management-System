@@ -338,6 +338,7 @@ builder.Services
     });
 builder.Services.AddHostedService<UnconfirmedCustomerCleanupService>();
 builder.Services.AddHostedService<PendingStripePaymentReconciliationService>();
+builder.Services.AddHostedService<PlatformBillingReconciliationService>();
 builder.Services.AddHostedService<UnacceptableOrderRefundService>();
 builder.Services.AddHostedService<AbandonedOrderExpiryService>();
 

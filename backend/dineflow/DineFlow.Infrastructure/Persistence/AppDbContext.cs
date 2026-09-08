@@ -215,6 +215,14 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(restaurant => restaurant.StripeAccountId)
                 .IsUnique();
 
+            // The reconciliation sweep asks for the restaurants that owe something, which is a
+            // handful out of the whole platform.
+            entity.HasIndex(restaurant => new
+            {
+                restaurant.PlatformBillingModel,
+                restaurant.PlatformBillingSyncedAt,
+            });
+
             entity.Property(restaurant => restaurant.CountryCode)
                 .HasMaxLength(2)
                 .HasDefaultValue("AU")
@@ -242,6 +250,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 table.HasCheckConstraint(
                     "CK_Restaurants_OneTimePlatformFeeStatus",
                     "\"OneTimePlatformFeeStatus\" IN (0, 1, 2, 3)");
+                table.HasCheckConstraint(
+                    "CK_Restaurants_PlatformBillingModel",
+                    "\"PlatformBillingModel\" IN (0, 1, 2)");
             });
         });
 

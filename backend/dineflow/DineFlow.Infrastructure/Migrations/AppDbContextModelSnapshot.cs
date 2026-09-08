@@ -2117,6 +2117,21 @@ namespace DineFlow.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<DateTime?>("PlatformBillingDelinquentSince")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("PlatformBillingEnforcedFrom")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("PlatformBillingModel")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("PlatformBillingSuspendedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("PlatformBillingSyncedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<bool>("PricesIncludeGst")
                         .HasColumnType("boolean");
 
@@ -2165,6 +2180,8 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("PlatformBillingModel", "PlatformBillingSyncedAt");
+
                     b.HasIndex("StripeAccountId")
                         .IsUnique();
 
@@ -2175,6 +2192,8 @@ namespace DineFlow.Infrastructure.Migrations
                             t.HasCheckConstraint("CK_Restaurants_OneTimePlatformFeeStatus", "\"OneTimePlatformFeeStatus\" IN (0, 1, 2, 3)");
 
                             t.HasCheckConstraint("CK_Restaurants_OrderPlatformFeeBps", "\"OrderPlatformFeeBps\" >= 0 AND \"OrderPlatformFeeBps\" <= 10000");
+
+                            t.HasCheckConstraint("CK_Restaurants_PlatformBillingModel", "\"PlatformBillingModel\" IN (0, 1, 2)");
                         });
                 });
 

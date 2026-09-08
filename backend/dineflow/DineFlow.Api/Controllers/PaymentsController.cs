@@ -1667,11 +1667,23 @@ public class PaymentsController : ControllerBase
     {
         if (stripeEvent.Data.Object is not Session session ||
             !session.Metadata.TryGetValue("mode", out var mode) ||
-            !string.Equals(mode, "restaurant_platform_setup_fee", StringComparison.Ordinal) ||
+            !string.Equals(mode, PlatformFeeSessionApplier.SessionMode, StringComparison.Ordinal) ||
             !session.Metadata.TryGetValue("restaurantId", out var restaurantId) ||
             !Guid.TryParse(restaurantId, out var parsedRestaurantId))
         {
             return false;
+        }
+
+        // The activation fee is charged on the platform account, so its events carry no connected
+        // account. One arriving with one is either a connected account replaying metadata it should
+        // not have, or a misrouted destination; either way it is not evidence about who has paid.
+        if (stripeEvent.Account is not null)
+        {
+            _logger.LogWarning(
+                "Ignored platform fee event {EventId} arriving on connected account {StripeAccount}.",
+                stripeEvent.Id,
+                stripeEvent.Account);
+            return true;
         }
 
         var restaurant = await _dbContext.Restaurants
@@ -1685,10 +1697,17 @@ public class PaymentsController : ControllerBase
             return true;
         }
 
-        if (!string.Equals(
-            restaurant.OneTimePlatformFeeCheckoutSessionId,
+        // Shared with the reconciliation sweep, so a fact learned from a webhook and the same fact
+        // learned by asking Stripe directly cannot be recorded two different ways.
+        var outcome = PlatformFeeSessionApplier.Apply(
+            restaurant,
             session.Id,
-            StringComparison.Ordinal))
+            completed,
+            session.PaymentStatus,
+            session.PaymentIntentId,
+            DateTime.UtcNow);
+
+        if (outcome == PlatformFeeSessionOutcome.Ignored)
         {
             _logger.LogWarning(
                 "Ignored stale platform fee session {SessionId} for restaurant {RestaurantId}.",
@@ -1697,37 +1716,12 @@ public class PaymentsController : ControllerBase
             return true;
         }
 
-        var wasPaid = completed &&
-            string.Equals(session.PaymentStatus, "paid", StringComparison.OrdinalIgnoreCase);
-
-        if (wasPaid)
-        {
-            restaurant.OneTimePlatformFeeStatus = PlatformSetupFeeStatus.Paid;
-            restaurant.OneTimePlatformFeePaidAt ??= DateTime.UtcNow;
-            restaurant.OneTimePlatformFeePaymentIntentId = session.PaymentIntentId;
-        }
-        else if (!completed && !restaurant.OneTimePlatformFeePaidAt.HasValue)
-        {
-            restaurant.OneTimePlatformFeeStatus = PlatformSetupFeeStatus.Failed;
-            restaurant.OneTimePlatformFeeCheckoutUrl = null;
-            restaurant.OneTimePlatformFeeIdempotencyKey = null;
-        }
-
-        restaurant.UpdatedAt = DateTime.UtcNow;
         _reportLogWriter.AddAudit(
-            wasPaid
-                ? "Restaurant.PlatformFeePaid"
-                : completed
-                    ? "Restaurant.PlatformFeeCheckoutAwaitingPayment"
-                    : "Restaurant.PlatformFeeCheckoutFailed",
+            PlatformFeeSessionApplier.AuditEvent(outcome),
             "Restaurant",
             restaurant.Id.ToString(),
             restaurant.Id,
-            wasPaid
-                ? $"One-time platform fee paid by {restaurant.Name}."
-                : completed
-                    ? $"One-time platform fee checkout completed for {restaurant.Name} and is awaiting payment confirmation."
-                    : $"One-time platform fee checkout failed or expired for {restaurant.Name}.",
+            PlatformFeeSessionApplier.Describe(outcome, restaurant.Name),
             after: new
             {
                 stripeEventId = stripeEvent.Id,
