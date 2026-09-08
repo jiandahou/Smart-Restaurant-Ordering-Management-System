@@ -9179,6 +9179,77 @@ button.menu-metric[aria-pressed='true'] {
   background: color-mix(in srgb, var(--destructive) 8%, var(--subtle));
 }
 
+/* The order's whole refund story: what came back, the latest request, and the ones before it. */
+.my-order-refunds {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Leads the section, because "how much did I get back" is answered by the payment rather than by
+   any one request. */
+.my-order-refund-total {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, #10b981 42%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, #10b981 10%, var(--subtle));
+}
+
+.my-order-refund-total > span {
+  font-size: 0.85rem;
+  color: var(--muted-foreground);
+}
+
+.my-order-refund-total > strong {
+  font-size: 1.05rem;
+  color: var(--text-h);
+  font-variant-numeric: tabular-nums;
+}
+
+.my-order-refund-earlier > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px dashed color-mix(in srgb, var(--border) 88%, transparent);
+  border-radius: 12px;
+  font-size: 0.85rem;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  list-style: none;
+}
+
+.my-order-refund-earlier > summary::-webkit-details-marker {
+  display: none;
+}
+
+.my-order-refund-earlier > summary:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+
+/* Scoped to this summary's own chevron: the panels inside the list carry one each, and they turn
+   with their own disclosure. */
+.my-order-refund-earlier[open] > summary .refund-state-chevron {
+  rotate: 180deg;
+}
+
+/* An order carries a handful of requests, so the scroll is a ceiling for the rare long one rather
+   than the usual way this list is read. */
+.my-order-refund-earlier-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
 .my-order-item-list {
   display: grid;
   gap: 10px;

@@ -97,7 +97,24 @@ public class OrderResponse
     /// </remarks>
     public OrderClosureReason? ClosureReason { get; set; }
 
-    public CustomerRefundRequestResponse? LatestRefundRequest { get; set; }
+    /// <summary>
+    /// Every refund request filed against this order, newest first.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Only the newest was sent, and an order can carry several: one pending request at a time, but
+    /// a rejected or settled one frees the customer to file again. What the customer saw was the
+    /// last thing they did, standing in front of everything that had already happened to their
+    /// money. On this database that hid eight of fourteen requests, seven of them approved — one
+    /// order had five approved refunds totalling A$10.48 and showed the newest A$1.96, and another
+    /// showed a rejected one cent with an approved A$11.46 behind it.
+    /// </para>
+    /// <para>
+    /// A refund is the restaurant returning money, and the customer's record of it should not be
+    /// overwritten by their next question about the same order.
+    /// </para>
+    /// </remarks>
+    public List<CustomerRefundRequestResponse> RefundRequests { get; set; } = new();
 
     public OrderRefundBalance RefundBalance { get; set; } = new();
 

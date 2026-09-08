@@ -1467,11 +1467,11 @@ public class OrderController : ControllerBase
                 : null,
         RefundBalance = BuildRefundBalance(order),
         ClosureReason = BuildClosureReason(order),
-        LatestRefundRequest = order.RefundRequests
+        RefundRequests = order.RefundRequests
             .OrderByDescending(item => item.CreatedAt)
             .ThenByDescending(item => item.Id)
             .Select(MapToCustomerRefundRequestResponse)
-            .FirstOrDefault(),
+            .ToList(),
         OrderItems = order.OrderItems
             .OrderBy(item => item.CreatedAt)
             .ThenBy(item => item.Id)

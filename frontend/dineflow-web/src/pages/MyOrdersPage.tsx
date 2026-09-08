@@ -2,7 +2,7 @@ import { buildOrderClosureNotice } from '@/lib/orderClosureNotice'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  ArrowLeft, Ban, ChevronDown, CircleX, Clock3, ClipboardList, CreditCard, Loader2, ReceiptText, RefreshCw, RotateCcw, ShoppingBag, Undo2, Utensils } from 'lucide-react'
+  ArrowLeft, Ban, CircleX, Clock3, ClipboardList, CreditCard, Loader2, ReceiptText, RefreshCw, RotateCcw, ShoppingBag, Undo2, Utensils } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   cancelCustomerOrder,
@@ -16,6 +16,7 @@ import { resolvePublicAssetUrl } from '../api/publicMenu'
 import { useAuth } from '../auth/AuthContext'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
 import { OrderProgressStepper } from '../components/orders/OrderProgressStepper'
+import { OrderRefundHistory } from '../components/orders/OrderRefundHistory'
 import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { PaymentStatusBadge } from '../components/orders/PaymentStatusBadge'
 import { canCustomerCancelForRefund, canCustomerCancelOrder } from '../components/orders/customerOrderCancellation'
@@ -66,7 +67,6 @@ import { Textarea } from '../components/ui/textarea'
 import { getStoredGuestOrders } from '../lib/guestOrders'
 import { ReceiptDocumentView } from '../components/orders/ReceiptDocumentView'
 import { getOrderStatusLabel } from '../components/orders/OrderStatusBadge'
-import { refundedItemLabel } from '../components/orders/refundedItemLabel'
 import {
   buildReceiptLinePricing,
   buildReceiptPaymentSummary,
@@ -247,7 +247,9 @@ function canContinuePayment(order: CustomerOrder) {
 function canRequestRefund(order: CustomerOrder) {
   return order.paymentMethod === 'Online'
     && refundablePaymentStatuses.has(order.paymentStatus)
-    && order.latestRefundRequest?.status !== 'Pending'
+    // One request at a time, which the server enforces. Asked of the list rather than of its
+    // newest entry, so the answer does not depend on which one happens to sort first.
+    && !order.refundRequests.some((request) => request.status === 'Pending')
 }
 
 function getContinuePaymentLabel(order: CustomerOrder) {
@@ -587,7 +589,7 @@ export function MyOrdersPage() {
       })
       setOrders((current) => current.map((order) => (
         order.id === refundOrder.id
-          ? { ...order, latestRefundRequest: refundRequest }
+          ? { ...order, refundRequests: [refundRequest, ...order.refundRequests] }
           : order
       )))
       toast.success('Refund request sent', {
@@ -709,15 +711,6 @@ export function MyOrdersPage() {
                 const isReordering = reorderingOrderId === order.id
                 const isCancelling = cancellingOrderId === order.id
                 const closureNotice = buildOrderClosureNotice(order.closureReason)
-                const refundRequest = order.latestRefundRequest
-                // Staff can approve for less than was asked, so the settled amount is the one
-                // that actually left the account — never imply the requested figure was refunded.
-                const settledRefundCents = refundRequest?.refundStatus === 'Succeeded'
-                  ? refundRequest.refundedAmountCents
-                  : null
-                const isPartialRefund = settledRefundCents !== null
-                  && refundRequest !== null
-                  && settledRefundCents < refundRequest.requestedAmountCents
 
                 return (
                   <article key={order.id} className="my-order-card">
@@ -769,88 +762,11 @@ export function MyOrdersPage() {
                       </div>
                     ) : null}
 
-                    {order.latestRefundRequest ? (
-                      <div className={`my-order-refund-state my-order-refund-state-${order.latestRefundRequest.status.toLowerCase()}`}>
-                        <details className="refund-state-details">
-                          <summary>
-                            <div className="refund-state-heading">
-                              <strong>Refund request {order.latestRefundRequest.status.toLowerCase()}</strong>
-                              <span>
-                                {settledRefundCents !== null ? (
-                                  <>
-                                    <b className="refund-state-settled">
-                                      {formatMoney(settledRefundCents / 100, order.latestRefundRequest.currency)}
-                                    </b>
-                                    {isPartialRefund
-                                      ? ` refunded of ${formatMoney(order.latestRefundRequest.requestedAmountCents / 100, order.latestRefundRequest.currency)} requested`
-                                      : ' refunded'}
-                                  </>
-                                ) : (
-                                  <>
-                                    {formatMoney(order.latestRefundRequest.requestedAmountCents / 100, order.latestRefundRequest.currency)}
-                                    {' requested on '}
-                                    {formatDate(order.latestRefundRequest.createdAt)}
-                                  </>
-                                )}
-                              </span>
-                            </div>
-                            <ChevronDown className="refund-state-chevron" size={18} aria-hidden="true" />
-                          </summary>
-                          <div className="refund-state-body">
-                            {isPartialRefund ? (
-                              <p className="refund-state-partial">
-                                The restaurant approved a partial refund:{' '}
-                                <strong>{formatMoney(settledRefundCents! / 100, order.latestRefundRequest.currency)}</strong>
-                                {' of the '}
-                                {formatMoney(order.latestRefundRequest.requestedAmountCents / 100, order.latestRefundRequest.currency)}
-                                {' you asked for.'}
-                              </p>
-                            ) : null}
-
-                            {order.latestRefundRequest.items.length > 0 ? (
-                              <div className="refund-state-section">
-                                <h4>Items you asked to refund</h4>
-                                <ul className="refund-state-items">
-                                  {order.latestRefundRequest.items.map((item, index) => (
-                                    <li key={`${item.menuItemNameSnapshot}-${index}`}>
-                                      <span>
-                                        {refundedItemLabel(item)}
-                                        {item.quantity > 1 ? ` × ${item.quantity}` : null}
-                                      </span>
-                                      <strong>
-                                        {formatMoney(item.amountCents / 100, order.latestRefundRequest!.currency)}
-                                      </strong>
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            ) : (
-                              <div className="refund-state-section">
-                                <h4>Items you asked to refund</h4>
-                                <p className="refund-state-empty">
-                                  This request was submitted for the whole order.
-                                </p>
-                              </div>
-                            )}
-
-                            <div className="refund-state-section">
-                              <h4>Your message</h4>
-                              {order.latestRefundRequest.reason ? (
-                                <p className="refund-state-note">{order.latestRefundRequest.reason}</p>
-                              ) : (
-                                <p className="refund-state-empty">You did not leave a message.</p>
-                              )}
-                            </div>
-                          </div>
-                        </details>
-                        {order.latestRefundRequest.adminNote ? (
-                          <div className="refund-state-reply">
-                            <h4>Restaurant reply</h4>
-                            <p>{order.latestRefundRequest.adminNote}</p>
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
+                    <OrderRefundHistory
+                      requests={order.refundRequests}
+                      refundedTotalCents={order.refundBalance?.alreadyRefundedAmountCents ?? 0}
+                      currency={order.currency}
+                    />
 
                     <div className="my-order-item-list">
                       {order.orderItems.map((item) => (

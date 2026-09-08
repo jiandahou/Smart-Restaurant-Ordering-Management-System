@@ -1085,7 +1085,8 @@ export type CustomerOrder = {
   unpaidExpiresAt: string | null
   /** Why the order was turned away, when it was. See `buildOrderClosureNotice`. */
   closureReason: OrderClosure | null
-  latestRefundRequest: CustomerRefundRequest | null
+  /** Every refund request filed against this order, newest first. */
+  refundRequests: CustomerRefundRequest[]
   refundBalance: OrderRefundBalance
   orderItems: CustomerOrderItem[]
 }
