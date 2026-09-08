@@ -163,6 +163,22 @@ public class PaymentRefundItem
 
     public Guid OrderItemId { get; set; }
 
+    /// <summary>
+    /// The modifier this refund is for, or null when it is for the line as a whole.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Null is the older meaning and stays the common one: most refunds are for a dish, not for the
+    /// truffle on it. Leaving it null therefore needs no interpretation and no backfill — every row
+    /// written before this column existed already says exactly what it meant.
+    /// </para>
+    /// <para>
+    /// A line is refunded as a whole or by its parts and never both, so the two kinds never appear
+    /// against the same line. See <see cref="Orders.LineRefundGranularityPolicy"/> for why.
+    /// </para>
+    /// </remarks>
+    public Guid? OrderItemOptionId { get; set; }
+
     public string MenuItemNameSnapshot { get; set; } = string.Empty;
 
     public int Quantity { get; set; }
@@ -224,6 +240,22 @@ public class PaymentRefundRequestItem
     public Guid PaymentRefundRequestId { get; set; }
 
     public Guid OrderItemId { get; set; }
+
+    /// <summary>
+    /// The modifier this refund is for, or null when it is for the line as a whole.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Null is the older meaning and stays the common one: most refunds are for a dish, not for the
+    /// truffle on it. Leaving it null therefore needs no interpretation and no backfill — every row
+    /// written before this column existed already says exactly what it meant.
+    /// </para>
+    /// <para>
+    /// A line is refunded as a whole or by its parts and never both, so the two kinds never appear
+    /// against the same line. See <see cref="Orders.LineRefundGranularityPolicy"/> for why.
+    /// </para>
+    /// </remarks>
+    public Guid? OrderItemOptionId { get; set; }
 
     public string MenuItemNameSnapshot { get; set; } = string.Empty;
 

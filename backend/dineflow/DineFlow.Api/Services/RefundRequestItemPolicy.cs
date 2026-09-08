@@ -3,11 +3,17 @@ using DineFlow.Infrastructure.Payments;
 
 namespace DineFlow.Api.Services;
 
+/// <param name="OrderItemOptionId">
+/// The extra this allocation is for, or null for the line as a whole — which is what every
+/// allocation meant before extras could be named, so the default needs no thought at call sites
+/// that have no extra to name.
+/// </param>
 public sealed record RefundItemAllocation(
     Guid OrderItemId,
     string MenuItemNameSnapshot,
     int Quantity,
-    long AmountCents);
+    long AmountCents,
+    Guid? OrderItemOptionId = null);
 
 public static class RefundRequestItemPolicy
 {
@@ -208,7 +214,20 @@ public static class RefundRequestItemPolicy
     }
 
     public static IEnumerable<(Guid OrderItemId, long AmountCents)> EnumerateAttributedRefundAllocations(
-        Order order)
+        Order order) =>
+        EnumerateAttributedRefundAllocationsByModifier(order)
+            .Select(allocation => (allocation.OrderItemId, allocation.AmountCents));
+
+    /// <summary>
+    /// How much each succeeded refund returned, per line and — where it said so — per modifier.
+    /// </summary>
+    /// <remarks>
+    /// The modifier is null for every refund that named a line rather than one of its extras, which
+    /// is every refund made before extras could be named at all. That null is the older meaning
+    /// rather than missing information, so nothing here has to guess on behalf of historical rows.
+    /// </remarks>
+    public static IEnumerable<(Guid OrderItemId, Guid? OrderItemOptionId, long AmountCents)>
+        EnumerateAttributedRefundAllocationsByModifier(Order order)
     {
         var requestsByRefundId = order.RefundRequests
             .Where(request => request.PaymentRefundId.HasValue)
@@ -223,7 +242,7 @@ public static class RefundRequestItemPolicy
             {
                 foreach (var item in refund.Items)
                 {
-                    yield return (item.OrderItemId, item.AmountCents);
+                    yield return (item.OrderItemId, item.OrderItemOptionId, item.AmountCents);
                 }
 
                 continue;
@@ -239,9 +258,57 @@ public static class RefundRequestItemPolicy
                          refund.AmountCents,
                          request.Items.Select(item => (item.OrderItemId, item.AmountCents)).ToList()))
             {
-                yield return allocation;
+                // Reconstructed from a request that predates modifier references, so it can only
+                // have meant the line as a whole.
+                yield return (allocation.OrderItemId, (Guid?)null, allocation.AmountCents);
             }
         }
+    }
+
+    /// <summary>How much has been refunded against each modifier by name.</summary>
+    public static IReadOnlyDictionary<Guid, long> BuildAttributedModifierAmounts(Order order)
+    {
+        var amounts = new Dictionary<Guid, long>();
+
+        foreach (var allocation in EnumerateAttributedRefundAllocationsByModifier(order))
+        {
+            if (allocation.OrderItemOptionId is not { } optionId)
+            {
+                continue;
+            }
+
+            amounts[optionId] = amounts.GetValueOrDefault(optionId) + allocation.AmountCents;
+        }
+
+        return amounts;
+    }
+
+    /// <summary>
+    /// Whether each line has been refunded as a whole, by its parts, or not yet at all.
+    /// </summary>
+    /// <remarks>
+    /// Lines with no refunds are absent rather than present as
+    /// <see cref="LineRefundGranularity.Untouched"/>; a lookup that misses is the same answer and
+    /// costs nothing to carry.
+    /// </remarks>
+    public static IReadOnlyDictionary<Guid, LineRefundGranularity> BuildSettledGranularity(Order order)
+    {
+        var tagged = new Dictionary<Guid, List<bool>>();
+
+        foreach (var allocation in EnumerateAttributedRefundAllocationsByModifier(order))
+        {
+            if (!tagged.TryGetValue(allocation.OrderItemId, out var flags))
+            {
+                flags = [];
+                tagged[allocation.OrderItemId] = flags;
+            }
+
+            flags.Add(allocation.OrderItemOptionId is not null);
+        }
+
+        return tagged.ToDictionary(
+            entry => entry.Key,
+            entry => LineRefundGranularityPolicy.Settled(entry.Value));
     }
 
     public static bool HasAtLeastOneItem<T>(IReadOnlyCollection<T> items) => items.Count > 0;

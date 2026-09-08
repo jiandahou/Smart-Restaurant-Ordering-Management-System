@@ -518,6 +518,9 @@ public class OrderController : ControllerBase
                 .ThenInclude(refundRequest => refundRequest.PaymentRefund)
             .Include(item => item.Customer)
             .Include(item => item.OrderItems)
+                // The extras have to come with the lines: refunding one reads its price and its
+                // adjustment type, and without them every extra reads as not belonging to its line.
+                .ThenInclude(orderItem => orderItem.SelectedOptions)
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
 
         if (order is null)
@@ -545,18 +548,48 @@ public class OrderController : ControllerBase
             return BadRequest(new { message = "Select at least one item to refund." });
         }
 
-        if (selectedItems.Select(item => item.OrderItemId).Distinct().Count() != selectedItems.Count)
+        // Keyed by both, so an extra and its own dish are two different selections rather than a
+        // duplicate of one.
+        if (selectedItems
+                .Select(item => (item.OrderItemId, item.OrderItemOptionId))
+                .Distinct()
+                .Count() != selectedItems.Count)
         {
             return BadRequest(new { message = "Each order item can only be selected once." });
         }
 
         var orderItemsById = order.OrderItems.ToDictionary(item => item.Id);
         var alreadyRefundedAmounts = BuildAttributedRefundAmounts(order);
+        var alreadyRefundedModifiers = RefundRequestItemPolicy.BuildAttributedModifierAmounts(order);
+        var settledGranularity = RefundRequestItemPolicy.BuildSettledGranularity(order);
         foreach (var selectedItem in selectedItems)
         {
             if (!orderItemsById.TryGetValue(selectedItem.OrderItemId, out var orderItem))
             {
                 return BadRequest(new { message = "One of the selected items does not belong to this order." });
+            }
+
+            var settled = settledGranularity.GetValueOrDefault(orderItem.Id, LineRefundGranularity.Untouched);
+
+            if (selectedItem.OrderItemOptionId is { } selectedOptionId)
+            {
+                var refusal = ValidateModifierSelection(orderItem, selectedOptionId, settled,
+                    selectedItem, alreadyRefundedModifiers);
+
+                if (refusal is not null)
+                {
+                    return BadRequest(new { message = refusal });
+                }
+
+                continue;
+            }
+
+            if (!LineRefundGranularityPolicy.AllowsWholeLineRefund(settled))
+            {
+                return BadRequest(new
+                {
+                    message = LineRefundGranularityPolicy.ExplainWholeLineRefused(orderItem.MenuItemNameSnapshot)
+                });
             }
 
             var lineAmountCents = PricingCalculator.ToMinorCurrencyUnits(orderItem.UnitPrice * orderItem.Quantity);
@@ -652,14 +685,28 @@ public class OrderController : ControllerBase
             .Select(selectedItem =>
             {
                 var orderItem = orderItemsById[selectedItem.OrderItemId];
+                var option = selectedItem.OrderItemOptionId is { } optionId
+                    ? orderItem.SelectedOptions.FirstOrDefault(candidate =>
+                        candidate.MenuItemOptionId == optionId || candidate.Id == optionId)
+                    : null;
+
+                // The extra's own contribution, not the line's price: asking for the truffle back
+                // must never default to the amount of the bread it was on.
+                var defaultAmountCents = option is null
+                    ? PricingCalculator.ToMinorCurrencyUnits(orderItem.UnitPrice * selectedItem.Quantity)
+                    : OrderItemOptionRefund.ContributionCents(option, orderItem.Quantity);
+
                 return new PaymentRefundRequestItem
                 {
                     Id = Guid.NewGuid(),
                     OrderItemId = orderItem.Id,
+                    // Stored as the order's own option row rather than the menu's, because the menu
+                    // row can be archived and this has to keep resolving for as long as the refund
+                    // record does.
+                    OrderItemOptionId = option?.Id,
                     MenuItemNameSnapshot = orderItem.MenuItemNameSnapshot,
                     Quantity = selectedItem.Quantity,
-                    AmountCents = selectedItem.AmountCents
-                        ?? PricingCalculator.ToMinorCurrencyUnits(orderItem.UnitPrice * selectedItem.Quantity)
+                    AmountCents = selectedItem.AmountCents ?? defaultAmountCents
                 };
             })
             .ToList();
@@ -910,6 +957,72 @@ public class OrderController : ControllerBase
     /// menu item has since been deleted carry no id and cannot be stock-tracked, so they are
     /// skipped.
     /// </summary>
+    /// <summary>
+    /// Whether one extra on a line may be refunded for the amount asked, or why not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Three questions in order, because a later one is meaningless if an earlier one fails. Is
+    /// this extra on this line at all; can an extra of this kind be refunded on its own — a
+    /// <c>Replace</c> became the price rather than adding to it, a <c>Remove</c> was a discount, a
+    /// free extra cost nothing, and an order that predates the type snapshot cannot be split; and
+    /// is the amount within what this extra actually contributed, less whatever has already gone
+    /// back for it.
+    /// </para>
+    /// <para>
+    /// The line's own balance is not checked here and does not need to be. A line refunded by its
+    /// parts is never also refunded whole, so the parts can never add up to more than the line.
+    /// </para>
+    /// </remarks>
+    /// <returns>The message to refuse with, or null when the selection is good.</returns>
+    private static string? ValidateModifierSelection(
+        OrderItem orderItem,
+        Guid selectedOptionId,
+        LineRefundGranularity settled,
+        CreateRefundRequestItemInput selectedItem,
+        IReadOnlyDictionary<Guid, long> alreadyRefundedModifiers)
+    {
+        var option = orderItem.SelectedOptions
+            .FirstOrDefault(candidate => candidate.MenuItemOptionId == selectedOptionId
+                || candidate.Id == selectedOptionId);
+
+        if (option is null)
+        {
+            return "One of the selected extras does not belong to that item.";
+        }
+
+        if (!LineRefundGranularityPolicy.AllowsModifierRefund(settled))
+        {
+            return LineRefundGranularityPolicy.ExplainModifierRefused(orderItem.MenuItemNameSnapshot);
+        }
+
+        if (OrderItemOptionRefund.WhyNotRefundable(orderItem, option) is { } reason)
+        {
+            return OrderItemOptionRefund.Explain(reason, option.OptionNameSnapshot);
+        }
+
+        var contributionCents = OrderItemOptionRefund.ContributionCents(option, orderItem.Quantity);
+        var alreadyCents = Math.Min(
+            contributionCents,
+            alreadyRefundedModifiers.GetValueOrDefault(option.Id));
+        var remainingCents = contributionCents - alreadyCents;
+
+        if (remainingCents <= 0)
+        {
+            return $"\"{option.OptionNameSnapshot}\" has already been refunded.";
+        }
+
+        var requestedCents = selectedItem.AmountCents ?? remainingCents;
+
+        if (requestedCents <= 0 || requestedCents > remainingCents)
+        {
+            return $"Refund amount for \"{option.OptionNameSnapshot}\" must be between 1 and "
+                + $"{remainingCents} cents.";
+        }
+
+        return null;
+    }
+
     internal static Dictionary<Guid, int> BuildRequestedQuantities(IEnumerable<OrderItem> orderItems) =>
         OrderItemStock.RequestedQuantities(orderItems);
 

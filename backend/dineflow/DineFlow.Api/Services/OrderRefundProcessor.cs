@@ -809,6 +809,8 @@ public sealed class OrderRefundProcessor
                 .Select(group => new { OrderItemId = group.Key, AmountCents = group.Sum(item => item.AmountCents) })
                 .ToDictionaryAsync(item => item.OrderItemId, item => item.AmountCents, cancellationToken);
 
+            var alreadyAllocatedModifiers = RefundRequestItemPolicy.BuildAttributedModifierAmounts(order);
+
             var legacyRequests = await _dbContext.PaymentRefundRequests
                 .AsNoTracking()
                 .Include(request => request.Items)
@@ -842,6 +844,35 @@ public sealed class OrderRefundProcessor
                     return (null, OrderRefundProcessResult.Failure(
                         StatusCodes.Status409Conflict,
                         "A selected refund item no longer belongs to this order."));
+                }
+
+                // An allocation naming an extra is measured against that extra's own contribution,
+                // not the dish's. Checking it against the line would let the truffle be refunded for
+                // the price of the bread it was on.
+                if (allocation.OrderItemOptionId is { } optionId)
+                {
+                    var option = orderItem.SelectedOptions.FirstOrDefault(candidate => candidate.Id == optionId);
+
+                    if (option is null || !OrderItemOptionRefund.IsRefundable(orderItem, option))
+                    {
+                        return (null, OrderRefundProcessResult.Failure(
+                            StatusCodes.Status409Conflict,
+                            $"An extra on {orderItem.MenuItemNameSnapshot} can no longer be refunded on its own."));
+                    }
+
+                    var contributionCents = OrderItemOptionRefund.ContributionCents(option, orderItem.Quantity);
+                    var remainingOptionCents = Math.Max(
+                        0,
+                        contributionCents - alreadyAllocatedModifiers.GetValueOrDefault(option.Id));
+
+                    if (allocation.AmountCents <= 0 || allocation.AmountCents > remainingOptionCents)
+                    {
+                        return (null, OrderRefundProcessResult.Failure(
+                            StatusCodes.Status409Conflict,
+                            $"The refundable balance for {option.OptionNameSnapshot} has changed. Refresh and try again."));
+                    }
+
+                    continue;
                 }
 
                 var unitPriceCents = (long)Math.Round(
@@ -888,6 +919,7 @@ public sealed class OrderRefundProcessor
                     Id = Guid.NewGuid(),
                     PaymentRefundId = refund.Id,
                     OrderItemId = allocation.OrderItemId,
+                    OrderItemOptionId = allocation.OrderItemOptionId,
                     MenuItemNameSnapshot = allocation.MenuItemNameSnapshot,
                     Quantity = allocation.Quantity,
                     AmountCents = allocation.AmountCents

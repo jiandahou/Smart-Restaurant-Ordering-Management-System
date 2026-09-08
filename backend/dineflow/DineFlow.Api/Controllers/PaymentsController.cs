@@ -641,7 +641,10 @@ public class PaymentsController : ControllerBase
                 item.OrderItemId,
                 item.MenuItemNameSnapshot,
                 item.Quantity,
-                item.AmountCents))
+                item.AmountCents,
+                // Carried from the request: staff approve what the customer asked for, and the
+                // extra they asked about must survive the approval that grants it.
+                item.OrderItemOptionId))
             .ToList();
 
         long approvedAmountCents;
@@ -2751,6 +2754,12 @@ public class PaymentsController : ControllerBase
                 .ThenInclude(order => order!.Restaurant)
             .Include(request => request.Order)
                 .ThenInclude(order => order!.Customer)
+            .Include(request => request.Order)
+                .ThenInclude(order => order!.OrderItems)
+                    // Approving a refund prices what it is for, and an extra's price lives on the
+                    // line's own option rows. Without them every extra reads as no longer
+                    // refundable, which is a refusal the customer can do nothing about.
+                    .ThenInclude(orderItem => orderItem.SelectedOptions)
             .Include(request => request.Payment)
             .Include(request => request.PaymentRefund)
             .Include(request => request.Items)

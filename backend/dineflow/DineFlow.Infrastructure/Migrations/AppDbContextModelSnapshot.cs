@@ -1369,6 +1369,9 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<Guid>("OrderItemId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("OrderItemOptionId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid>("PaymentRefundId")
                         .HasColumnType("uuid");
 
@@ -1378,6 +1381,8 @@ namespace DineFlow.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("OrderItemId");
+
+                    b.HasIndex("OrderItemId", "OrderItemOptionId");
 
                     b.HasIndex("PaymentRefundId");
 
@@ -1487,6 +1492,9 @@ namespace DineFlow.Infrastructure.Migrations
                         .HasColumnType("character varying(240)");
 
                     b.Property<Guid>("OrderItemId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("OrderItemOptionId")
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("PaymentRefundRequestId")
