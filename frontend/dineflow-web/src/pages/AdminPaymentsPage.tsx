@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useSearchParams } from 'react-router-dom'
+import { publishOperationalStatusInvalidated } from '@/lib/operationalNotifications'
 import {
   createOrderCheckoutSession,
   approveAdminRefundRequest,
@@ -929,6 +930,9 @@ export function AdminPaymentsPage() {
           : undefined,
       })
       await Promise.all([loadRefundRequests(), loadOrders()])
+      // The bell counts what is still waiting. Without this it keeps saying so for up to a minute
+      // after the thing was dealt with, which is how a badge stops being believed.
+      publishOperationalStatusInvalidated(refundRequest.restaurantId ?? undefined)
       toast.success('Refund request approved', {
         description: `${refundRequest.orderNumber} has been sent to Stripe for refund.`,
       })
@@ -958,6 +962,7 @@ export function AdminPaymentsPage() {
         note: refundRequestRejectNote.trim(),
       })
       await loadRefundRequests()
+      publishOperationalStatusInvalidated(rejectingRefundRequest.restaurantId ?? undefined)
       toast.success('Refund request rejected', {
         description: `${rejectingRefundRequest.orderNumber} now shows the rejection reason to the customer.`,
       })

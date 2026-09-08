@@ -32,6 +32,20 @@ public class RestaurantResponse
 
     public bool OnlinePaymentsEnabled { get; set; }
 
+    /// <summary>
+    /// Refund requests waiting on a decision here.
+    /// </summary>
+    /// <remarks>
+    /// Carried on the list as well as on the operations record because the platform owner is
+    /// assigned to no restaurant at all, so the single-restaurant record is always empty for them —
+    /// the same reason the Stripe warnings are assembled from this list. Without it the one account
+    /// that oversees every restaurant is the one account told about none of them.
+    /// </remarks>
+    public int PendingRefundRequestCount { get; set; }
+
+    /// <summary>When the longest-waiting of those was filed, or null when none are waiting.</summary>
+    public DateTime? OldestPendingRefundRequestAt { get; set; }
+
     public decimal OrderPlatformFeePercent { get; set; }
 
     public long OneTimePlatformFeeCents { get; set; }
@@ -97,6 +111,28 @@ public class RestaurantOperationsResponse
     public string StripeConnectStatus { get; set; } = "NotConnected";
 
     public bool OnlinePaymentsEnabled { get; set; }
+
+    /// <summary>
+    /// Refund requests waiting on a decision at this restaurant.
+    /// </summary>
+    /// <remarks>
+    /// A customer who asks for their money back is waiting on a person, and nothing told that person
+    /// they were waiting: the queue lived on one admin screen that had to be visited to be seen. The
+    /// bell already carries the things staff must act on — a printer that has stopped, payments that
+    /// cannot be taken — and this belongs with them.
+    /// </remarks>
+    public int PendingRefundRequestCount { get; set; }
+
+    /// <summary>
+    /// When the longest-waiting of those was filed, or null when none are waiting.
+    /// </summary>
+    /// <remarks>
+    /// The count alone does not say whether anything is wrong — three requests filed in the last
+    /// hour on a busy Friday is a queue being worked. One filed on Tuesday and still sitting on
+    /// Thursday is somebody's money being held with nobody looking, and only the age says which of
+    /// those is on screen.
+    /// </remarks>
+    public DateTime? OldestPendingRefundRequestAt { get; set; }
 }
 
 /// <summary>

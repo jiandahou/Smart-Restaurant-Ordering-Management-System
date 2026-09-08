@@ -8,6 +8,7 @@ using DineFlow.Api.Options;
 using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
+using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
 using DineFlow.Infrastructure.Restaurant;
 using Microsoft.AspNetCore.Authorization;
@@ -169,6 +170,16 @@ public class RestaurantController : ControllerBase
             OnlinePaymentsEnabled = restaurant.StripeChargesEnabled &&
                 restaurant.StripeAccountId != null &&
                 restaurant.StripeAccountId != "",
+            // Scoped on the request's own RestaurantId, matching how the admin refund list scopes
+            // itself, so the number on the bell is the number of rows that page opens with.
+            PendingRefundRequestCount = _dbContext.PaymentRefundRequests.Count(request =>
+                request.RestaurantId == restaurant.Id
+                && request.Status == PaymentRefundRequestStatus.Pending),
+            OldestPendingRefundRequestAt = _dbContext.PaymentRefundRequests
+                .Where(request =>
+                    request.RestaurantId == restaurant.Id
+                    && request.Status == PaymentRefundRequestStatus.Pending)
+                .Min(request => (DateTime?)request.CreatedAt),
             OrderPlatformFeePercent = restaurant.OrderPlatformFeeBps / 100m,
             OneTimePlatformFeeCents = restaurant.OneTimePlatformFeeCents,
             OneTimePlatformFeeStatus = restaurant.OneTimePlatformFeeStatus.ToString(),

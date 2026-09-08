@@ -4,6 +4,7 @@ using DineFlow.Api.Contracts.Restaurant;
 using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
+using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
@@ -113,7 +114,7 @@ public class RestaurantOperationsController(
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
         return restaurant is null
             ? NotFound(new { message = "Restaurant not found." })
-            : Ok(MapToResponse(restaurant));
+            : Ok(MapToResponse(restaurant, await GetPendingRefundsAsync(id, cancellationToken)));
     }
 
     [HttpPatch("{id:guid}/auto-accept")]
@@ -148,7 +149,7 @@ public class RestaurantOperationsController(
             before: new { autoAcceptOrders = previousValue },
             after: new { restaurant.AutoAcceptOrders });
         await dbContext.SaveChangesAsync(cancellationToken);
-        return Ok(MapToResponse(restaurant));
+        return Ok(MapToResponse(restaurant, await GetPendingRefundsAsync(id, cancellationToken)));
     }
 
     private async Task<bool> CanAccessRestaurantAsync(Guid restaurantId)
@@ -168,9 +169,39 @@ public class RestaurantOperationsController(
         return currentUser?.RestaurantId == restaurantId;
     }
 
-    private static RestaurantOperationsResponse MapToResponse(
-        DineFlow.Infrastructure.Restaurant.Restaurant restaurant) => new()
+    /// <summary>
+    /// The refund requests this restaurant still owes an answer on, and the age of the oldest.
+    /// </summary>
+    /// <remarks>
+    /// Scoped the same way the admin refund list scopes itself — on the request's own RestaurantId,
+    /// not the order's — so the number on the bell is the number of rows the page opens with. A
+    /// count assembled a second way is worse than no count: it sends someone to a screen to find
+    /// something that is not there, and after that they stop believing the badge.
+    /// </remarks>
+    private async Task<(int Count, DateTime? OldestCreatedAt)> GetPendingRefundsAsync(
+        Guid restaurantId,
+        CancellationToken cancellationToken)
     {
+        var pending = dbContext.PaymentRefundRequests
+            .AsNoTracking()
+            .Where(request =>
+                request.RestaurantId == restaurantId
+                && request.Status == PaymentRefundRequestStatus.Pending);
+
+        return (
+            await pending.CountAsync(cancellationToken),
+            await pending
+                .OrderBy(request => request.CreatedAt)
+                .Select(request => (DateTime?)request.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken));
+    }
+
+    private static RestaurantOperationsResponse MapToResponse(
+        DineFlow.Infrastructure.Restaurant.Restaurant restaurant,
+        (int Count, DateTime? OldestCreatedAt) pendingRefunds) => new()
+    {
+        PendingRefundRequestCount = pendingRefunds.Count,
+        OldestPendingRefundRequestAt = pendingRefunds.OldestCreatedAt,
         Id = restaurant.Id,
         Name = restaurant.Name,
         AutoAcceptOrders = restaurant.AutoAcceptOrders,

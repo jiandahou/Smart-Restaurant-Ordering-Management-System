@@ -226,6 +226,10 @@ export type Restaurant = {
   availability: RestaurantAvailability | null
   stripeConnectStatus?: StripeConnectStatus
   onlinePaymentsEnabled?: boolean
+  /** Refund requests waiting on a decision here. */
+  pendingRefundRequestCount?: number
+  /** When the longest-waiting of those was filed, or null when none are waiting. */
+  oldestPendingRefundRequestAt?: string | null
   orderPlatformFeePercent?: number
   oneTimePlatformFeeCents?: number
   oneTimePlatformFeeStatus?: PlatformFeeStatus
@@ -364,6 +368,10 @@ export type RestaurantOperations = {
   autoAcceptOrders: boolean
   stripeConnectStatus: StripeConnectStatus
   onlinePaymentsEnabled: boolean
+  /** Refund requests still waiting on a decision at this restaurant. */
+  pendingRefundRequestCount: number
+  /** When the longest-waiting of those was filed, or null when none are waiting. */
+  oldestPendingRefundRequestAt: string | null
 }
 
 export type RestaurantListParams = {

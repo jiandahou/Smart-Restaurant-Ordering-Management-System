@@ -34,6 +34,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-do
 import { toast } from 'sonner'
 import { useAuth } from '../auth/AuthContext'
 import { adminRoles } from '../auth/postLoginDestination'
+import { buildRefundQueueNotice } from '@/lib/refundQueueNotice'
 import { BrandLogo } from '../components/BrandLogo'
 import { DemoIdentitySwitcher } from '../components/DemoIdentitySwitcher'
 import {
@@ -333,6 +334,50 @@ export function AppLayout() {
         // Lands on the task list itself. Opening the settings dialog alone put people in front of a
         // collapsed section and no sign the thing they came for was inside it.
         onAction: () => printing.openPrintTasks(),
+      })
+    }
+
+    // Only the roles that can answer one. Approving is AdminApi — PlatformOwner, RestaurantOwner
+    // and Admin — so telling a Staff member that three refunds are waiting hands them an alarm and
+    // no way to silence it, and teaches everyone that the bell holds things you cannot act on.
+    if (canUseAdminTools) {
+      // Read from the same two places the payment warnings are: the platform owner is assigned to
+      // no restaurant, so their single-restaurant record is always empty and the list is the only
+      // thing that knows. Named per restaurant so an owner watching several is told which one.
+      const refundQueues = printing.isPlatformOwner && !printing.activeRestaurantId
+        ? printing.printRestaurants
+            .filter((restaurant) => restaurant.isActive)
+            .map((restaurant) => ({
+              id: restaurant.id,
+              name: restaurant.name,
+              count: restaurant.pendingRefundRequestCount ?? 0,
+              oldest: restaurant.oldestPendingRefundRequestAt ?? null,
+            }))
+        : printing.activeRestaurantOperations
+          ? [{
+              id: printing.activeRestaurantOperations.id,
+              name: printing.activeRestaurantOperations.name,
+              count: printing.activeRestaurantOperations.pendingRefundRequestCount,
+              oldest: printing.activeRestaurantOperations.oldestPendingRefundRequestAt,
+            }]
+          : []
+
+      refundQueues.forEach((queue) => {
+        const pendingRefunds = buildRefundQueueNotice(queue.count, queue.oldest)
+        if (!pendingRefunds) return
+
+        notices.push({
+          id: `refund-requests-pending-${queue.id}`,
+          severity: pendingRefunds.severity,
+          title: refundQueues.length > 1
+            ? `${queue.name}: ${pendingRefunds.title}`
+            : pendingRefunds.title,
+          message: pendingRefunds.message,
+          actionLabel: 'Review refund requests',
+          onAction: () => navigate(
+            `/admin/payments?view=requests&requestStatus=Pending&restaurant=${queue.id}`,
+          ),
+        })
       })
     }
 
