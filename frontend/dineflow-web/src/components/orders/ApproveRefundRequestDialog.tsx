@@ -168,6 +168,9 @@ export function ApproveRefundRequestDialog({
                         id={`refund-item-${approvalKey(item)}`}
                         type="number"
                         min="0"
+                        // Approving more than was asked for refunds something nobody claimed. The
+                        // server refuses it; saying so here saves a round trip that can only fail.
+                        max={item.amountCents / 100}
                         step="0.01"
                         inputMode="decimal"
                         value={itemAmounts[approvalKey(item)] ?? ''}
