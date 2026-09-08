@@ -7,7 +7,9 @@ import {
   parseRefundSelectionKey,
   refundSelectionKey,
   setItemAmountCents,
+  toggleExtraSelection,
   toggleItemSelection,
+  toggleLineSelection,
 } from './refundItemSelection'
 
 describe('refund item selection', () => {
@@ -91,5 +93,67 @@ describe('picking a line or one of its extras', () => {
   it('leaves both open when the line says nothing', () => {
     expect(canSelectWholeLine(undefined)).toBe(true)
     expect(canSelectExtras(undefined)).toBe(true)
+  })
+})
+
+/**
+ * A line is refunded as a whole or by its parts and never both. The screen used to express that by
+ * hiding the extras whenever the line was ticked — and since the dialog opens with every line
+ * ticked, the extras were invisible in the state the customer actually arrives in. Presenting the
+ * two as alternatives says the rule instead of concealing half of it.
+ */
+describe('choosing between a whole line and its extras', () => {
+  const extras = ['naan', 'gravy']
+
+  it('releases the extras when the whole line is picked', () => {
+    const selection = {
+      [refundSelectionKey('item-1', 'naan')]: 556,
+      [refundSelectionKey('item-2')]: 900,
+    }
+
+    expect(toggleLineSelection(selection, 'item-1', 3_252, extras)).toEqual({
+      [refundSelectionKey('item-1')]: 3_252,
+      [refundSelectionKey('item-2')]: 900,
+    })
+  })
+
+  it('releases the whole line when one of its extras is picked', () => {
+    const selection = {
+      [refundSelectionKey('item-1')]: 3_252,
+      [refundSelectionKey('item-2')]: 900,
+    }
+
+    expect(toggleExtraSelection(selection, 'item-1', 'naan', 556)).toEqual({
+      [refundSelectionKey('item-1', 'naan')]: 556,
+      [refundSelectionKey('item-2')]: 900,
+    })
+  })
+
+  /** The exclusion is per line: another dish being refunded whole is nobody else's business. */
+  it('leaves other lines alone', () => {
+    const selection = { [refundSelectionKey('item-2')]: 900 }
+
+    expect(toggleLineSelection(selection, 'item-1', 3_252, extras))
+      .toHaveProperty(refundSelectionKey('item-2'), 900)
+    expect(toggleExtraSelection(selection, 'item-1', 'naan', 556))
+      .toHaveProperty(refundSelectionKey('item-2'), 900)
+  })
+
+  it('still unpicks what is already picked', () => {
+    const line = { [refundSelectionKey('item-1')]: 3_252 }
+    expect(toggleLineSelection(line, 'item-1', 3_252, extras)).toEqual({})
+
+    const extra = { [refundSelectionKey('item-1', 'naan')]: 556 }
+    expect(toggleExtraSelection(extra, 'item-1', 'naan', 556)).toEqual({})
+  })
+
+  it('lets two extras on one line be picked together', () => {
+    const first = toggleExtraSelection({}, 'item-1', 'naan', 556)
+    const both = toggleExtraSelection(first, 'item-1', 'gravy', 296)
+
+    expect(both).toEqual({
+      [refundSelectionKey('item-1', 'naan')]: 556,
+      [refundSelectionKey('item-1', 'gravy')]: 296,
+    })
   })
 })

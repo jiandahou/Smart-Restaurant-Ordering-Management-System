@@ -9350,6 +9350,13 @@ button.menu-metric[aria-pressed='true'] {
   gap: 6px;
 }
 
+/* Says the choice out loud, because the two rows below are alternatives rather than a list. */
+.refund-picker-extras-hint {
+  font-size: 0.76rem;
+  color: var(--muted-foreground, #6b7280);
+  padding: 0 2px 1px;
+}
+
 .refund-picker-extra {
   display: flex;
   align-items: center;

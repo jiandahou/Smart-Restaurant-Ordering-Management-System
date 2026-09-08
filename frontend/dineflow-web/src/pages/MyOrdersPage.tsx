@@ -27,7 +27,8 @@ import {
   parseRefundSelectionKey,
   refundSelectionKey,
   setItemAmountCents,
-  toggleItemSelection,
+  toggleExtraSelection,
+  toggleLineSelection,
   type RefundItemSelection,
 } from '../components/orders/refundItemSelection'
 import {
@@ -1201,7 +1202,12 @@ export function MyOrdersPage() {
                           className="refund-picker-check"
                           checked={isSelected}
                           disabled={isFullyRefunded}
-                          onChange={() => setRefundSelection((current) => toggleItemSelection(current, lineKey, refundableAmountCents))}
+                          onChange={() => setRefundSelection((current) => toggleLineSelection(
+                            current,
+                            item.id,
+                            refundableAmountCents,
+                            refundableExtras.map((option) => option.id),
+                          ))}
                         />
                         <span className="refund-picker-thumb" aria-hidden="true">
                           {imageUrl ? (
@@ -1270,8 +1276,11 @@ export function MyOrdersPage() {
                           </div>
                         </div>
                       ) : null}
-                      {refundableExtras.length > 0 && !isSelected ? (
+                      {refundableExtras.length > 0 ? (
                         <ul className="refund-picker-extras">
+                          <li className="refund-picker-extras-hint">
+                            Refund the whole item, or just one of its extras.
+                          </li>
                           {refundableExtras.map((option) => {
                             const extraKey = refundSelectionKey(item.id, option.id)
                             const extraSelected = extraKey in refundSelection
@@ -1291,7 +1300,7 @@ export function MyOrdersPage() {
                                     checked={extraSelected}
                                     disabled={extraSpent}
                                     onChange={() => setRefundSelection((current) => (
-                                      toggleItemSelection(current, extraKey, extraAvailableCents)
+                                      toggleExtraSelection(current, item.id, option.id, extraAvailableCents)
                                     ))}
                                   />
                                   <span className="refund-picker-extra-copy">
