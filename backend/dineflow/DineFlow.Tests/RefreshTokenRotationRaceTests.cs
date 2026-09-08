@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using DineFlow.Application.Authentication;
 using DineFlow.Infrastructure.Authentication;
 using DineFlow.Infrastructure.Identity;
@@ -106,11 +108,15 @@ public class RefreshTokenRotationRaceTests
     }
 
     /// <summary>
-    /// And the protection it exists for still works: a token replayed after the window takes the
-    /// account's other sessions down, which is the correct answer to a stolen copy.
+    /// And the protection it exists for still works: a token replayed after the window ends the
+    /// sign-in it was replayed against, which is the correct answer to a stolen copy — both holders
+    /// of that token are made to log in again, because nobody can tell which of them is the owner.
+    /// It ends that sign-in and no other. The devices that never held the token are not implicated
+    /// by it, and signing them out is how a suspended tab waking with a stale token used to log a
+    /// restaurant's till, tablet and office laptop out in the same instant.
     /// </summary>
     [RequiresPostgresFact]
-    public async Task AReplayAfterTheWindowStillRevokesEverything()
+    public async Task AReplayAfterTheWindowEndsItsOwnSessionOnly()
     {
         await using var database = new PostgresTestDatabase();
         await database.InitializeAsync();
@@ -121,17 +127,26 @@ public class RefreshTokenRotationRaceTests
         var stolen = await service.IssueAsync(userId, "127.0.0.1");
         var otherDevice = await service.IssueAsync(userId, "127.0.0.1");
 
-        await service.RotateAsync(stolen, "127.0.0.1");
+        var successor = await service.RotateAsync(stolen, "127.0.0.1");
 
         // Age the rotation past the grace window.
         var rotated = context.RefreshTokens.Single(token => token.ReplacedByTokenHash != null);
+        var stolenSession = rotated.SessionId;
         rotated.RevokedAt = DateTime.UtcNow.Subtract(RefreshTokenRotationRace.GracePeriod).AddMinutes(-1);
         await context.SaveChangesAsync();
 
         var replay = await service.RotateAsync(stolen, "127.0.0.1");
 
         Assert.Equal(RefreshTokenFailureReason.Reused, replay.FailureReason);
-        Assert.False((await service.RotateAsync(otherDevice, "127.0.0.1")).Succeeded);
+
+        // The compromised sign-in is over: the token the honest client was left holding is dead too.
+        Assert.False((await service.RotateAsync(successor.NewRawToken!, "127.0.0.1")).Succeeded);
+
+        // The other device is a separate sign-in and keeps working.
+        Assert.NotEqual(
+            stolenSession,
+            context.RefreshTokens.AsNoTracking().Single(token => token.TokenHash == HashOf(otherDevice)).SessionId);
+        Assert.True((await service.RotateAsync(otherDevice, "127.0.0.1")).Succeeded);
     }
 
     /// <summary>An explicit logout is still an explicit logout, and says so.</summary>
@@ -150,4 +165,7 @@ public class RefreshTokenRotationRaceTests
 
         Assert.Equal(RefreshTokenFailureReason.Revoked, (await service.RotateAsync(token, "127.0.0.1")).FailureReason);
     }
+
+    private static string HashOf(string rawToken) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(rawToken)));
 }

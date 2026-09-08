@@ -112,6 +112,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(refreshToken => refreshToken.ReplacedByTokenHash).HasMaxLength(128);
             entity.HasIndex(refreshToken => refreshToken.TokenHash).IsUnique();
             entity.HasIndex(refreshToken => refreshToken.UserId);
+            entity.HasIndex(refreshToken => refreshToken.SessionId);
             entity.HasOne(refreshToken => refreshToken.User)
                 .WithMany()
                 .HasForeignKey(refreshToken => refreshToken.UserId)

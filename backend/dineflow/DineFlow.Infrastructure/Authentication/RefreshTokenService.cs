@@ -22,9 +22,12 @@ public class RefreshTokenService : IRefreshTokenService
     {
         var rawToken = GenerateRawToken();
 
+        // A sign-in opens a session, and every rotation from here carries the same id. It is what
+        // scopes reuse detection below: this device's chain, not the account's every device.
         _dbContext.RefreshTokens.Add(new RefreshToken
         {
             UserId = userId,
+            SessionId = Guid.NewGuid(),
             TokenHash = Hash(rawToken),
             ExpiresAt = DateTime.UtcNow.AddDays(_jwtOptions.RefreshTokenExpirationDays),
             CreatedByIp = ipAddress,
@@ -73,9 +76,11 @@ public class RefreshTokenService : IRefreshTokenService
                 return RefreshTokenRotationResult.Failure(RefreshTokenFailureReason.RotationRace);
             }
 
-            // Kill every active token for the user so both the legitimate and illegitimate holder
-            // are forced to log in again.
-            await RevokeAllActiveForUserAsync(existing.UserId, ipAddress, cancellationToken);
+            // Kill the session this token belongs to, so both the legitimate and illegitimate
+            // holder are forced to log in again. Only this session: the other devices signed in on
+            // this account never held the token being replayed, and there is nothing to suspect
+            // them of.
+            await RevokeSessionAsync(existing.SessionId, ipAddress, cancellationToken);
             return RefreshTokenRotationResult.Failure(RefreshTokenFailureReason.Reused);
         }
 
@@ -127,13 +132,14 @@ public class RefreshTokenService : IRefreshTokenService
                 return RefreshTokenRotationResult.Failure(RefreshTokenFailureReason.RotationRace);
             }
 
-            await RevokeAllActiveForUserAsync(winner.UserId, ipAddress, cancellationToken);
+            await RevokeSessionAsync(winner.SessionId, ipAddress, cancellationToken);
             return RefreshTokenRotationResult.Failure(RefreshTokenFailureReason.Reused);
         }
 
         _dbContext.RefreshTokens.Add(new RefreshToken
         {
             UserId = existing.UserId,
+            SessionId = existing.SessionId,
             TokenHash = newTokenHash,
             ExpiresAt = rotatedAt.AddDays(_jwtOptions.RefreshTokenExpirationDays),
             CreatedByIp = ipAddress,
@@ -159,14 +165,32 @@ public class RefreshTokenService : IRefreshTokenService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Ends every session the account holds. Deliberate, and asked for: a password change, a
+    /// "sign out everywhere". Reuse detection does not come through here — it takes the session.
+    /// </summary>
     public Task RevokeAllForUserAsync(string userId, string? ipAddress, CancellationToken cancellationToken = default) =>
-        RevokeAllActiveForUserAsync(userId, ipAddress, cancellationToken);
+        RevokeActiveAsync(
+            refreshToken => refreshToken.UserId == userId,
+            ipAddress,
+            cancellationToken);
 
-    private async Task RevokeAllActiveForUserAsync(string userId, string? ipAddress, CancellationToken cancellationToken)
+    /// <summary>Ends one sign-in, leaving the account's other devices signed in.</summary>
+    private Task RevokeSessionAsync(Guid sessionId, string? ipAddress, CancellationToken cancellationToken) =>
+        RevokeActiveAsync(
+            refreshToken => refreshToken.SessionId == sessionId,
+            ipAddress,
+            cancellationToken);
+
+    private async Task RevokeActiveAsync(
+        System.Linq.Expressions.Expression<Func<RefreshToken, bool>> scope,
+        string? ipAddress,
+        CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
         var activeTokens = await _dbContext.RefreshTokens
-            .Where(refreshToken => refreshToken.UserId == userId && refreshToken.RevokedAt == null)
+            .Where(scope)
+            .Where(refreshToken => refreshToken.RevokedAt == null)
             .ToListAsync(cancellationToken);
 
         foreach (var token in activeTokens)

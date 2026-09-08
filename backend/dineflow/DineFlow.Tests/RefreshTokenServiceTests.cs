@@ -117,10 +117,11 @@ public class RefreshTokenServiceTests : IAsyncLifetime
     }
 
     [RequiresPostgresFact]
-    public async Task RotateAsync_ReplayOfAnAlreadyRotatedToken_RevokesTheWholeFamily()
+    public async Task RotateAsync_ReplayOfAnAlreadyRotatedToken_RevokesThatSessionsChain()
     {
         var (dbContext, service, userId) = CreateService();
         var t1 = await service.IssueAsync(userId, "127.0.0.1");
+        var otherDevice = await service.IssueAsync(userId, "127.0.0.1");
         var rotateResult = await service.RotateAsync(t1, "127.0.0.1"); // t1 -> t2
         var t2 = rotateResult.NewRawToken!;
 
@@ -142,6 +143,12 @@ public class RefreshTokenServiceTests : IAsyncLifetime
 
         var t2Row = await dbContext.RefreshTokens.AsNoTracking().SingleAsync(t => t.TokenHash == HashOf(t2));
         Assert.NotNull(t2Row.RevokedAt); // t2 was still active/legitimate but gets burned too.
+
+        // The other device is a different sign-in and never held t1. Nothing about this replay says
+        // anything about it, and signing it out is what made one stale tab log a whole restaurant
+        // out at once.
+        var otherRow = await dbContext.RefreshTokens.AsNoTracking().SingleAsync(t => t.TokenHash == HashOf(otherDevice));
+        Assert.Null(otherRow.RevokedAt);
     }
 
     [RequiresPostgresFact]

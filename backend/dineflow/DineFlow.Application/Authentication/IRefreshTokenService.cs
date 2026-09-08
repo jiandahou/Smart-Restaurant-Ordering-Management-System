@@ -42,9 +42,15 @@ public sealed record RefreshTokenRotationResult(
 /// Issues and rotates long-lived refresh tokens so a client can silently obtain a
 /// new access token without asking the user to log in again. Tokens rotate on
 /// every use (single use, sliding expiration) and reuse of an already-rotated
-/// token revokes the whole token family, since that pattern only happens if a
-/// stolen token and the legitimate client both try to use it.
+/// token revokes the token family, since that pattern only happens if a stolen
+/// token and the legitimate client both try to use it.
 /// </summary>
+/// <remarks>
+/// The family is one sign-in: a login opens a session and every rotation from it carries the same
+/// session id. So a replay ends the session it was replayed against, and the account's other
+/// devices — which never held that token and are not under suspicion — stay signed in. Ending them
+/// all is a separate, deliberate act: <see cref="IRefreshTokenService.RevokeAllForUserAsync"/>.
+/// </remarks>
 public interface IRefreshTokenService
 {
     Task<string> IssueAsync(string userId, string? ipAddress, CancellationToken cancellationToken = default);
