@@ -223,4 +223,32 @@ public class LineRefundGranularityTests
         Assert.Contains("Garlic Bread", LineRefundGranularityPolicy.ExplainWholeLineRefused("Garlic Bread"));
         Assert.Contains("Garlic Bread", LineRefundGranularityPolicy.ExplainModifierRefused("Garlic Bread"));
     }
+
+    /// <summary>
+    /// The settled grain is read from refunds that already succeeded, so it cannot see the request
+    /// being written. Within one request the dish and one of its extras each pass their own balance
+    /// check and neither knows about the other; granted together they return the line's full value
+    /// plus an extra's share of that same value.
+    /// </summary>
+    [Fact]
+    public void OneRequestCannotAskForALineAndItsExtras()
+    {
+        Assert.True(LineRefundGranularityPolicy.AsksForALineBothWays([false, true]));
+        Assert.True(LineRefundGranularityPolicy.AsksForALineBothWays([true, false]));
+        Assert.True(LineRefundGranularityPolicy.AsksForALineBothWays([true, true, false]));
+    }
+
+    [Fact]
+    public void OneRequestMayAskEitherWayOnItsOwn()
+    {
+        Assert.False(LineRefundGranularityPolicy.AsksForALineBothWays([false]));
+        Assert.False(LineRefundGranularityPolicy.AsksForALineBothWays([true, true]));
+        Assert.False(LineRefundGranularityPolicy.AsksForALineBothWays([]));
+    }
+
+    [Fact]
+    public void AskingBothWaysNamesTheItem()
+    {
+        Assert.Contains("Garlic Bread", LineRefundGranularityPolicy.ExplainAskedBothWays("Garlic Bread"));
+    }
 }

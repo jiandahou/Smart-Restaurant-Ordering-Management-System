@@ -644,7 +644,8 @@ public class PaymentsController : ControllerBase
                 item.AmountCents,
                 // Carried from the request: staff approve what the customer asked for, and the
                 // extra they asked about must survive the approval that grants it.
-                item.OrderItemOptionId))
+                item.OrderItemOptionId,
+                item.OptionNameSnapshot))
             .ToList();
 
         long approvedAmountCents;
@@ -663,7 +664,9 @@ public class PaymentsController : ControllerBase
 
             var chosen = RefundRequestItemPolicy.AllocateStaffChosenRefund(
                 requestedAllocations,
-                chosenItems.Select(item => (item.OrderItemId, item.AmountCents)).ToList());
+                chosenItems
+                    .Select(item => (item.OrderItemId, item.OrderItemOptionId, item.AmountCents))
+                    .ToList());
 
             if (!chosen.IsValid)
             {
@@ -1552,6 +1555,7 @@ public class PaymentsController : ControllerBase
                 .Select(item => new AdminPaymentRefundItemResponse
                 {
                     OrderItemId = item.OrderItemId,
+                    OptionNameSnapshot = item.OptionNameSnapshot,
                     MenuItemNameSnapshot = item.MenuItemNameSnapshot,
                     Quantity = item.Quantity,
                     AmountCents = item.AmountCents
@@ -1600,6 +1604,8 @@ public class PaymentsController : ControllerBase
                 .Select(item => new AdminRefundRequestItemResponse
                 {
                     OrderItemId = item.OrderItemId,
+                    OrderItemOptionId = item.OrderItemOptionId,
+                    OptionNameSnapshot = item.OptionNameSnapshot,
                     MenuItemNameSnapshot = item.MenuItemNameSnapshot,
                     Quantity = item.Quantity,
                     AmountCents = item.AmountCents
@@ -1813,6 +1819,7 @@ public class PaymentsController : ControllerBase
                 .Select(item => new AdminPaymentRefundItemResponse
                 {
                     OrderItemId = item.OrderItemId,
+                    OptionNameSnapshot = item.OptionNameSnapshot,
                     MenuItemNameSnapshot = item.MenuItemNameSnapshot,
                     Quantity = item.Quantity,
                     AmountCents = item.AmountCents

@@ -920,6 +920,7 @@ public sealed class OrderRefundProcessor
                     PaymentRefundId = refund.Id,
                     OrderItemId = allocation.OrderItemId,
                     OrderItemOptionId = allocation.OrderItemOptionId,
+                    OptionNameSnapshot = allocation.OptionNameSnapshot,
                     MenuItemNameSnapshot = allocation.MenuItemNameSnapshot,
                     Quantity = allocation.Quantity,
                     AmountCents = allocation.AmountCents

@@ -179,6 +179,17 @@ public class PaymentRefundItem
     /// </remarks>
     public Guid? OrderItemOptionId { get; set; }
 
+    /// <summary>
+    /// The extra's name as it read when the order was placed, or null for a whole-line refund.
+    /// </summary>
+    /// <remarks>
+    /// Snapshotted beside the dish's name and for the same reason, sharpened by this record's own
+    /// job: retention archives and deletes order data on its own schedule, so a refund that had to
+    /// reach into an order to say what it was for would eventually stop being able to say it. The
+    /// name is also what the customer was shown, which is what a refund record has to repeat.
+    /// </remarks>
+    public string? OptionNameSnapshot { get; set; }
+
     public string MenuItemNameSnapshot { get; set; } = string.Empty;
 
     public int Quantity { get; set; }
@@ -256,6 +267,17 @@ public class PaymentRefundRequestItem
     /// </para>
     /// </remarks>
     public Guid? OrderItemOptionId { get; set; }
+
+    /// <summary>
+    /// The extra's name as it read when the order was placed, or null for a whole-line refund.
+    /// </summary>
+    /// <remarks>
+    /// Snapshotted beside the dish's name and for the same reason, sharpened by this record's own
+    /// job: retention archives and deletes order data on its own schedule, so a refund that had to
+    /// reach into an order to say what it was for would eventually stop being able to say it. The
+    /// name is also what the customer was shown, which is what a refund record has to repeat.
+    /// </remarks>
+    public string? OptionNameSnapshot { get; set; }
 
     public string MenuItemNameSnapshot { get; set; } = string.Empty;
 

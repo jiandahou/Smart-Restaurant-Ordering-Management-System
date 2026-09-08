@@ -69,6 +69,50 @@ public static class LineRefundGranularityPolicy
     public static bool AllowsModifierRefund(LineRefundGranularity settled) =>
         settled is LineRefundGranularity.Untouched or LineRefundGranularity.ByItsParts;
 
+    /// <summary>
+    /// Whether one request asks for a line both ways at once.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="Settled"/> reads refunds that have already succeeded, so it cannot see the
+    /// request being written. Within a single request the dish and one of its extras are two
+    /// selections that each pass their own balance check — the line against the line's, the extra
+    /// against the extra's — and neither knows about the other. Granted together they return the
+    /// line's full value plus the extra's share of it, which is the same money twice.
+    /// </para>
+    /// <para>
+    /// So the rule applies to a request's own contents as well as to its history.
+    /// </para>
+    /// </remarks>
+    /// <param name="selections">Whether each selection on this line named an extra.</param>
+    public static bool AsksForALineBothWays(IEnumerable<bool> selections)
+    {
+        var namedAnExtra = false;
+        var namedTheLine = false;
+
+        foreach (var tagged in selections)
+        {
+            if (tagged)
+            {
+                namedAnExtra = true;
+            }
+            else
+            {
+                namedTheLine = true;
+            }
+
+            if (namedAnExtra && namedTheLine)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static string ExplainAskedBothWays(string menuItemName) =>
+        $"Ask for \"{menuItemName}\" itself or for its extras, not both in one request.";
+
     public static string ExplainWholeLineRefused(string menuItemName) =>
         $"Extras on \"{menuItemName}\" have already been refunded individually, so it can only be "
         + "refunded extra by extra from here.";

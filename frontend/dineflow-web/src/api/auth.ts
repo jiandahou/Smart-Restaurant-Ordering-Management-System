@@ -806,6 +806,8 @@ export type AdminPaymentRefund = {
 
 export type AdminPaymentRefundItem = {
   orderItemId: string
+  /** The extra this refund was for, when it was for one. */
+  optionNameSnapshot: string | null
   menuItemNameSnapshot: string
   quantity: number
   amountCents: number
@@ -1113,6 +1115,8 @@ export type CustomerRefundRequest = {
 }
 
 export type CustomerRefundRequestItem = {
+  /** The extra this line of the request is for, when it is for one. */
+  optionNameSnapshot: string | null
   menuItemNameSnapshot: string
   quantity: number
   amountCents: number
@@ -1416,6 +1420,9 @@ export type AdminRefundRequest = {
 export type AdminRefundRequestItem = {
   /** Which order line this is, so an approval can name an amount for it. */
   orderItemId: string
+  /** The extra this line of the request is for, when it is for one. */
+  orderItemOptionId: string | null
+  optionNameSnapshot: string | null
   menuItemNameSnapshot: string
   quantity: number
   amountCents: number
@@ -1526,7 +1533,7 @@ export type ReviewRefundRequestRequest = {
   /** One total for the whole request. Not sent together with `items`; the server refuses both. */
   amountCents?: number
   /** What staff approved for each line. Lines left out are not refunded. */
-  items?: { orderItemId: string; amountCents: number }[]
+  items?: { orderItemId: string; orderItemOptionId?: string | null; amountCents: number }[]
 }
 
 type PublicKeyCredentialDescriptorJson = Omit<PublicKeyCredentialDescriptor, 'id'> & {

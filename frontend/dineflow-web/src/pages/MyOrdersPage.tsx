@@ -65,6 +65,7 @@ import { Textarea } from '../components/ui/textarea'
 import { getStoredGuestOrders } from '../lib/guestOrders'
 import { ReceiptDocumentView } from '../components/orders/ReceiptDocumentView'
 import { getOrderStatusLabel } from '../components/orders/OrderStatusBadge'
+import { refundedItemLabel } from '../components/orders/refundedItemLabel'
 import {
   buildReceiptLinePricing,
   buildReceiptPaymentSummary,
@@ -809,7 +810,7 @@ export function MyOrdersPage() {
                                   {order.latestRefundRequest.items.map((item, index) => (
                                     <li key={`${item.menuItemNameSnapshot}-${index}`}>
                                       <span>
-                                        {item.menuItemNameSnapshot}
+                                        {refundedItemLabel(item)}
                                         {item.quantity > 1 ? ` × ${item.quantity}` : null}
                                       </span>
                                       <strong>

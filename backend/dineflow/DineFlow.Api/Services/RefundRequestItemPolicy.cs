@@ -13,7 +13,8 @@ public sealed record RefundItemAllocation(
     string MenuItemNameSnapshot,
     int Quantity,
     long AmountCents,
-    Guid? OrderItemOptionId = null);
+    Guid? OrderItemOptionId = null,
+    string? OptionNameSnapshot = null);
 
 public static class RefundRequestItemPolicy
 {
@@ -94,23 +95,29 @@ public static class RefundRequestItemPolicy
     /// <param name="chosen">The amount staff approved for each line. Lines left out are not refunded.</param>
     public static StaffChosenRefund AllocateStaffChosenRefund(
         IReadOnlyList<RefundItemAllocation> requestedItems,
-        IReadOnlyList<(Guid OrderItemId, long AmountCents)> chosen)
+        IReadOnlyList<(Guid OrderItemId, Guid? OrderItemOptionId, long AmountCents)> chosen)
     {
         if (chosen.Count == 0)
         {
             return StaffChosenRefund.Invalid("Choose an amount for at least one item.");
         }
 
-        if (chosen.Select(item => item.OrderItemId).Distinct().Count() != chosen.Count)
+        // Matched on both halves: a dish and one of its extras are two lines of the request, and
+        // keying on the dish alone would let one amount silently replace the other.
+        if (chosen
+                .Select(item => (item.OrderItemId, item.OrderItemOptionId))
+                .Distinct()
+                .Count() != chosen.Count)
         {
             return StaffChosenRefund.Invalid("Each order item can only be given one amount.");
         }
 
         var allocations = new List<RefundItemAllocation>();
 
-        foreach (var (orderItemId, amountCents) in chosen)
+        foreach (var (orderItemId, orderItemOptionId, amountCents) in chosen)
         {
-            var requested = requestedItems.FirstOrDefault(item => item.OrderItemId == orderItemId);
+            var requested = requestedItems.FirstOrDefault(item =>
+                item.OrderItemId == orderItemId && item.OrderItemOptionId == orderItemOptionId);
 
             if (requested is null)
             {

@@ -1372,6 +1372,10 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<Guid?>("OrderItemOptionId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("OptionNameSnapshot")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
                     b.Property<Guid>("PaymentRefundId")
                         .HasColumnType("uuid");
 
@@ -1496,6 +1500,10 @@ namespace DineFlow.Infrastructure.Migrations
 
                     b.Property<Guid?>("OrderItemOptionId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("OptionNameSnapshot")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
 
                     b.Property<Guid>("PaymentRefundRequestId")
                         .HasColumnType("uuid");

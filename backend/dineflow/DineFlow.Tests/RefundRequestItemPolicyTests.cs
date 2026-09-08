@@ -153,7 +153,7 @@ public class RefundRequestItemPolicyTests
 
         var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(
             requested,
-            [(wings, 1_600), (rolls, 0)]);
+            [(wings, null, 1_600), (rolls, null, 0)]);
 
         Assert.True(result.IsValid);
         Assert.Equal(1_600, result.ApprovedAmountCents);
@@ -174,7 +174,7 @@ public class RefundRequestItemPolicyTests
             new(rolls, "Veg Spring Rolls", 1, 1_024),
         };
 
-        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(rolls, 500)]);
+        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(rolls, null, 500)]);
 
         Assert.True(result.IsValid);
         Assert.Equal(500, result.ApprovedAmountCents);
@@ -190,7 +190,7 @@ public class RefundRequestItemPolicyTests
         var wings = Guid.NewGuid();
         var requested = new List<RefundItemAllocation> { new(wings, "Chicken Wings", 1, 1_600) };
 
-        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(wings, 1_601)]);
+        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(wings, null, 1_601)]);
 
         Assert.False(result.IsValid);
         Assert.Contains("Chicken Wings", result.Error);
@@ -202,7 +202,7 @@ public class RefundRequestItemPolicyTests
     {
         var requested = new List<RefundItemAllocation> { new(Guid.NewGuid(), "Chicken Wings", 1, 1_600) };
 
-        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(Guid.NewGuid(), 100)]);
+        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(Guid.NewGuid(), null, 100)]);
 
         Assert.False(result.IsValid);
     }
@@ -213,9 +213,9 @@ public class RefundRequestItemPolicyTests
         var wings = Guid.NewGuid();
         var requested = new List<RefundItemAllocation> { new(wings, "Chicken Wings", 1, 1_600) };
 
-        Assert.False(RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(wings, -1)]).IsValid);
+        Assert.False(RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(wings, null, -1)]).IsValid);
         Assert.False(RefundRequestItemPolicy
-            .AllocateStaffChosenRefund(requested, [(wings, 100), (wings, 200)]).IsValid);
+            .AllocateStaffChosenRefund(requested, [(wings, null, 100), (wings, null, 200)]).IsValid);
     }
 
     /// <summary>Zeroing every line is a rejection, and should be made as one.</summary>
@@ -225,9 +225,52 @@ public class RefundRequestItemPolicyTests
         var wings = Guid.NewGuid();
         var requested = new List<RefundItemAllocation> { new(wings, "Chicken Wings", 1, 1_600) };
 
-        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(wings, 0)]);
+        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(wings, null, 0)]);
 
         Assert.False(result.IsValid);
         Assert.Contains("reject", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A request can name two extras on one dish. Keyed by the dish alone they are one entry, and
+    /// the second amount would silently replace the first — so staff approving "the sauce but not
+    /// the naan" would grant whichever the loop happened to reach last.
+    /// </summary>
+    [Fact]
+    public void AllocateStaffChosenRefund_TellsTwoExtrasOnOneDishApart()
+    {
+        var wings = Guid.NewGuid();
+        var bbq = Guid.NewGuid();
+        var hot = Guid.NewGuid();
+        var requested = new List<RefundItemAllocation>
+        {
+            new(wings, "Chicken Wings", 1, 74, bbq),
+            new(wings, "Chicken Wings", 1, 37, hot),
+        };
+
+        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(
+            requested,
+            [(wings, bbq, 74), (wings, hot, 0)]);
+
+        Assert.True(result.IsValid);
+        Assert.Equal(74, result.ApprovedAmountCents);
+        var only = Assert.Single(result.Allocations);
+        Assert.Equal(bbq, only.OrderItemOptionId);
+    }
+
+    /// <summary>
+    /// The dish and one of its extras are different lines of the request, so an approval naming one
+    /// must not be matched to the other.
+    /// </summary>
+    [Fact]
+    public void AllocateStaffChosenRefund_DoesNotMatchAnExtraToItsDish()
+    {
+        var wings = Guid.NewGuid();
+        var bbq = Guid.NewGuid();
+        var requested = new List<RefundItemAllocation> { new(wings, "Chicken Wings", 1, 74, bbq) };
+
+        var result = RefundRequestItemPolicy.AllocateStaffChosenRefund(requested, [(wings, null, 74)]);
+
+        Assert.False(result.IsValid);
     }
 }

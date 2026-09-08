@@ -14,7 +14,7 @@ import { Input } from '../ui/input'
 import { Textarea } from '../ui/textarea'
 import { parseRefundAmountCents } from './refundAmount'
 import { canConfirmRefundApproval } from './refundApproval'
-import { sumPerItemApproval } from './perItemApproval'
+import { approvalKey, approvalLabel, sumPerItemApproval } from './perItemApproval'
 import { ProviderIdentifier } from '@/components/orders/ProviderIdentifier'
 
 /**
@@ -111,8 +111,8 @@ export function ApproveRefundRequestDialog({
             {request.items.length > 0 && mode !== 'items' && (
               <dl className="refund-approval-item-list">
                 {request.items.map((item, index) => (
-                  <div key={`${item.orderItemId}-${index}`}>
-                    <dt>{item.menuItemNameSnapshot} × {item.quantity}</dt>
+                  <div key={`${approvalKey(item)}-${index}`}>
+                    <dt>{approvalLabel(item)} × {item.quantity}</dt>
                     <dd>{formatPaymentAmount(item.amountCents, request.currency)}</dd>
                   </div>
                 ))}
@@ -160,18 +160,18 @@ export function ApproveRefundRequestDialog({
                     Set what each item is being refunded. Leave one at zero to refund nothing for it.
                   </p>
                   {request.items.map((item) => (
-                    <div key={item.orderItemId} className="space-y-1">
-                      <label className="text-sm font-semibold" htmlFor={`refund-item-${item.orderItemId}`}>
-                        {item.menuItemNameSnapshot} × {item.quantity}
+                    <div key={approvalKey(item)} className="space-y-1">
+                      <label className="text-sm font-semibold" htmlFor={`refund-item-${approvalKey(item)}`}>
+                        {approvalLabel(item)} × {item.quantity}
                       </label>
                       <Input
-                        id={`refund-item-${item.orderItemId}`}
+                        id={`refund-item-${approvalKey(item)}`}
                         type="number"
                         min="0"
                         step="0.01"
                         inputMode="decimal"
-                        value={itemAmounts[item.orderItemId] ?? ''}
-                        onChange={(event) => onItemAmountChange(item.orderItemId, event.target.value)}
+                        value={itemAmounts[approvalKey(item)] ?? ''}
+                        onChange={(event) => onItemAmountChange(approvalKey(item), event.target.value)}
                         disabled={submitting}
                       />
                       <p className="text-xs text-muted-foreground">

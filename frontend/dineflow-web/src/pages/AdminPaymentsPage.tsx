@@ -53,7 +53,7 @@ import {
   type RefundMode as RefundApprovalMode,
 } from '../components/orders/ApproveRefundRequestDialog'
 import { OrderRefundDialog, type RefundMode } from '../components/orders/OrderRefundDialog'
-import { prefillPerItemApproval } from '../components/orders/perItemApproval'
+import { approvalKey, prefillPerItemApproval } from '../components/orders/perItemApproval'
 import { parseRefundAmountCents } from '../components/orders/refundAmount'
 import { OrderStatusBadge, getOrderStatusLabel, orderStatusOptions } from '../components/orders/OrderStatusBadge'
 import { PaymentRefundHistory } from '../components/orders/PaymentRefundHistory'
@@ -72,6 +72,7 @@ import {
 } from '../components/ui/dialog'
 import { Input } from '../components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover'
+import { refundedItemLabel } from '../components/orders/refundedItemLabel'
 import {
   Select,
   SelectContent,
@@ -921,7 +922,8 @@ export function AdminPaymentsPage() {
         items: refundApprovalMode === 'items'
           ? refundRequest.items.map((item) => ({
             orderItemId: item.orderItemId,
-            amountCents: parseRefundAmountCents(refundApprovalItemAmounts[item.orderItemId] ?? '') ?? 0,
+            orderItemOptionId: item.orderItemOptionId,
+            amountCents: parseRefundAmountCents(refundApprovalItemAmounts[approvalKey(item)] ?? '') ?? 0,
           }))
           : undefined,
       })
@@ -2143,7 +2145,7 @@ export function AdminPaymentsPage() {
                       <td>
                         {refund.items.length > 0 ? refund.items.map((item) => (
                           <span key={item.orderItemId} className="table-subtext">
-                            {item.quantity} × {item.menuItemNameSnapshot}: {formatMoney(item.amountCents / 100, refund.currency)}
+                            {item.quantity} × {refundedItemLabel(item)}: {formatMoney(item.amountCents / 100, refund.currency)}
                           </span>
                         )) : <span className="table-subtext">No item allocation</span>}
                         {refund.unattributedAmountCents > 0 && (
@@ -2216,7 +2218,7 @@ export function AdminPaymentsPage() {
                           <strong>Allocation</strong>
                           {refund.items.map((item) => (
                             <div key={item.orderItemId} className="mt-1 flex justify-between gap-2">
-                              <span>{item.quantity} × {item.menuItemNameSnapshot}</span>
+                              <span>{item.quantity} × {refundedItemLabel(item)}</span>
                               <span>{formatMoney(item.amountCents / 100, refund.currency)}</span>
                             </div>
                           ))}

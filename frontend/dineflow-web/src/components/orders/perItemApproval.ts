@@ -1,8 +1,32 @@
+import { refundSelectionKey } from './refundItemSelection'
 import { parseRefundAmountCents } from './refundAmount'
 
 type ApprovableItem = {
   orderItemId: string
+  orderItemOptionId?: string | null
+  optionNameSnapshot?: string | null
+  menuItemNameSnapshot?: string
   amountCents: number
+}
+
+/**
+ * The key one line of a request is held under.
+ *
+ * <p>
+ * A request can name a dish and one of its extras, or two extras on one dish. Keyed by the line
+ * alone those are the same entry, and staff editing one amount would silently move the other.
+ * Shared with the customer's picker so both sides agree on what "one selection" is.
+ * </p>
+ */
+export function approvalKey(item: ApprovableItem): string {
+  return refundSelectionKey(item.orderItemId, item.orderItemOptionId)
+}
+
+/** How the line reads on the approval screen: the extra, and the dish it was on. */
+export function approvalLabel(item: ApprovableItem): string {
+  const dish = item.menuItemNameSnapshot ?? 'Item'
+
+  return item.optionNameSnapshot ? `${item.optionNameSnapshot} on ${dish}` : dish
 }
 
 /**
@@ -20,7 +44,7 @@ export function sumPerItemApproval(
   amounts: Record<string, string>,
 ): number {
   return items.reduce(
-    (total, item) => total + (parseRefundAmountCents(amounts[item.orderItemId] ?? '') ?? 0),
+    (total, item) => total + (parseRefundAmountCents(amounts[approvalKey(item)] ?? '') ?? 0),
     0,
   )
 }
@@ -35,6 +59,6 @@ export function sumPerItemApproval(
  */
 export function prefillPerItemApproval(items: ApprovableItem[]): Record<string, string> {
   return Object.fromEntries(
-    items.map((item) => [item.orderItemId, (item.amountCents / 100).toFixed(2)]),
+    items.map((item) => [approvalKey(item), (item.amountCents / 100).toFixed(2)]),
   )
 }

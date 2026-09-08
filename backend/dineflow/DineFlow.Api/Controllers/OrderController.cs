@@ -558,6 +558,23 @@ public class OrderController : ControllerBase
             return BadRequest(new { message = "Each order item can only be selected once." });
         }
 
+        // One request may ask for a line itself or for its extras, never both. The settled-grain
+        // check below reads refunds that already succeeded and so cannot see this request's own
+        // contents; granted together, the two would return the line's full value plus an extra's
+        // share of that same value.
+        foreach (var group in selectedItems.GroupBy(item => item.OrderItemId))
+        {
+            if (LineRefundGranularityPolicy.AsksForALineBothWays(
+                    group.Select(item => item.OrderItemOptionId is not null)))
+            {
+                var name = order.OrderItems
+                    .FirstOrDefault(item => item.Id == group.Key)?.MenuItemNameSnapshot
+                    ?? "That item";
+
+                return BadRequest(new { message = LineRefundGranularityPolicy.ExplainAskedBothWays(name) });
+            }
+        }
+
         var orderItemsById = order.OrderItems.ToDictionary(item => item.Id);
         var alreadyRefundedAmounts = BuildAttributedRefundAmounts(order);
         var alreadyRefundedModifiers = RefundRequestItemPolicy.BuildAttributedModifierAmounts(order);
@@ -704,6 +721,7 @@ public class OrderController : ControllerBase
                     // row can be archived and this has to keep resolving for as long as the refund
                     // record does.
                     OrderItemOptionId = option?.Id,
+                    OptionNameSnapshot = option?.OptionNameSnapshot,
                     MenuItemNameSnapshot = orderItem.MenuItemNameSnapshot,
                     Quantity = selectedItem.Quantity,
                     AmountCents = selectedItem.AmountCents ?? defaultAmountCents
@@ -1544,6 +1562,7 @@ public class OrderController : ControllerBase
             Items = request.Items
                 .Select(item => new CustomerRefundRequestItemResponse
                 {
+                    OptionNameSnapshot = item.OptionNameSnapshot,
                     MenuItemNameSnapshot = item.MenuItemNameSnapshot,
                     Quantity = item.Quantity,
                     AmountCents = item.AmountCents

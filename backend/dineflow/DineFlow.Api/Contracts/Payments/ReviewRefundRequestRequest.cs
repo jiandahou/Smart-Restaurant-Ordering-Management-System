@@ -31,5 +31,14 @@ public sealed class ReviewRefundRequestItemInput
 {
     public Guid OrderItemId { get; set; }
 
+    /// <summary>
+    /// The extra this amount is for, matching the request line it answers.
+    /// </summary>
+    /// <remarks>
+    /// Without it a request naming two extras on one dish could not be approved extra by extra:
+    /// both would key onto the dish, and the second amount would replace the first.
+    /// </remarks>
+    public Guid? OrderItemOptionId { get; set; }
+
     public long AmountCents { get; set; }
 }

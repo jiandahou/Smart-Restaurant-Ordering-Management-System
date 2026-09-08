@@ -1,6 +1,7 @@
 import type { AdminOrderPayment, AdminPaymentRefundStatus } from '../../api/auth'
 import { Badge } from '../ui/badge'
 import { ProviderIdentifier } from '@/components/orders/ProviderIdentifier'
+import { refundedItemLabel } from './refundedItemLabel'
 
 const refundStatusLabels: Record<AdminPaymentRefundStatus, string> = {
   Pending: 'Pending',
@@ -88,7 +89,7 @@ export function PaymentRefundHistory({
                   <strong className="mb-1 block">Allocation</strong>
                   {refund.items.map((item) => (
                     <div key={item.orderItemId} className="flex justify-between gap-3">
-                      <span>{item.quantity} × {item.menuItemNameSnapshot}</span>
+                      <span>{item.quantity} × {refundedItemLabel(item)}</span>
                       <span>{formatPaymentAmount(item.amountCents, refund.currency || currency)}</span>
                     </div>
                   ))}

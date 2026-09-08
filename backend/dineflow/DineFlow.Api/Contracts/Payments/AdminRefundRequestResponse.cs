@@ -64,6 +64,15 @@ public sealed class AdminRefundRequestItemResponse
     /// </remarks>
     public Guid OrderItemId { get; set; }
 
+    /// <summary>The extra this line of the request is for, when it is for one.</summary>
+    public Guid? OrderItemOptionId { get; set; }
+
+    /// <summary>
+    /// Its name, so the approval screen can say "Smoky BBQ on Chicken Wings" rather than showing
+    /// the dish twice with two different amounts and no way to tell them apart.
+    /// </summary>
+    public string? OptionNameSnapshot { get; set; }
+
     public string MenuItemNameSnapshot { get; set; } = string.Empty;
 
     public int Quantity { get; set; }
