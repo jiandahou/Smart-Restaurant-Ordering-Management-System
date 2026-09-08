@@ -219,8 +219,11 @@ function getRefundRequestQuantity(item: CustomerOrderItem, amountCents: number) 
 
 function buildFullRefundSelection(order: CustomerOrder): RefundItemSelection {
   const selection = order.orderItems.reduce<RefundItemSelection>((current, item) => {
-    if (item.refundableAmountCents > 0) {
-      current[item.id] = item.refundableAmountCents
+    // A line already refunded extra by extra cannot be refunded whole, so preselecting it opens
+    // the dialog on a request the server is bound to refuse — and counts its balance into a total
+    // the customer never chose.
+    if (item.refundableAmountCents > 0 && canSelectWholeLine(item.refundGranularity)) {
+      current[refundSelectionKey(item.id)] = item.refundableAmountCents
     }
     return current
   }, {})
@@ -1180,7 +1183,11 @@ export function MyOrdersPage() {
                 {refundOrder.orderItems.map((item) => {
                   const refundableAmountCents = item.refundableAmountCents
                   const wholeLineOpen = canSelectWholeLine(item.refundGranularity)
-                  const isFullyRefunded = refundableAmountCents === 0 || !wholeLineOpen
+                  // Two different facts that used to share one flag: nothing left to give back, and
+                  // this line's extras were refunded so only they can be from here. Conflated, a
+                  // line with most of its value intact announced itself as already refunded.
+                  const isFullyRefunded = refundableAmountCents === 0
+                  const canPickWholeLine = wholeLineOpen && !isFullyRefunded
                   const lineKey = refundSelectionKey(item.id)
                   const isSelected = lineKey in refundSelection
                   const selectedAmountCents = refundSelection[lineKey] ?? refundableAmountCents
@@ -1201,7 +1208,7 @@ export function MyOrdersPage() {
                           type="checkbox"
                           className="refund-picker-check"
                           checked={isSelected}
-                          disabled={isFullyRefunded}
+                          disabled={!canPickWholeLine}
                           onChange={() => setRefundSelection((current) => toggleLineSelection(
                             current,
                             item.id,
@@ -1237,9 +1244,9 @@ export function MyOrdersPage() {
                             ) : null}
                           </small>
                         </span>
-                        {isFullyRefunded ? (
+                        {!canPickWholeLine ? (
                           <span className="refund-picker-refunded-badge">
-                            {wholeLineOpen ? 'Refunded' : 'Extras refunded'}
+                            {isFullyRefunded ? 'Refunded' : 'Extras refunded'}
                           </span>
                         ) : (
                           <span className="refund-picker-amount">

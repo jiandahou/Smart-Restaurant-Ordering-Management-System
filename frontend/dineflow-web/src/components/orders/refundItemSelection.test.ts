@@ -157,3 +157,21 @@ describe('choosing between a whole line and its extras', () => {
     })
   })
 })
+
+/**
+ * The dialog opens with every refundable line ticked. A line whose extras have already been
+ * refunded cannot be refunded whole, so ticking it opens the dialog on a request the server is
+ * bound to refuse — and counts that line's balance into a total the customer never chose. On a
+ * A$32.52 order with A$6.56 of extras returned, the dialog offered A$25.96 and would have been
+ * turned down.
+ */
+describe('what the dialog opens with', () => {
+  it('leaves out a line that can only be refunded extra by extra', () => {
+    expect(canSelectWholeLine('ByItsParts')).toBe(false)
+  })
+
+  it('still includes lines that have not been refunded either way', () => {
+    expect(canSelectWholeLine('Untouched')).toBe(true)
+    expect(canSelectWholeLine('AsAWhole')).toBe(true)
+  })
+})
