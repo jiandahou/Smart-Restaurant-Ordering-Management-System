@@ -9187,27 +9187,35 @@ button.menu-metric[aria-pressed='true'] {
 }
 
 /* Leads the section, because "how much did I get back" is answered by the payment rather than by
-   any one request. */
+   any one request.
+
+   Deliberately not tinted like an approved request. Given the green of a settled request it read as
+   one more of them rather than as their sum — on an order with five approvals it was the sixth
+   identical green bar. It takes the card header's own language instead, so it pairs with the total
+   paid a few lines above it, and spends its colour on the figure alone. */
 .my-order-refund-total {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
   margin: 0;
-  padding: 9px 12px;
-  border: 1px solid color-mix(in srgb, #10b981 42%, var(--border));
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
   border-radius: 12px;
-  background: color-mix(in srgb, #10b981 10%, var(--subtle));
+  background: color-mix(in srgb, var(--subtle) 62%, transparent);
 }
 
 .my-order-refund-total > span {
-  font-size: 0.85rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--muted-foreground);
 }
 
 .my-order-refund-total > strong {
-  font-size: 1.05rem;
-  color: var(--text-h);
+  font-size: 1.15rem;
+  color: color-mix(in srgb, #047857 80%, var(--text-h));
   font-variant-numeric: tabular-nums;
 }
 
