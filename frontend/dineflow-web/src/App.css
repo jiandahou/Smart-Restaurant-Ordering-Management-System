@@ -10349,6 +10349,13 @@ button.menu-metric[aria-pressed='true'] {
 }
 
 .admin-payment-mobile-status-row > strong,
+/* Sits under the amount, quieter than it: the figure is the row, this explains it. */
+.refund-mobile-items {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted-foreground, #6b7280);
+}
+
 .refund-mobile-amount-row > strong {
   flex: 0 0 auto;
   color: var(--text-h);

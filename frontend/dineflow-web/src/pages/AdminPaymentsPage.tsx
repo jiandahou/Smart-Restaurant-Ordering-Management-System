@@ -73,6 +73,7 @@ import {
 import { Input } from '../components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover'
 import { refundedItemLabel } from '../components/orders/refundedItemLabel'
+import { refundRequestSummary } from '../components/orders/refundRequestSummary'
 import {
   Select,
   SelectContent,
@@ -1901,6 +1902,13 @@ export function AdminPaymentsPage() {
                         </td>
                         <td>
                           <strong>{formatMoney(refundRequest.requestedAmountCents / 100, refundRequest.currency)}</strong>
+                          {/* Without this a $1.96 request beside a $32.52 one reads as a mistake
+                              rather than as a sauce. */}
+                          {refundRequestSummary(refundRequest.items) ? (
+                            <span className="table-subtext" title={refundRequestSummary(refundRequest.items)}>
+                              {refundRequestSummary(refundRequest.items)}
+                            </span>
+                          ) : null}
                         </td>
                         <td>
                           <strong className="payment-untrusted-text" title={refundRequest.reason || undefined}>
@@ -1957,6 +1965,9 @@ export function AdminPaymentsPage() {
                           <span>Requested</span>
                           <strong>{formatMoney(refundRequest.requestedAmountCents / 100, refundRequest.currency)}</strong>
                         </div>
+                        {refundRequestSummary(refundRequest.items) ? (
+                          <p className="refund-mobile-items">{refundRequestSummary(refundRequest.items)}</p>
+                        ) : null}
 
                         <div className="restaurant-mobile-meta-grid refund-mobile-meta-grid">
                           <div className="restaurant-mobile-meta">
