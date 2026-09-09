@@ -25,6 +25,7 @@ public class PlatformBillingController(
     AppDbContext dbContext,
     UserManager<ApplicationUser> userManager,
     PlatformSubscriptionService subscriptions,
+    PlatformBillingPresenter billingPresenter,
     ReportLogWriter reportLogWriter,
     ILogger<PlatformBillingController> logger) : ControllerBase
 {
@@ -187,7 +188,7 @@ public class PlatformBillingController(
         await reconciliation.ReconcileOneAsync(restaurant, reportLogWriter, cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        return Ok(PlatformBillingPresenter.Describe(restaurant, DateTime.UtcNow));
+        return Ok(billingPresenter.Describe(restaurant, DateTime.UtcNow));
     }
 
     /// <summary>
@@ -291,7 +292,7 @@ public class PlatformBillingController(
             restaurant.Id,
             model);
 
-        return Ok(PlatformBillingPresenter.Describe(restaurant, now));
+        return Ok(billingPresenter.Describe(restaurant, now));
     }
 
     private async Task<string?> ResolveOwnerEmailAsync(Guid restaurantId, CancellationToken cancellationToken) =>

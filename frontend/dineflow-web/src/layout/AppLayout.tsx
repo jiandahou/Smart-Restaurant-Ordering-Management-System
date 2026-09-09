@@ -420,7 +420,9 @@ export function AppLayout() {
           title: notice.title,
           message: notice.message,
           actionLabel: 'Open billing',
-          onAction: () => navigate('/admin/billing'),
+          // Carries which restaurant. The platform owner is assigned to none, so a bare link would
+          // send them from a warning naming one shop to a page that says it knows of no shop.
+          onAction: () => navigate(`/admin/billing?restaurantId=${source.id}`),
         })
       })
     }

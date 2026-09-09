@@ -223,6 +223,7 @@ builder.Services.AddScoped<ReportLogWriter>();
 builder.Services.AddScoped<AdminActivityReportService>();
 builder.Services.AddScoped<TableSessionService>();
 builder.Services.AddSingleton<RestaurantOperatingHoursService>();
+builder.Services.AddSingleton<PlatformBillingPresenter>();
 builder.Services.AddSingleton<IOAuthLoginCodeStore, MemoryOAuthLoginCodeStore>();
 builder.Services.AddSingleton<IMfaLoginChallengeStore, MemoryMfaLoginChallengeStore>();
 builder.Services.AddSingleton<IMfaEmailSetupCodeStore, MemoryMfaEmailSetupCodeStore>();

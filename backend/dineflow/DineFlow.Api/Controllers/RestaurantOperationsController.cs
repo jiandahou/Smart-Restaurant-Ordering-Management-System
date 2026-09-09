@@ -20,6 +20,7 @@ public class RestaurantOperationsController(
     AppDbContext dbContext,
     UserManager<ApplicationUser> userManager,
     RestaurantOperatingHoursService restaurantOperatingHoursService,
+    PlatformBillingPresenter billingPresenter,
     ReportLogWriter reportLogWriter) : ControllerBase
 {
     /// <summary>
@@ -117,7 +118,8 @@ public class RestaurantOperationsController(
             : Ok(MapToResponse(
                 restaurant,
                 await GetPendingRefundsAsync(id, cancellationToken),
-                DateTime.UtcNow));
+                DateTime.UtcNow,
+                billingPresenter));
     }
 
     [HttpPatch("{id:guid}/auto-accept")]
@@ -155,7 +157,8 @@ public class RestaurantOperationsController(
         return Ok(MapToResponse(
             restaurant,
             await GetPendingRefundsAsync(id, cancellationToken),
-            DateTime.UtcNow));
+            DateTime.UtcNow,
+            billingPresenter));
     }
 
     private async Task<bool> CanAccessRestaurantAsync(Guid restaurantId)
@@ -205,9 +208,10 @@ public class RestaurantOperationsController(
     private static RestaurantOperationsResponse MapToResponse(
         DineFlow.Infrastructure.Restaurant.Restaurant restaurant,
         (int Count, DateTime? OldestCreatedAt) pendingRefunds,
-        DateTime utcNow) => new()
+        DateTime utcNow,
+        PlatformBillingPresenter billingPresenter) => new()
     {
-        Billing = PlatformBillingPresenter.Describe(restaurant, utcNow),
+        Billing = billingPresenter.Describe(restaurant, utcNow),
         PendingRefundRequestCount = pendingRefunds.Count,
         OldestPendingRefundRequestAt = pendingRefunds.OldestCreatedAt,
         Id = restaurant.Id,

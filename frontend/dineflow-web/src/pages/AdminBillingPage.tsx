@@ -18,11 +18,18 @@ import { formatMoney } from '../lib/formatMoney'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 
-function formatMoment(value: string | null) {
+/** On the restaurant's clock, because that is the clock the moment was chosen on. */
+function formatMoment(value: string | null, timeZone: string) {
   if (!value) return null
 
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'full', timeStyle: 'short' })
-    .format(new Date(value))
+  try {
+    return new Intl.DateTimeFormat(undefined, { dateStyle: 'full', timeStyle: 'short', timeZone })
+      .format(new Date(value))
+  } catch {
+    // An unknown zone should cost the reader a label, not the whole sentence.
+    return new Intl.DateTimeFormat(undefined, { dateStyle: 'full', timeStyle: 'short' })
+      .format(new Date(value))
+  }
 }
 
 /**
@@ -36,7 +43,11 @@ function formatMoment(value: string | null) {
 function describeRemaining(suspendsAt: string | null, now: number) {
   if (!suspendsAt) return null
 
-  const remainingMs = Math.max(0, new Date(suspendsAt).getTime() - now)
+  // Past the deadline there is no countdown to give. Saying "less than an hour" beside a date that
+  // has already been and gone is worse than saying nothing.
+  const remainingMs = new Date(suspendsAt).getTime() - now
+  if (remainingMs <= 0) return null
+
   const hours = Math.floor(remainingMs / (60 * 60 * 1000))
 
   if (hours <= 1) return 'less than an hour'
@@ -46,15 +57,12 @@ function describeRemaining(suspendsAt: string | null, now: number) {
 }
 
 function StandingBadge({ billing }: { billing: RestaurantBillingStanding }) {
-  const tone = billing.standing === 'Suspended'
-    ? 'error'
-    : billing.standing === 'PastDue'
-      ? 'warning'
-      : 'ok'
+  const behind = billing.standing === 'PastDue' || billing.standing === 'Suspended'
+  const tone = billing.blocksOrdering ? 'error' : behind ? 'warning' : 'ok'
 
-  const label = billing.standing === 'Suspended'
+  const label = billing.blocksOrdering
     ? 'Online ordering paused'
-    : billing.standing === 'PastDue'
+    : behind
       ? 'Payment due'
       : billing.standing === 'Current'
         ? 'Paid up'
@@ -82,7 +90,10 @@ export function AdminBillingPage() {
   const { user } = useAuth()
   const printing = useRestaurantPrinting()
   const [searchParams, setSearchParams] = useSearchParams()
-  const restaurantId = user?.restaurantId ?? printing.activeRestaurantId ?? null
+  // A restaurant admin has one. A platform owner has none of their own, and arrives from a warning
+  // that names the shop it is about, so the link carries it.
+  const restaurantId =
+    searchParams.get('restaurantId') ?? user?.restaurantId ?? printing.activeRestaurantId ?? null
   const [operations, setOperations] = useState<RestaurantOperations | null>(null)
   // Nothing to wait for when there is no restaurant, so the page starts settled rather than
   // flashing a spinner it would have to clear synchronously.
@@ -240,7 +251,7 @@ export function AdminBillingPage() {
         </CardHeader>
 
         <CardContent className="admin-billing-body">
-          {billing.standing === 'Suspended' ? (
+          {billing.blocksOrdering ? (
             <p className="admin-billing-alert" data-tone="error">
               <AlertTriangle size={16} />
               <span>
@@ -250,13 +261,25 @@ export function AdminBillingPage() {
             </p>
           ) : null}
 
-          {billing.standing === 'PastDue' && remaining ? (
-            <p className="admin-billing-alert" data-tone="warning">
+          {!billing.blocksOrdering && owes ? (
+            <p className="admin-billing-alert" data-tone={remaining ? 'warning' : 'error'}>
               <AlertTriangle size={16} />
-              <span>
-                Online ordering stops in <strong>{remaining}</strong>
-                {billing.suspendsAt ? ` — ${formatMoment(billing.suspendsAt)}` : null}.
-              </span>
+              {remaining ? (
+                <span>
+                  Online ordering stops in <strong>{remaining}</strong>
+                  {billing.suspendsAt
+                    ? ` — ${formatMoment(billing.suspendsAt, billing.timezone)}, restaurant time`
+                    : null}.
+                </span>
+              ) : (
+                <span>
+                  This account is <strong>overdue</strong>
+                  {billing.suspendsAt
+                    ? `. Payment was due ${formatMoment(billing.suspendsAt, billing.timezone)}, restaurant time`
+                    : null}
+                  . Online ordering can be paused at any time until it is settled.
+                </span>
+              )}
             </p>
           ) : null}
 
@@ -288,13 +311,14 @@ export function AdminBillingPage() {
             {billing.currentPeriodEndAt ? (
               <div>
                 <dt>{billing.subscriptionCancelAtPeriodEnd ? 'Ends' : 'Renews'}</dt>
-                <dd>{formatMoment(billing.currentPeriodEndAt)}</dd>
+                <dd>{formatMoment(billing.currentPeriodEndAt, billing.timezone)}</dd>
               </div>
             ) : null}
           </dl>
 
           <div className="admin-billing-actions">
-            {billing.model === 'OneTimeActivation' && billing.standing !== 'Current' ? (
+            {billing.model === 'OneTimeActivation' && billing.standing !== 'Current'
+              && billing.standing !== 'NotBilled' ? (
               <Button
                 type="button"
                 onClick={() => void goToStripe(createRestaurantPlatformFeeCheckout, 'Could not start checkout')}

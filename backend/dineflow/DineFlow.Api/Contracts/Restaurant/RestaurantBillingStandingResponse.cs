@@ -30,6 +30,17 @@ public sealed class RestaurantBillingStandingResponse
     /// </summary>
     public DateTime? SuspendsAt { get; set; }
 
+    /// <summary>
+    /// The restaurant's own time zone, which is the one <see cref="SuspendsAt"/> was chosen in.
+    /// </summary>
+    /// <remarks>
+    /// Suspension is held to the small hours of the restaurant's morning, so the instant only reads
+    /// correctly on the restaurant's clock. Rendered in the reader's zone instead — a platform owner
+    /// in another state, say — the same instant shows an hour that means nothing, in a sentence
+    /// about when somebody's business stops.
+    /// </remarks>
+    public string Timezone { get; set; } = "UTC";
+
     /// <summary>The date this restaurant was told enforcement would begin. Null means never.</summary>
     public DateTime? EnforcedFrom { get; set; }
 

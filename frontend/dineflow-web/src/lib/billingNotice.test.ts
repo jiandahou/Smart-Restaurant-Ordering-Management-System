@@ -11,6 +11,7 @@ function standing(overrides: Partial<RestaurantBillingStanding> = {}): Restauran
     standing: 'PastDue',
     delinquentSince: new Date(now - 20 * 24 * 60 * 60 * 1000).toISOString(),
     suspendsAt: inFuture(10 * 24 * 60 * 60 * 1000),
+    timezone: 'Australia/Adelaide',
     enforcedFrom: null,
     factsSyncedAt: new Date(now).toISOString(),
     subscriptionStatus: null,
@@ -97,8 +98,12 @@ describe('buildBillingNotice', () => {
     expect(notice.title).not.toMatch(/days|hours/)
   })
 
-  /** A deadline already passed must not render as a countdown running backwards. */
-  it('treats an elapsed deadline as no time left', () => {
+  /**
+   * A deadline already behind us, with ordering still on, means enforcement is not switched on for
+   * this restaurant yet. Counting down to a past date reads as broken; clamping it to "less than an
+   * hour" is a deadline that never arrives.
+   */
+  it('calls an elapsed deadline overdue rather than counting down to it', () => {
     const notice = buildBillingNotice(
       standing({ suspendsAt: new Date(now - 60_000).toISOString() }),
       null,
@@ -106,7 +111,7 @@ describe('buildBillingNotice', () => {
     )!
 
     expect(notice.severity).toBe('error')
-    expect(notice.title).toContain('less than an hour')
-    expect(notice.title).not.toContain('-')
+    expect(notice.title).toContain('overdue')
+    expect(notice.title).not.toMatch(/hour|day/)
   })
 })

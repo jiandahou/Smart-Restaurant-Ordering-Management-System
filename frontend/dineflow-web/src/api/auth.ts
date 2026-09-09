@@ -390,6 +390,16 @@ export type RestaurantBillingStanding = {
    * </p>
    */
   suspendsAt: string | null
+  /**
+   * The restaurant's own time zone, which is the one `suspendsAt` was chosen in.
+   *
+   * <p>
+   * Suspension is held to the small hours of the restaurant's morning, so that instant only reads
+   * correctly on the restaurant's clock — rendered in the reader's zone it shows an hour that means
+   * nothing, in a sentence about when somebody's business stops.
+   * </p>
+   */
+  timezone: string
   /** The date this restaurant was told enforcement would begin. Null means never. */
   enforcedFrom: string | null
   /** When these facts were last confirmed with Stripe, or null if never. */

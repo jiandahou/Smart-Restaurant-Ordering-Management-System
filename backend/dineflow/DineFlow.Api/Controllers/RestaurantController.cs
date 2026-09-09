@@ -61,6 +61,7 @@ public class RestaurantController : ControllerBase
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly ReportLogWriter _reportLogWriter;
     private readonly RestaurantOperatingHoursService _restaurantOperatingHoursService;
+    private readonly PlatformBillingPresenter _platformBillingPresenter;
     private readonly IStripeClient _stripeClient;
     private readonly StripeOptions _stripeOptions;
     private readonly ILogger<RestaurantController> _logger;
@@ -70,6 +71,7 @@ public class RestaurantController : ControllerBase
         UserManager<ApplicationUser> userManager,
         ReportLogWriter reportLogWriter,
         RestaurantOperatingHoursService restaurantOperatingHoursService,
+        PlatformBillingPresenter platformBillingPresenter,
         IStripeClient stripeClient,
         IOptions<StripeOptions> stripeOptions,
         ILogger<RestaurantController> logger)
@@ -78,6 +80,7 @@ public class RestaurantController : ControllerBase
         _userManager = userManager;
         _reportLogWriter = reportLogWriter;
         _restaurantOperatingHoursService = restaurantOperatingHoursService;
+        _platformBillingPresenter = platformBillingPresenter;
         _stripeClient = stripeClient;
         _stripeOptions = stripeOptions.Value;
         _logger = logger;
@@ -224,7 +227,7 @@ public class RestaurantController : ControllerBase
                 item.Billing.FactsSyncedAt,
                 item.Timezone);
 
-            item.Billing = PlatformBillingPresenter.Describe(
+            item.Billing = _platformBillingPresenter.Describe(
                 billingSnapshot,
                 item.Billing.AmountDueCents,
                 item.Billing.Currency,

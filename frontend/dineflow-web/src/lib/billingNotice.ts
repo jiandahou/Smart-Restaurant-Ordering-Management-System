@@ -74,11 +74,20 @@ export function buildBillingNotice(
     }
   }
 
-  // A clock running backwards would mean the deadline passed without the standing catching up.
-  // Treat that as no time left rather than as a negative countdown.
-  const remainingMs = Math.max(0, suspendsAt - now)
+  const remainingMs = suspendsAt - now
   if (remainingMs > billingNoticeLeadTimeMs) {
     return null
+  }
+
+  // The deadline has passed and ordering is still on — enforcement is not switched on for this
+  // restaurant yet. Counting down to a date already behind us would read as broken, and clamping it
+  // to "less than an hour" would be a deadline that never arrives.
+  if (remainingMs <= 0) {
+    return {
+      severity: 'error',
+      title: `${prefix}platform account is overdue`,
+      message: 'Online ordering can be paused at any time until it is settled.',
+    }
   }
 
   return {
