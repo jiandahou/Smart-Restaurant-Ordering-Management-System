@@ -34,6 +34,7 @@ const AdminMenuPage = lazy(() => import('./pages/AdminMenuPage').then((module) =
 const AdminOrdersPage = lazy(() => import('./pages/AdminOrdersPage').then((module) => ({ default: module.AdminOrdersPage })))
 const AdminPaymentsPage = lazy(() => import('./pages/AdminPaymentsPage').then((module) => ({ default: module.AdminPaymentsPage })))
 const AdminReportsPage = lazy(() => import('./pages/AdminReportsPage').then((module) => ({ default: module.AdminReportsPage })))
+const AdminBillingPage = lazy(() => import('./pages/AdminBillingPage').then((module) => ({ default: module.AdminBillingPage })))
 const AdminRestaurantsPage = lazy(() => import('./pages/AdminRestaurantsPage').then((module) => ({ default: module.AdminRestaurantsPage })))
 const AdminPrivacyRequestsPage = lazy(() => import('./pages/AdminPrivacyRequestsPage').then((module) => ({ default: module.AdminPrivacyRequestsPage })))
 const AdminUsersPage = lazy(() => import('./pages/AdminUsersPage').then((module) => ({ default: module.AdminUsersPage })))
@@ -117,6 +118,7 @@ function App() {
                   <Route path="/admin/restaurants" element={<AdminRestaurantsPage />} />
                   <Route path="/admin/menu" element={<AdminMenuPage />} />
                   <Route path="/admin/payments" element={<AdminPaymentsPage />} />
+                  <Route path="/admin/billing" element={<AdminBillingPage />} />
                   <Route path="/admin/reports" element={<AdminReportsPage />} />
                 </Route>
               </Route>

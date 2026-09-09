@@ -26,7 +26,7 @@ import {
   BellOff,
   BellRing,
   Volume2,
-  VolumeX,
+  VolumeX, Wallet
 } from 'lucide-react'
 import { motion } from 'motion/react'
 import { useTheme } from 'next-themes'
@@ -34,6 +34,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-do
 import { toast } from 'sonner'
 import { useAuth } from '../auth/AuthContext'
 import { adminRoles } from '../auth/postLoginDestination'
+import { buildBillingNotice } from '@/lib/billingNotice'
 import { buildRefundQueueNotice } from '@/lib/refundQueueNotice'
 import { BrandLogo } from '../components/BrandLogo'
 import { DemoIdentitySwitcher } from '../components/DemoIdentitySwitcher'
@@ -132,6 +133,11 @@ const adminLinks = [
       { to: '/admin/payments#refund-requests', label: 'Refund requests' },
       { to: '/admin/payments#refund-records', label: 'Refund records' },
     ],
+  },
+  {
+    to: '/admin/billing',
+    label: 'Billing',
+    icon: Wallet,
   },
   {
     to: '/admin/reports',
@@ -377,6 +383,44 @@ export function AppLayout() {
           onAction: () => navigate(
             `/admin/payments?view=requests&requestStatus=Pending&restaurant=${queue.id}`,
           ),
+        })
+      })
+    }
+
+    // Read from the same two places the payment warnings are, for the same reason: the platform
+    // owner is assigned to no restaurant, so their own operations record is always empty and the
+    // restaurants list is the only thing that knows.
+    if (canUseAdminTools) {
+      const billingSources = printing.isPlatformOwner && !printing.activeRestaurantId
+        ? printing.printRestaurants
+            .filter((restaurant) => restaurant.isActive)
+            .map((restaurant) => ({
+              id: restaurant.id,
+              name: restaurant.name,
+              billing: restaurant.billing ?? null,
+            }))
+        : printing.activeRestaurantOperations
+          ? [{
+              id: printing.activeRestaurantOperations.id,
+              name: printing.activeRestaurantOperations.name,
+              billing: printing.activeRestaurantOperations.billing,
+            }]
+          : []
+
+      billingSources.forEach((source) => {
+        const notice = buildBillingNotice(
+          source.billing,
+          billingSources.length > 1 ? source.name : null,
+        )
+        if (!notice) return
+
+        notices.push({
+          id: `platform-billing-${source.id}`,
+          severity: notice.severity,
+          title: notice.title,
+          message: notice.message,
+          actionLabel: 'Open billing',
+          onAction: () => navigate('/admin/billing'),
         })
       })
     }

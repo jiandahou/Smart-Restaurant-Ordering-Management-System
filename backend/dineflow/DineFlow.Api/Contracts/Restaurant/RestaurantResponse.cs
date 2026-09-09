@@ -46,6 +46,16 @@ public class RestaurantResponse
     /// <summary>When the longest-waiting of those was filed, or null when none are waiting.</summary>
     public DateTime? OldestPendingRefundRequestAt { get; set; }
 
+    /// <summary>
+    /// Where this restaurant stands with the platform.
+    /// </summary>
+    /// <remarks>
+    /// On the list as well as on the operations record, for the same reason the pending refund
+    /// count is: the platform owner is assigned to no restaurant, so their own operations record is
+    /// always empty and this list is the only thing that knows.
+    /// </remarks>
+    public RestaurantBillingStandingResponse Billing { get; set; } = new();
+
     public decimal OrderPlatformFeePercent { get; set; }
 
     public long OneTimePlatformFeeCents { get; set; }
@@ -133,6 +143,15 @@ public class RestaurantOperationsResponse
     /// those is on screen.
     /// </remarks>
     public DateTime? OldestPendingRefundRequestAt { get; set; }
+
+    /// <summary>
+    /// Where this restaurant stands with the platform, and when ordering stops if nothing is paid.
+    /// </summary>
+    /// <remarks>
+    /// Rides on the record the console already polls, so the countdown costs no new request and
+    /// refreshes on the same minute, focus and invalidation as everything else on that panel.
+    /// </remarks>
+    public RestaurantBillingStandingResponse Billing { get; set; } = new();
 }
 
 /// <summary>

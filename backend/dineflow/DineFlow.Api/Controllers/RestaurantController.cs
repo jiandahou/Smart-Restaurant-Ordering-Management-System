@@ -9,6 +9,7 @@ using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Payments;
+using DineFlow.Infrastructure.Billing;
 using DineFlow.Infrastructure.Persistence;
 using DineFlow.Infrastructure.Restaurant;
 using Microsoft.AspNetCore.Authorization;
@@ -180,6 +181,16 @@ public class RestaurantController : ControllerBase
                     request.RestaurantId == restaurant.Id
                     && request.Status == PaymentRefundRequestStatus.Pending)
                 .Min(request => (DateTime?)request.CreatedAt),
+            // The raw facts only. What they mean is decided below, where the rule can run.
+            Billing = new RestaurantBillingStandingResponse
+            {
+                Model = restaurant.PlatformBillingModel.ToString(),
+                DelinquentSince = restaurant.PlatformBillingDelinquentSince,
+                EnforcedFrom = restaurant.PlatformBillingEnforcedFrom,
+                FactsSyncedAt = restaurant.PlatformBillingSyncedAt,
+                Currency = restaurant.Currency,
+                AmountDueCents = restaurant.OneTimePlatformFeeCents,
+            },
             OrderPlatformFeePercent = restaurant.OrderPlatformFeeBps / 100m,
             OneTimePlatformFeeCents = restaurant.OneTimePlatformFeeCents,
             OneTimePlatformFeeStatus = restaurant.OneTimePlatformFeeStatus.ToString(),
@@ -205,6 +216,21 @@ public class RestaurantController : ControllerBase
                 item.Timezone,
                 item.OpeningHoursJson,
                 item.SpecialOpeningDaysJson,
+                utcNow);
+
+            // Standing cannot be evaluated inside the projection either, for the same reason.
+            item.Billing = PlatformBillingPresenter.Describe(
+                new PlatformBillingSnapshot(
+                    Enum.Parse<PlatformBillingModel>(item.Billing.Model),
+                    ActivationFeePaid: item.OneTimePlatformFeeStatus == nameof(PlatformSetupFeeStatus.Paid),
+                    SubscriptionStatus: null,
+                    SubscriptionCancelAtPeriodEnd: false,
+                    item.Billing.DelinquentSince,
+                    item.Billing.EnforcedFrom,
+                    item.Billing.FactsSyncedAt,
+                    item.Timezone),
+                item.Billing.AmountDueCents,
+                item.Billing.Currency,
                 utcNow);
 
             item.Availability = new RestaurantAvailabilityResponse

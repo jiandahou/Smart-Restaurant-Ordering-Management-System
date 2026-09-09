@@ -114,7 +114,10 @@ public class RestaurantOperationsController(
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
         return restaurant is null
             ? NotFound(new { message = "Restaurant not found." })
-            : Ok(MapToResponse(restaurant, await GetPendingRefundsAsync(id, cancellationToken)));
+            : Ok(MapToResponse(
+                restaurant,
+                await GetPendingRefundsAsync(id, cancellationToken),
+                DateTime.UtcNow));
     }
 
     [HttpPatch("{id:guid}/auto-accept")]
@@ -149,7 +152,10 @@ public class RestaurantOperationsController(
             before: new { autoAcceptOrders = previousValue },
             after: new { restaurant.AutoAcceptOrders });
         await dbContext.SaveChangesAsync(cancellationToken);
-        return Ok(MapToResponse(restaurant, await GetPendingRefundsAsync(id, cancellationToken)));
+        return Ok(MapToResponse(
+            restaurant,
+            await GetPendingRefundsAsync(id, cancellationToken),
+            DateTime.UtcNow));
     }
 
     private async Task<bool> CanAccessRestaurantAsync(Guid restaurantId)
@@ -198,8 +204,10 @@ public class RestaurantOperationsController(
 
     private static RestaurantOperationsResponse MapToResponse(
         DineFlow.Infrastructure.Restaurant.Restaurant restaurant,
-        (int Count, DateTime? OldestCreatedAt) pendingRefunds) => new()
+        (int Count, DateTime? OldestCreatedAt) pendingRefunds,
+        DateTime utcNow) => new()
     {
+        Billing = PlatformBillingPresenter.Describe(restaurant, utcNow),
         PendingRefundRequestCount = pendingRefunds.Count,
         OldestPendingRefundRequestAt = pendingRefunds.OldestCreatedAt,
         Id = restaurant.Id,

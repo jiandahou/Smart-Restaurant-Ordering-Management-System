@@ -9180,6 +9180,122 @@ button.menu-metric[aria-pressed='true'] {
 }
 
 /* The order's whole refund story: what came back, the latest request, and the ones before it. */
+/* Platform billing: what a restaurant owes DineFlow, and the one button that settles it. */
+.admin-billing {
+  display: grid;
+  gap: 16px;
+}
+
+.admin-billing-title {
+  margin: 0;
+  font-size: 1.35rem;
+  color: var(--text-h);
+}
+
+.admin-billing-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 32px;
+  color: var(--muted-foreground);
+}
+
+.admin-billing-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.billing-standing-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.billing-standing-badge[data-tone="ok"] {
+  border-color: color-mix(in srgb, #10b981 45%, var(--border));
+  background: color-mix(in srgb, #10b981 10%, var(--subtle));
+}
+
+.billing-standing-badge[data-tone="warning"] {
+  border-color: color-mix(in srgb, #f59e0b 55%, var(--border));
+  background: color-mix(in srgb, #f59e0b 12%, var(--subtle));
+}
+
+.billing-standing-badge[data-tone="error"] {
+  border-color: color-mix(in srgb, var(--destructive) 40%, var(--border));
+  background: color-mix(in srgb, var(--destructive) 10%, var(--subtle));
+}
+
+.admin-billing-body {
+  display: grid;
+  gap: 16px;
+}
+
+.admin-billing-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  line-height: 1.45;
+}
+
+.admin-billing-alert[data-tone="warning"] {
+  border-color: color-mix(in srgb, #f59e0b 55%, var(--border));
+  background: color-mix(in srgb, #f59e0b 10%, var(--subtle));
+}
+
+.admin-billing-alert[data-tone="error"] {
+  border-color: color-mix(in srgb, var(--destructive) 40%, var(--border));
+  background: color-mix(in srgb, var(--destructive) 8%, var(--subtle));
+}
+
+.admin-billing-facts {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+}
+
+.admin-billing-facts > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+}
+
+.admin-billing-facts dt {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+.admin-billing-facts dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-billing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .my-order-refunds {
   display: grid;
   gap: 8px;

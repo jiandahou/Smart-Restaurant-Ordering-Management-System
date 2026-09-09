@@ -230,6 +230,7 @@ export type Restaurant = {
   pendingRefundRequestCount?: number
   /** When the longest-waiting of those was filed, or null when none are waiting. */
   oldestPendingRefundRequestAt?: string | null
+  billing?: RestaurantBillingStanding
   orderPlatformFeePercent?: number
   oneTimePlatformFeeCents?: number
   oneTimePlatformFeeStatus?: PlatformFeeStatus
@@ -362,6 +363,43 @@ export type RestaurantAvailability = {
 
 export type RestaurantPaymentPolicy = 'PrepayRequired' | 'PayAtCounterAllowed'
 
+export type PlatformBillingModel = 'None' | 'OneTimeActivation' | 'Subscription'
+
+export type PlatformBillingStanding = 'NotBilled' | 'Current' | 'PastDue' | 'Suspended'
+
+/**
+ * Where a restaurant stands with the platform, in the terms its own staff need.
+ *
+ * <p>
+ * Staff-facing only. It says plainly that money is owed, which is the one thing the diner-facing
+ * availability message never does.
+ * </p>
+ */
+export type RestaurantBillingStanding = {
+  model: PlatformBillingModel
+  standing: PlatformBillingStanding
+  /** When the current spell of owing money began, or null when nothing is owed. */
+  delinquentSince: string | null
+  /**
+   * The moment online ordering stops if nothing is paid.
+   *
+   * <p>
+   * This, not the month mark, is what a countdown counts towards: suspension waits for the small
+   * hours of the restaurant's own morning, so the two are hours apart and only one of them is when
+   * anything actually happens.
+   * </p>
+   */
+  suspendsAt: string | null
+  /** The date this restaurant was told enforcement would begin. Null means never. */
+  enforcedFrom: string | null
+  /** When these facts were last confirmed with Stripe, or null if never. */
+  factsSyncedAt: string | null
+  amountDueCents: number
+  currency: string
+  blocksOrdering: boolean
+  message: string
+}
+
 export type RestaurantOperations = {
   id: string
   name: string
@@ -372,6 +410,7 @@ export type RestaurantOperations = {
   pendingRefundRequestCount: number
   /** When the longest-waiting of those was filed, or null when none are waiting. */
   oldestPendingRefundRequestAt: string | null
+  billing: RestaurantBillingStanding
 }
 
 export type RestaurantListParams = {
