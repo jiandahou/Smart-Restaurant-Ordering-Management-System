@@ -882,12 +882,33 @@ public class PublicCartsController(
                 return Conflict(new { message = "Cart was submitted but the order could not be found." });
             }
 
+            // The secret is handed over exactly once, in a response that may be the one that never
+            // arrived — which is precisely the situation this branch exists for. A guest recovering
+            // their order would otherwise be able to pay for it and never look at it again, because
+            // the only credential it had was lost in transit.
+            //
+            // Reissued rather than recovered: only the hash is kept, by design. Safe because the
+            // caller has just proved the same cart participation that earned them the first one,
+            // and they store what comes back — so the token they hold and the hash on the order
+            // stay the same one.
+            var reissued = string.IsNullOrWhiteSpace(existingOrder.CustomerId)
+                ? GuestAccessTokenService.Issue()
+                : default((string Token, string Hash)?);
+
+            if (reissued is not null)
+            {
+                existingOrder.GuestAccessTokenHash = reissued.Value.Hash;
+                existingOrder.UpdatedAt = DateTime.UtcNow;
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
+
             await transaction.CommitAsync(cancellationToken);
 
             return Ok(new CheckoutCartResponse
             {
                 Message = "Order was already submitted.",
-                Order = MapOrder(existingOrder)
+                Order = MapOrder(existingOrder),
+                GuestAccessToken = reissued?.Token
             });
         }
 

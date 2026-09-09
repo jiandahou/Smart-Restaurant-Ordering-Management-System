@@ -47,6 +47,8 @@ import {
   updateCartNote,
   type Cart,
   type CartItem,
+  type CheckoutCartResponse,
+  type SubmittedOrder,
 } from '@/api/carts'
 import type { AuthUser } from '@/api/auth'
 import { cancelCustomerOrder, getGuestOrders, getMyOrders } from '@/api/auth'
@@ -573,6 +575,29 @@ export function CustomerMenuPage() {
           : `table:${qrToken}`
         const cartSession = await loadOrJoinCart(context, storageKeySuffix, orderType, cartIdentity)
 
+        // A checkout that was interrupted after the server committed it. The order exists; take the
+        // customer to it rather than showing them a menu they have already ordered from.
+        if (cartSession.recoveredOrder) {
+          rememberGuestOrder(
+            cartSession.recoveredOrder.order.id,
+            cartSession.recoveredOrder.guestAccessToken ?? null,
+          )
+          toast.info('Your order was already placed', {
+            description: 'The last attempt went through even though the page did not say so.',
+          })
+          navigate('/checkout', {
+            state: buildCheckoutNavigation(
+              { ...context, orderType },
+              cartSession.cart,
+              cartSession.participantToken,
+              cartSession.recoveredOrder.order,
+              qrToken,
+            ),
+            replace: true,
+          })
+          return
+        }
+
         setState({
           status: 'ready',
           context: { ...context, orderType },
@@ -602,7 +627,7 @@ export function CustomerMenuPage() {
     }
     // cartIdentity is a dependency on purpose: signing in or out has to rebuild the cart session,
     // not carry the previous person's participant into the new one.
-  }, [restaurantId, qrToken, requestedOrderType, retryKey, cartIdentity])
+  }, [restaurantId, qrToken, requestedOrderType, retryKey, cartIdentity, navigate])
 
   useEffect(() => {
     latestCartRef.current = state.status === 'ready' ? state.cart : null
@@ -1446,28 +1471,8 @@ export function CustomerMenuPage() {
       })
       // Only chance to capture the token; it is never returned again.
       rememberGuestOrder(result.order.id, result.guestAccessToken ?? null)
-      const returnPath = qrToken
-        ? `/table/${encodeURIComponent(qrToken)}`
-        : buildRestaurantMenuPath(context.restaurant.id, cart.orderType)
-
       navigate('/checkout', {
-        state: {
-          order: result.order,
-          cartId: cart.id,
-          participantToken,
-          currency: context.restaurant.currency,
-          restaurantName: context.restaurant.name,
-          restaurantLegalBusinessName: context.restaurant.legalBusinessName,
-          restaurantAbn: context.restaurant.abn,
-          gstRegistered: context.restaurant.gstRegistered,
-          pricesIncludeGst: context.restaurant.pricesIncludeGst,
-          refundContactEmail: context.restaurant.refundContactEmail,
-          customerSurchargeNotice: context.restaurant.customerSurchargeNotice,
-          tableNumber: context.table?.tableNumber ?? null,
-          paymentPolicy: context.restaurant.paymentPolicy,
-          onlinePaymentsEnabled: context.restaurant.onlinePaymentsEnabled,
-          returnPath,
-        } satisfies CheckoutNavigationState,
+        state: buildCheckoutNavigation(context, cart, participantToken, result.order, qrToken),
       })
     } catch (error) {
       setCheckingOut(false)
@@ -1788,12 +1793,62 @@ export function CustomerMenuPage() {
   )
 }
 
+/**
+ * Where a placed order sends the customer, and with what.
+ *
+ * <p>
+ * Shared by the checkout button and by recovery, because they are the same arrival: an order
+ * exists and the customer has to be standing in front of it. Two copies of this would differ the
+ * first time one of them gained a field.
+ * </p>
+ */
+function buildCheckoutNavigation(
+  context: PublicOrderingContext,
+  cart: Cart,
+  participantToken: string,
+  order: SubmittedOrder,
+  qrToken: string | undefined,
+): CheckoutNavigationState {
+  return {
+    order,
+    cartId: cart.id,
+    participantToken,
+    currency: context.restaurant.currency,
+    restaurantName: context.restaurant.name,
+    restaurantLegalBusinessName: context.restaurant.legalBusinessName,
+    restaurantAbn: context.restaurant.abn,
+    gstRegistered: context.restaurant.gstRegistered,
+    pricesIncludeGst: context.restaurant.pricesIncludeGst,
+    refundContactEmail: context.restaurant.refundContactEmail,
+    customerSurchargeNotice: context.restaurant.customerSurchargeNotice,
+    tableNumber: context.table?.tableNumber ?? null,
+    paymentPolicy: context.restaurant.paymentPolicy,
+    onlinePaymentsEnabled: context.restaurant.onlinePaymentsEnabled,
+    returnPath: qrToken
+      ? `/table/${encodeURIComponent(qrToken)}`
+      : buildRestaurantMenuPath(context.restaurant.id, cart.orderType),
+  }
+}
+
 async function loadOrJoinCart(
   context: PublicOrderingContext,
   storageKeySuffix: string,
   orderType: 'DineIn' | 'Takeaway',
   identity: string,
-): Promise<{ cart: Cart; participantToken: string; participantId: string }> {
+): Promise<{
+  cart: Cart
+  participantToken: string
+  participantId: string
+  /**
+   * The order a previous checkout placed, when this cart turns out to have already produced one.
+   *
+   * <p>
+   * Set only on recovery. Its presence means the customer should be taken to their order rather
+   * than shown a menu, because the thing they were trying to do already happened.
+   * </p>
+   */
+  recoveredOrder?: CheckoutCartResponse
+}> {
   if (!context.restaurant.isOrderingAvailable) {
     throw new Error(context.restaurant.orderingStatusMessage)
   }
@@ -1814,6 +1869,29 @@ async function loadOrJoinCart(
           cart,
           participantToken: stored.participantToken,
           participantId: stored.participantId,
+        }
+      }
+
+      // The cart already produced an order. That happens when a checkout was interrupted after the
+      // server had committed it — the answer never arrived, and the customer reloaded instead of
+      // pressing the button again.
+      //
+      // Falling through here started a fresh, empty cart and left that order in the kitchen with
+      // nobody able to see it: no order number on screen, no way back to it, and twenty minutes
+      // later the sweeper cancelled it. Submitting again is how the server hands the order back —
+      // one cart can only ever produce one — so ask for it rather than pretending it is not there.
+      if (cart.status === 'Submitted') {
+        const recoveredOrder = await checkoutCart(cart.id, stored.participantToken, {
+          acceptedCustomerTermsVersion: LEGAL_VERSIONS.customerTerms,
+          acknowledgedPrivacyPolicyVersion: LEGAL_VERSIONS.privacyPolicy,
+          acknowledgedAllergenNoticeVersion: LEGAL_VERSIONS.allergenNotice,
+        })
+
+        return {
+          cart,
+          participantToken: stored.participantToken,
+          participantId: stored.participantId,
+          recoveredOrder,
         }
       }
     } catch (error) {
