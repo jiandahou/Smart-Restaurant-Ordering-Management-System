@@ -22,6 +22,7 @@ public sealed class OrderRefundProcessor
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
     private readonly PaymentNotificationService _paymentNotificationService;
     private readonly ReportLogWriter _reportLogWriter;
+    private readonly RefundedOrderCloser _refundedOrderCloser;
     private readonly ILogger<OrderRefundProcessor> _logger;
 
     private enum PendingRefundReconciliationOutcome
@@ -45,6 +46,7 @@ public sealed class OrderRefundProcessor
         OrderRealtimeNotifier orderRealtimeNotifier,
         PaymentNotificationService paymentNotificationService,
         ReportLogWriter reportLogWriter,
+        RefundedOrderCloser refundedOrderCloser,
         ILogger<OrderRefundProcessor> logger)
     {
         _dbContext = dbContext;
@@ -53,6 +55,7 @@ public sealed class OrderRefundProcessor
         _orderRealtimeNotifier = orderRealtimeNotifier;
         _paymentNotificationService = paymentNotificationService;
         _reportLogWriter = reportLogWriter;
+        _refundedOrderCloser = refundedOrderCloser;
         _logger = logger;
     }
 
@@ -285,6 +288,11 @@ public sealed class OrderRefundProcessor
             }
 
             ApplyRefundAggregateStatus(order, payment, refund, completedAt);
+            await _refundedOrderCloser.CloseIfFullyRefundedAsync(
+                order,
+                requestedByUserId,
+                completedAt,
+                cancellationToken);
             await SynchronizeRefundRequestsAsync(refund, completedAt, cancellationToken);
 
             _reportLogWriter.AddAudit(
@@ -633,6 +641,11 @@ public sealed class OrderRefundProcessor
             }
 
             ApplyRefundAggregateStatus(order, payment, pendingRefund, reconciledAt);
+            await _refundedOrderCloser.CloseIfFullyRefundedAsync(
+                order,
+                actorUserId: null,
+                reconciledAt,
+                cancellationToken);
             await SynchronizeRefundRequestsAsync(pendingRefund, reconciledAt, cancellationToken);
             await _dbContext.SaveChangesAsync(cancellationToken);
             _logger.LogInformation(

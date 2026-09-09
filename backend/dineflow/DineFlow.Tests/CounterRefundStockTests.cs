@@ -1,3 +1,4 @@
+using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Payments;
@@ -18,9 +19,11 @@ namespace DineFlow.Tests;
 /// everyone else until somebody happens to cancel the order, and nothing obliges anyone to.
 /// </para>
 /// <para>
-/// Refunding is still not cancelling. The order keeps whatever status staff left it in, and they are
-/// told separately to close it. This is only about not holding food hostage to a step that may
-/// never be taken.
+/// The dividing line is whether anything has been handed over, which is the rule
+/// <see cref="DineFlow.Infrastructure.Orders.RefundedOrderClosure"/> already wrote down and only
+/// one refund path was applying. Nothing has left the pass while an order is accepted, so a full
+/// refund there means the order is off and its portions go back with it. Once it is ready the food
+/// exists, and rewriting that as cancelled would record a day the kitchen did not have.
 /// </para>
 /// </remarks>
 public sealed class CounterRefundStockTests : IAsyncLifetime
@@ -30,6 +33,7 @@ public sealed class CounterRefundStockTests : IAsyncLifetime
     private Guid _paymentId;
     private Guid _menuItemId;
 
+    private const string CashierId = "counter-refund-cashier";
     private const long PaymentAmountCents = 5_000;
     private const int StartingStock = 10;
     private const int OrderedQuantity = 3;
@@ -101,6 +105,15 @@ public sealed class CounterRefundStockTests : IAsyncLifetime
             PaidAt = DateTime.UtcNow,
         };
 
+        // Real, because closing an order writes a status history row that references the actor —
+        // a fake id fails the refund outright, which is itself worth knowing.
+        context.Users.Add(new ApplicationUser
+        {
+            Id = CashierId,
+            UserName = "cashier@test.local",
+            NormalizedUserName = "CASHIER@TEST.LOCAL",
+            Email = "cashier@test.local",
+        });
         context.Restaurants.Add(restaurant);
         context.MenuCategories.Add(category);
         context.MenuItems.Add(menuItem);
@@ -135,7 +148,7 @@ public sealed class CounterRefundStockTests : IAsyncLifetime
             payment,
             order,
             amountCents,
-            actorUserId: "staff-1",
+            actorUserId: CashierId,
             reason: "customer changed their mind",
             CancellationToken.None);
 
@@ -161,16 +174,39 @@ public sealed class CounterRefundStockTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Refunding is not cancelling. Staff are told separately to close the order, and this must not
-    /// quietly make that decision for them — a status changed by a payment action is a status
-    /// nobody can account for.
+    /// Money and food have to agree. An order refunded in full while still accepted is off, and
+    /// saying so is what stops the kitchen cooking something nobody has paid for.
     /// </summary>
     [RequiresPostgresFact]
-    public async Task AFullRefundDoesNotCloseTheOrder()
+    public async Task AFullRefundBeforeAnythingIsHandedOverClosesTheOrder()
     {
         await RefundAsync(PaymentAmountCents);
 
-        Assert.Equal(OrderStatus.Accepted, (await ReadAsync()).Status);
+        Assert.Equal(OrderStatus.Cancelled, (await ReadAsync()).Status);
+    }
+
+    /// <summary>
+    /// Once the food exists a full refund is redress after the fact. Rewriting the order as
+    /// cancelled would record something that did not happen, and every report built on the day's
+    /// history would then disagree with the day the kitchen actually had.
+    /// </summary>
+    [RequiresPostgresFact]
+    public async Task AFullRefundAfterTheFoodExistsLeavesTheOrderAlone()
+    {
+        await using (var context = _database.CreateContext())
+        {
+            var ready = await context.Orders.SingleAsync(o => o.Id == _orderId);
+            ready.Status = OrderStatus.Ready;
+            await context.SaveChangesAsync();
+        }
+
+        await RefundAsync(PaymentAmountCents);
+
+        var after = await ReadAsync();
+        Assert.Equal(OrderStatus.Ready, after.Status);
+        // The portions were consumed by food that exists, so they do not come back either.
+        Assert.Equal(StartingStock - OrderedQuantity, after.Stock);
+        Assert.Null(after.ReleasedAt);
     }
 
     /// <summary>
@@ -185,6 +221,7 @@ public sealed class CounterRefundStockTests : IAsyncLifetime
         var after = await ReadAsync();
         Assert.Equal(StartingStock - OrderedQuantity, after.Stock);
         Assert.Null(after.ReleasedAt);
+        Assert.Equal(OrderStatus.Accepted, after.Status);
     }
 
     /// <summary>

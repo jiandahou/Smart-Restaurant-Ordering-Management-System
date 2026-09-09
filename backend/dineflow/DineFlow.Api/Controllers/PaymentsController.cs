@@ -46,6 +46,7 @@ public class PaymentsController : ControllerBase
     private readonly StripeOrderCheckoutService _stripeOrderCheckoutService;
     private readonly PaymentSyncService _paymentSyncService;
     private readonly PlatformSubscriptionService _platformSubscriptionService;
+    private readonly RefundedOrderCloser _refundedOrderCloser;
     private readonly PaymentNotificationService _paymentNotificationService;
     private readonly ReportLogWriter _reportLogWriter;
     private readonly ILogger<PaymentsController> _logger;
@@ -61,6 +62,7 @@ public class PaymentsController : ControllerBase
         StripeOrderCheckoutService stripeOrderCheckoutService,
         PaymentSyncService paymentSyncService,
         PlatformSubscriptionService platformSubscriptionService,
+        RefundedOrderCloser refundedOrderCloser,
         PaymentNotificationService paymentNotificationService,
         ReportLogWriter reportLogWriter,
         ILogger<PaymentsController> logger)
@@ -75,6 +77,7 @@ public class PaymentsController : ControllerBase
         _stripeOrderCheckoutService = stripeOrderCheckoutService;
         _paymentSyncService = paymentSyncService;
         _platformSubscriptionService = platformSubscriptionService;
+        _refundedOrderCloser = refundedOrderCloser;
         _paymentNotificationService = paymentNotificationService;
         _reportLogWriter = reportLogWriter;
         _logger = logger;
@@ -791,7 +794,11 @@ public class PaymentsController : ControllerBase
                     note
                 });
         }
-        CloseOrderIfFullyRefunded(refundRequest.Order, userId, now);
+        await _refundedOrderCloser.CloseIfFullyRefundedAsync(
+            refundRequest.Order,
+            userId,
+            now,
+            cancellationToken);
 
         await _dbContext.SaveChangesAsync(cancellationToken);
 
@@ -3020,50 +3027,6 @@ public class PaymentsController : ControllerBase
     /// line about when this applies — an order already ready or completed keeps its history, because
     /// the food exists and rewriting it as cancelled would record a day that did not happen.
     /// </remarks>
-    private void CloseOrderIfFullyRefunded(Order? order, string? actorUserId, DateTime now)
-    {
-        if (order is null)
-        {
-            return;
-        }
-
-        var paidCents = order.Payments
-            .Where(payment => payment.Status is PaymentStatus.Paid or PaymentStatus.PartiallyRefunded)
-            .Sum(payment => payment.AmountCents);
-        var refundedCents = order.Payments
-            .SelectMany(payment => payment.Refunds)
-            .Where(refund => refund.Status == PaymentRefundStatus.Succeeded)
-            .Sum(refund => refund.AmountCents);
-
-        var closure = RefundedOrderClosure.ClosureFor(order.Status, paidCents, refundedCents);
-
-        if (closure is null)
-        {
-            return;
-        }
-
-        var previousStatus = order.Status;
-        order.Status = closure.Value;
-        order.UpdatedAt = now;
-
-        _dbContext.OrderStatusHistories.Add(new OrderStatusHistory
-        {
-            OrderId = order.Id,
-            PreviousStatus = previousStatus,
-            NewStatus = closure.Value,
-            Action = OrderTransitionAction.Cancel.ToString(),
-            Reason = RefundedOrderClosure.CustomerExplanation,
-            ChangedByUserId = actorUserId,
-            CreatedAt = now,
-        });
-
-        _reportLogWriter.AddOrderEvent(
-            order,
-            "order.closed_after_full_refund",
-            $"{order.OrderNumber}: {previousStatus} -> {closure.Value} after a full refund.",
-            new { previousStatus = previousStatus.ToString(), newStatus = closure.Value.ToString() });
-    }
-
     private static string? BuildApprovalRefundReason(string? customerReason, string? adminNote)
     {
         var parts = new List<string>();

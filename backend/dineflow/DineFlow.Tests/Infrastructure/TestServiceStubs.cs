@@ -19,14 +19,17 @@ public static class TestServiceStubs
         new(
             context,
             CreateOrderRealtimeNotifier(),
-            CreateStockLedger(context),
+            CreateRefundedOrderCloser(context),
             CreateReportLogWriter(context),
             NullLogger<CounterPaymentReversalService>.Instance);
 
-    /// Real, against the real database: a refund that settles an order gives its portions back, and
-    /// a stub here would let that regress unnoticed.
+    /// Real, against the real database: a refund that settles an order closes it and gives its
+    /// portions back, and a stub here would let that regress unnoticed.
     public static OrderStockLedger CreateStockLedger(AppDbContext context) =>
         new(context, new MenuItemStockService(context));
+
+    public static RefundedOrderCloser CreateRefundedOrderCloser(AppDbContext context) =>
+        new(context, CreateStockLedger(context), CreateReportLogWriter(context));
 
     public static OrderRealtimeNotifier CreateOrderRealtimeNotifier() =>
         new(new NoOpHubContext(), NullLogger<OrderRealtimeNotifier>.Instance);
@@ -62,6 +65,7 @@ public static class TestServiceStubs
                 CreateOrderRealtimeNotifier(),
                 CreatePaymentNotificationService(context),
                 reportLogWriter,
+                TestServiceStubs.CreateRefundedOrderCloser(context),
                 NullLogger<OrderRefundProcessor>.Instance),
             reportLogWriter,
             NullLogger<OrderPaymentLanding>.Instance);

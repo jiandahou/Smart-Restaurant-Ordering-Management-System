@@ -21,7 +21,7 @@ public sealed record CounterReversalResult(bool IsSuccess, int StatusCode, strin
 public sealed class CounterPaymentReversalService(
     AppDbContext dbContext,
     OrderRealtimeNotifier orderRealtimeNotifier,
-    OrderStockLedger orderStockLedger,
+    RefundedOrderCloser refundedOrderCloser,
     ReportLogWriter reportLogWriter,
     ILogger<CounterPaymentReversalService> logger)
 {
@@ -178,8 +178,11 @@ public sealed class CounterPaymentReversalService(
             UpdatedAt = now,
             RefundedAt = now
         };
+        // Added to the context only. The refund already names its payment, so EF puts it into that
+        // payment's collection itself — adding it again put the same refund in there twice, and
+        // anything that summed the collection in this same unit of work read double. A partial
+        // refund then looked like a full one.
         dbContext.PaymentRefunds.Add(refund);
-        payment.Refunds.Add(refund);
 
         var totalRefunded = alreadyRefunded + amountCents;
         payment.Status = totalRefunded >= payment.AmountCents
@@ -189,19 +192,12 @@ public sealed class CounterPaymentReversalService(
         order.PaymentStatus = payment.Status;
         order.UpdatedAt = now;
 
-        // A fully refunded order can never be charged or completed — the counter refuses both — so
-        // it can never consume the portions it reserved. Holding them would take that stock off the
-        // menu for everyone else until somebody happened to cancel the order, and nothing obliges
-        // anyone to. Released here, inside the same transaction as the refund, so the money going
-        // back and the portions going back are one act.
-        //
-        // This does not close the order. A refund is a decision about money and cancelling is a
-        // decision about food, and staff are already told to make the second one separately. It
-        // only stops an order that cannot be fulfilled from holding stock while they do.
-        if (payment.Status == PaymentStatus.Refunded)
-        {
-            await orderStockLedger.ReleaseAsync(order, now, cancellationToken);
-        }
+        // Money handed back at the counter settles an order the same way money returned through
+        // Stripe does, so it goes through the same rule: an order refunded in full before anything
+        // left the pass is off, and the portions it reserved go back with it. One refunded after
+        // the food exists keeps its history, because rewriting that as cancelled would record a day
+        // the kitchen did not have. Inside this transaction, so the money and the food agree.
+        await refundedOrderCloser.CloseIfFullyRefundedAsync(order, actorUserId, now, cancellationToken);
 
         reportLogWriter.AddAudit(
             "Payment.CounterRefunded",

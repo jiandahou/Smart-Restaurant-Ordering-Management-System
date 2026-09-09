@@ -94,6 +94,7 @@ public sealed class StripePaymentRecoveryIntegrationTests
             TestServiceStubs.CreateOrderRealtimeNotifier(),
             TestServiceStubs.CreatePaymentNotificationService(),
             TestServiceStubs.CreateReportLogWriter(context),
+            TestServiceStubs.CreateRefundedOrderCloser(context),
             NullLogger<OrderRefundProcessor>.Instance);
 
         var result = await processor.RefundAsync(

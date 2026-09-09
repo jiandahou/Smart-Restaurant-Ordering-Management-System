@@ -126,6 +126,7 @@ builder.Services.AddScoped<MenuItemStockService>();
 builder.Services.AddScoped<OrderStockLedger>();
 builder.Services.AddScoped<OrderAutoAcceptanceService>();
 builder.Services.AddScoped<OrderPaymentLanding>();
+builder.Services.AddScoped<RefundedOrderCloser>();
 builder.Services.AddScoped<OrderRefundProcessor>();
 builder.Services.AddScoped<StripeOrderCheckoutService>();
 builder.Services.AddScoped<PaymentSyncService>();
