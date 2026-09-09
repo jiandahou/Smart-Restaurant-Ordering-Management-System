@@ -14,12 +14,17 @@ namespace DineFlow.Api.Services;
 /// </remarks>
 public static class PlatformBillingPresenter
 {
-    public static RestaurantBillingStandingResponse Describe(RestaurantEntity restaurant, DateTime utcNow) =>
-        Describe(
+    public static RestaurantBillingStandingResponse Describe(RestaurantEntity restaurant, DateTime utcNow)
+    {
+        var described = Describe(
             restaurant.ToBillingSnapshot(),
             restaurant.OneTimePlatformFeeCents,
             restaurant.Currency,
             utcNow);
+
+        described.CurrentPeriodEndAt = restaurant.PlatformSubscriptionCurrentPeriodEndAt;
+        return described;
+    }
 
     public static RestaurantBillingStandingResponse Describe(
         PlatformBillingSnapshot snapshot,
@@ -37,6 +42,8 @@ public static class PlatformBillingPresenter
             SuspendsAt = PlatformBilling.SuspendsAt(snapshot.DelinquentSince, snapshot.Timezone),
             EnforcedFrom = snapshot.EnforcedFrom,
             FactsSyncedAt = snapshot.FactsSyncedAt,
+            SubscriptionStatus = snapshot.SubscriptionStatus,
+            SubscriptionCancelAtPeriodEnd = snapshot.SubscriptionCancelAtPeriodEnd,
             AmountDueCents = AmountDue(snapshot, activationFeeCents, standing),
             Currency = string.IsNullOrWhiteSpace(currency) ? "aud" : currency.ToLowerInvariant(),
             BlocksOrdering = PlatformBilling.BlocksPublicOrdering(standing),

@@ -299,6 +299,16 @@ builder.Services.Configure<StripeOptions>(options =>
         options.BillingPortalReturnUrl,
         $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/admin/billing") ?? string.Empty;
 });
+builder.Services.Configure<PlatformBillingOptions>(
+    builder.Configuration.GetSection(PlatformBillingOptions.SectionName));
+builder.Services.PostConfigure<PlatformBillingOptions>(options =>
+{
+    // Flat env var alongside the section, matching how the Stripe settings are overlaid.
+    if (bool.TryParse(builder.Configuration["PLATFORM_BILLING_ENFORCEMENT_ENABLED"], out var enabled))
+    {
+        options.EnforcementEnabled = enabled;
+    }
+});
 builder.Services.Configure<AvatarStorageOptions>(
     builder.Configuration.GetSection(AvatarStorageOptions.SectionName));
 builder.Services.AddSingleton<IAmazonS3>(serviceProvider =>

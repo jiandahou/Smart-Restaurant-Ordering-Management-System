@@ -132,6 +132,63 @@ public sealed class PlatformBillingReconciliationService(
         await RefreshSubscriptionAsync(restaurant, now, cancellationToken);
 
         DeriveDelinquency(restaurant, now);
+        RecordSuspension(restaurant, reportLogWriter, now);
+    }
+
+    /// <summary>
+    /// Writes down the moment a restaurant went offline, or came back.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The gate does not read this — it recomputes the standing every time it is asked, so a
+    /// restaurant is never offline because of a stale flag. What this is for is the record: an
+    /// audit line naming the day somebody's ordering stopped, and the day it started again, both of
+    /// which will be asked about.
+    /// </para>
+    /// <para>
+    /// Written once per transition rather than once per sweep, so the trail reads as two events
+    /// rather than as a suspension re-announced every five minutes for a month.
+    /// </para>
+    /// </remarks>
+    private static void RecordSuspension(
+        RestaurantEntity restaurant,
+        ReportLogWriter reportLogWriter,
+        DateTime now)
+    {
+        var suspended = restaurant.BillingStanding(now) == PlatformBillingStanding.Suspended;
+
+        if (suspended && restaurant.PlatformBillingSuspendedAt is null)
+        {
+            restaurant.PlatformBillingSuspendedAt = now;
+            restaurant.UpdatedAt = now;
+            reportLogWriter.AddAudit(
+                "Restaurant.PlatformBillingSuspended",
+                "Restaurant",
+                restaurant.Id.ToString(),
+                restaurant.Id,
+                $"Online ordering paused for {restaurant.Name}: the platform account is unpaid.",
+                after: new
+                {
+                    restaurant.PlatformBillingDelinquentSince,
+                    restaurant.PlatformBillingEnforcedFrom,
+                    restaurant.PlatformBillingSyncedAt,
+                },
+                actorOverride: ReportActor.Automation());
+            return;
+        }
+
+        if (!suspended && restaurant.PlatformBillingSuspendedAt is not null)
+        {
+            restaurant.PlatformBillingSuspendedAt = null;
+            restaurant.UpdatedAt = now;
+            reportLogWriter.AddAudit(
+                "Restaurant.PlatformBillingRestored",
+                "Restaurant",
+                restaurant.Id.ToString(),
+                restaurant.Id,
+                $"Online ordering restored for {restaurant.Name}.",
+                actorOverride: ReportActor.Automation());
+        }
     }
 
     /// <summary>

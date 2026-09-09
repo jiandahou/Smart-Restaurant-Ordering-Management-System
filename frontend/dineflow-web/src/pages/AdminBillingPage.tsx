@@ -285,6 +285,12 @@ export function AdminBillingPage() {
                 <dd>Settled. Nothing is outstanding.</dd>
               </div>
             ) : null}
+            {billing.currentPeriodEndAt ? (
+              <div>
+                <dt>{billing.subscriptionCancelAtPeriodEnd ? 'Ends' : 'Renews'}</dt>
+                <dd>{formatMoment(billing.currentPeriodEndAt)}</dd>
+              </div>
+            ) : null}
           </dl>
 
           <div className="admin-billing-actions">

@@ -43,6 +43,15 @@ public sealed class RestaurantBillingStandingResponse
     /// </remarks>
     public DateTime? FactsSyncedAt { get; set; }
 
+    /// <summary>Stripe's own subscription status, or null when there is no subscription.</summary>
+    public string? SubscriptionStatus { get; set; }
+
+    /// <summary>Whether the subscription stops at the end of the period it has already paid for.</summary>
+    public bool SubscriptionCancelAtPeriodEnd { get; set; }
+
+    /// <summary>When the paid-for period ends, or null when there is no subscription.</summary>
+    public DateTime? CurrentPeriodEndAt { get; set; }
+
     /// <summary>What settling it would cost right now, in minor currency units.</summary>
     public long AmountDueCents { get; set; }
 

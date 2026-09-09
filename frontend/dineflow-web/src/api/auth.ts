@@ -394,6 +394,12 @@ export type RestaurantBillingStanding = {
   enforcedFrom: string | null
   /** When these facts were last confirmed with Stripe, or null if never. */
   factsSyncedAt: string | null
+  /** Stripe's own subscription status, or null when there is no subscription. */
+  subscriptionStatus: string | null
+  /** Whether the subscription stops at the end of the period it has already paid for. */
+  subscriptionCancelAtPeriodEnd: boolean
+  /** When the paid-for period ends, or null when there is no subscription. */
+  currentPeriodEndAt: string | null
   amountDueCents: number
   currency: string
   blocksOrdering: boolean

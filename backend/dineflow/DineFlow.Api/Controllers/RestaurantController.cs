@@ -188,6 +188,9 @@ public class RestaurantController : ControllerBase
                 DelinquentSince = restaurant.PlatformBillingDelinquentSince,
                 EnforcedFrom = restaurant.PlatformBillingEnforcedFrom,
                 FactsSyncedAt = restaurant.PlatformBillingSyncedAt,
+                SubscriptionStatus = restaurant.PlatformSubscriptionStatus,
+                SubscriptionCancelAtPeriodEnd = restaurant.PlatformSubscriptionCancelAtPeriodEnd,
+                CurrentPeriodEndAt = restaurant.PlatformSubscriptionCurrentPeriodEndAt,
                 Currency = restaurant.Currency,
                 AmountDueCents = restaurant.OneTimePlatformFeeCents,
             },
@@ -209,6 +212,24 @@ public class RestaurantController : ControllerBase
         var utcNow = DateTime.UtcNow;
         foreach (var item in page.Items)
         {
+            // Neither the standing nor the availability can be evaluated inside the EF projection,
+            // and they are fed the same facts so the list cannot disagree with the shop front.
+            var billingSnapshot = new PlatformBillingSnapshot(
+                Enum.Parse<PlatformBillingModel>(item.Billing.Model),
+                ActivationFeePaid: item.OneTimePlatformFeeStatus == nameof(PlatformSetupFeeStatus.Paid),
+                item.Billing.SubscriptionStatus,
+                item.Billing.SubscriptionCancelAtPeriodEnd,
+                item.Billing.DelinquentSince,
+                item.Billing.EnforcedFrom,
+                item.Billing.FactsSyncedAt,
+                item.Timezone);
+
+            item.Billing = PlatformBillingPresenter.Describe(
+                billingSnapshot,
+                item.Billing.AmountDueCents,
+                item.Billing.Currency,
+                utcNow);
+
             var availability = _restaurantOperatingHoursService.GetAvailability(
                 item.IsActive,
                 item.AcceptingOrders,
@@ -216,22 +237,8 @@ public class RestaurantController : ControllerBase
                 item.Timezone,
                 item.OpeningHoursJson,
                 item.SpecialOpeningDaysJson,
-                utcNow);
-
-            // Standing cannot be evaluated inside the projection either, for the same reason.
-            item.Billing = PlatformBillingPresenter.Describe(
-                new PlatformBillingSnapshot(
-                    Enum.Parse<PlatformBillingModel>(item.Billing.Model),
-                    ActivationFeePaid: item.OneTimePlatformFeeStatus == nameof(PlatformSetupFeeStatus.Paid),
-                    SubscriptionStatus: null,
-                    SubscriptionCancelAtPeriodEnd: false,
-                    item.Billing.DelinquentSince,
-                    item.Billing.EnforcedFrom,
-                    item.Billing.FactsSyncedAt,
-                    item.Timezone),
-                item.Billing.AmountDueCents,
-                item.Billing.Currency,
-                utcNow);
+                utcNow,
+                billingSnapshot);
 
             item.Availability = new RestaurantAvailabilityResponse
             {

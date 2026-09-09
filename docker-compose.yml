@@ -128,6 +128,8 @@ services:
       STRIPE_CONNECT_REFRESH_URL: ${STRIPE_CONNECT_REFRESH_URL:-http://localhost:5173/admin/restaurants?stripeConnect=refresh}
       STRIPE_PLATFORM_FEE_SUCCESS_URL: ${STRIPE_PLATFORM_FEE_SUCCESS_URL:-http://localhost:5173/admin/restaurants?platformFee=success}
       STRIPE_PLATFORM_FEE_CANCEL_URL: ${STRIPE_PLATFORM_FEE_CANCEL_URL:-http://localhost:5173/admin/restaurants?platformFee=cancelled}
+      PlatformBilling__EnforcementEnabled: ${PLATFORM_BILLING_ENFORCEMENT_ENABLED:-false}
+      PLATFORM_BILLING_ENFORCEMENT_ENABLED: ${PLATFORM_BILLING_ENFORCEMENT_ENABLED:-false}
       AvatarStorage__Provider: ${AVATAR_STORAGE_PROVIDER:-S3}
       AvatarStorage__Bucket: ${AVATAR_STORAGE_BUCKET:-dineflow-avatars-local}
       AvatarStorage__Region: ${AVATAR_STORAGE_REGION:-ap-southeast-2}
