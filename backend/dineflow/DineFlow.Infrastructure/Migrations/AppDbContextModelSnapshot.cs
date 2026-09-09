@@ -2132,6 +2132,40 @@ namespace DineFlow.Infrastructure.Migrations
                     b.Property<DateTime?>("PlatformBillingSyncedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("PlatformStripeCustomerId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<bool>("PlatformSubscriptionCancelAtPeriodEnd")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("PlatformSubscriptionCheckoutSessionId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("PlatformSubscriptionCheckoutUrl")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<DateTime?>("PlatformSubscriptionCurrentPeriodEndAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PlatformSubscriptionId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("PlatformSubscriptionIdempotencyKey")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("PlatformSubscriptionPriceId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("PlatformSubscriptionStatus")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<bool>("PricesIncludeGst")
                         .HasColumnType("boolean");
 
@@ -2181,6 +2215,10 @@ namespace DineFlow.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("PlatformBillingModel", "PlatformBillingSyncedAt");
+
+                    b.HasIndex("PlatformStripeCustomerId");
+
+                    b.HasIndex("PlatformSubscriptionId");
 
                     b.HasIndex("StripeAccountId")
                         .IsUnique();

@@ -32,6 +32,8 @@ namespace DineFlow.Api.Services;
 /// </remarks>
 public sealed class PlatformBillingReconciliationService(
     IServiceScopeFactory scopeFactory,
+    IStripeClient stripeClient,
+    PlatformSubscriptionService subscriptions,
     IOptions<StripeOptions> stripeOptions,
     ILogger<PlatformBillingReconciliationService> logger) : BackgroundService
 {
@@ -77,7 +79,6 @@ public sealed class PlatformBillingReconciliationService(
             using var scope = scopeFactory.CreateScope();
             var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             var reportLogWriter = scope.ServiceProvider.GetRequiredService<ReportLogWriter>();
-            var stripeClient = scope.ServiceProvider.GetRequiredService<IStripeClient>();
             var now = DateTime.UtcNow;
             var recheckCutoff = now.Subtract(RecheckCooldown);
 
@@ -92,7 +93,7 @@ public sealed class PlatformBillingReconciliationService(
 
             foreach (var restaurant in restaurants)
             {
-                await ReconcileAsync(restaurant, stripeClient, reportLogWriter, now, cancellationToken);
+                await ReconcileOneAsync(restaurant, reportLogWriter, cancellationToken);
             }
 
             if (restaurants.Count > 0)
@@ -109,18 +110,56 @@ public sealed class PlatformBillingReconciliationService(
         }
     }
 
-    private async Task ReconcileAsync(
+    /// <summary>
+    /// Confirms one restaurant's billing against Stripe and works out where it stands.
+    /// </summary>
+    /// <remarks>
+    /// Public so the same work can be demanded on the spot. Somebody staring at a warning that says
+    /// their ordering is about to stop, who has already paid, should not have to wait out a sweep
+    /// interval or ask an administrator — and the sweep and the button must do the same thing, or
+    /// pressing it becomes its own source of wrong answers. The caller saves.
+    /// </remarks>
+    public async Task ReconcileOneAsync(
         RestaurantEntity restaurant,
-        IStripeClient stripeClient,
         ReportLogWriter reportLogWriter,
-        DateTime now,
         CancellationToken cancellationToken)
     {
+        var now = DateTime.UtcNow;
+
         // Confirm with Stripe first, decide afterwards. Deciding on what we happen to hold is how a
         // missed webhook turns into a suspension.
         await RefreshActivationFeeAsync(restaurant, stripeClient, reportLogWriter, now, cancellationToken);
+        await RefreshSubscriptionAsync(restaurant, now, cancellationToken);
 
         DeriveDelinquency(restaurant, now);
+    }
+
+    /// <summary>
+    /// Re-reads the subscription from Stripe, which is the truth about whether it is being paid.
+    /// </summary>
+    private async Task RefreshSubscriptionAsync(
+        RestaurantEntity restaurant,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        if (restaurant.PlatformBillingModel != PlatformBillingModel.Subscription ||
+            string.IsNullOrWhiteSpace(restaurant.PlatformSubscriptionId))
+        {
+            return;
+        }
+
+        var subscription = await subscriptions.FetchSubscriptionAsync(
+            restaurant.PlatformSubscriptionId,
+            cancellationToken);
+
+        if (subscription is null)
+        {
+            // Leaves the sync stamp alone on purpose: facts that could not be confirmed must go
+            // stale, because staleness is what stops enforcement acting on a guess.
+            return;
+        }
+
+        PlatformSubscriptionService.ApplySubscription(restaurant, subscription, now);
     }
 
     /// <summary>
@@ -137,9 +176,14 @@ public sealed class PlatformBillingReconciliationService(
             restaurant.OneTimePlatformFeePaidAt.HasValue ||
             string.IsNullOrWhiteSpace(restaurant.OneTimePlatformFeeCheckoutSessionId))
         {
-            // Nothing outstanding to ask about. The restaurant is still stamped as checked, because
-            // "we looked and there was nothing owing" is exactly as good a fact as any other.
-            restaurant.PlatformBillingSyncedAt = now;
+            // Nothing outstanding to ask about on this path. Still stamped as checked, because "we
+            // looked and there was nothing owing" is exactly as good a fact as any other — except
+            // for a subscription, whose own refresh below does the stamping when Stripe answers.
+            if (restaurant.PlatformBillingModel != PlatformBillingModel.Subscription)
+            {
+                restaurant.PlatformBillingSyncedAt = now;
+            }
+
             return;
         }
 

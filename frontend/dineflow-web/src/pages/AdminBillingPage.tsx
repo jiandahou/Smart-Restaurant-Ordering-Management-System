@@ -5,6 +5,9 @@ import { toast } from 'sonner'
 import {
   createRestaurantPlatformFeeCheckout,
   getRestaurantOperations,
+  openRestaurantBillingPortal,
+  startRestaurantSubscriptionCheckout,
+  syncRestaurantBilling,
   type RestaurantBillingStanding,
   type RestaurantOperations,
 } from '../api/auth'
@@ -147,21 +150,51 @@ export function AdminBillingPage() {
     [billing?.suspendsAt, now],
   )
 
-  const payActivationFee = async () => {
+  /**
+   * Hands the browser to Stripe, or explains why there was nothing to hand it.
+   *
+   * <p>
+   * Shared by the activation fee, the subscription and the portal, because to the person clicking
+   * they are one action — settle this — and three copies of the same handler is three chances for
+   * one of them to swallow an error the others report.
+   * </p>
+   */
+  const goToStripe = async (
+    start: (id: string) => Promise<{ checkoutUrl?: string | null; message?: string }>,
+    failureTitle: string,
+  ) => {
     if (!restaurantId) return
     setStartingCheckout(true)
 
     try {
-      const response = await createRestaurantPlatformFeeCheckout(restaurantId)
+      const response = await start(restaurantId)
       if (response.checkoutUrl) {
         window.location.assign(response.checkoutUrl)
         return
       }
 
-      toast.info(response.message ?? 'Nothing to pay.')
+      toast.info(response.message ?? 'Nothing to do.')
       await load()
     } catch (error) {
-      toast.error('Could not start checkout', {
+      toast.error(failureTitle, {
+        description: error instanceof Error ? error.message : 'Please try again.',
+      })
+    } finally {
+      setStartingCheckout(false)
+    }
+  }
+
+  const syncFromStripe = async () => {
+    if (!restaurantId) return
+    setStartingCheckout(true)
+
+    try {
+      await syncRestaurantBilling(restaurantId)
+      publishOperationalStatusInvalidated(restaurantId)
+      await load()
+      toast.success('Checked with Stripe')
+    } catch (error) {
+      toast.error('Could not check with Stripe', {
         description: error instanceof Error ? error.message : 'Please try again.',
       })
     } finally {
@@ -256,14 +289,50 @@ export function AdminBillingPage() {
 
           <div className="admin-billing-actions">
             {billing.model === 'OneTimeActivation' && billing.standing !== 'Current' ? (
-              <Button type="button" onClick={() => void payActivationFee()} disabled={startingCheckout}>
+              <Button
+                type="button"
+                onClick={() => void goToStripe(createRestaurantPlatformFeeCheckout, 'Could not start checkout')}
+                disabled={startingCheckout}
+              >
                 {startingCheckout ? <Loader2 className="animate-spin" size={16} /> : <CreditCard size={16} />}
                 Pay activation fee
               </Button>
             ) : null}
-            <Button type="button" variant="outline" onClick={() => void load()}>
+
+            {billing.model === 'Subscription' && billing.standing !== 'Current' ? (
+              <Button
+                type="button"
+                onClick={() => void goToStripe(startRestaurantSubscriptionCheckout, 'Could not start subscription')}
+                disabled={startingCheckout}
+              >
+                {startingCheckout ? <Loader2 className="animate-spin" size={16} /> : <CreditCard size={16} />}
+                Start subscription
+              </Button>
+            ) : null}
+
+            {/* Cards, invoices and cancellation all live in Stripe's portal, so no card number
+                ever reaches DineFlow and the invoice history is already there. */}
+            {billing.model === 'Subscription' && operations?.billing.factsSyncedAt !== null ? (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void goToStripe(openRestaurantBillingPortal, 'Could not open billing portal')}
+                disabled={startingCheckout}
+              >
+                Manage billing
+              </Button>
+            ) : null}
+
+            {/* For the payment whose webhook never arrived. The sweep finds it within the hour;
+                somebody who has already paid should not have to wait that long to be believed. */}
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => void syncFromStripe()}
+              disabled={startingCheckout}
+            >
               <RefreshCw size={16} />
-              Refresh
+              Check with Stripe
             </Button>
           </div>
         </CardContent>

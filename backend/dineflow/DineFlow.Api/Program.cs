@@ -129,6 +129,7 @@ builder.Services.AddScoped<OrderPaymentLanding>();
 builder.Services.AddScoped<OrderRefundProcessor>();
 builder.Services.AddScoped<StripeOrderCheckoutService>();
 builder.Services.AddScoped<PaymentSyncService>();
+builder.Services.AddSingleton<PlatformSubscriptionService>();
 builder.Services.AddScoped<StripeCheckoutSessionExpiry>();
 builder.Services.AddScoped<TransactionalEmailOutbox>();
 builder.Services.AddSingleton<IRetentionArchiveStore, FileSystemRetentionArchiveStore>();
@@ -280,11 +281,23 @@ builder.Services.Configure<StripeOptions>(options =>
     options.PlatformFeeSuccessUrl = FirstConfigured(
         builder.Configuration["STRIPE_PLATFORM_FEE_SUCCESS_URL"],
         options.PlatformFeeSuccessUrl,
-        $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/admin/restaurants?platformFee=success") ?? string.Empty;
+        $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/admin/billing?platformFee=success") ?? string.Empty;
     options.PlatformFeeCancelUrl = FirstConfigured(
         builder.Configuration["STRIPE_PLATFORM_FEE_CANCEL_URL"],
         options.PlatformFeeCancelUrl,
-        $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/admin/restaurants?platformFee=cancelled") ?? string.Empty;
+        $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/admin/billing?platformFee=cancelled") ?? string.Empty;
+    options.SubscriptionSuccessUrl = FirstConfigured(
+        builder.Configuration["STRIPE_SUBSCRIPTION_SUCCESS_URL"],
+        options.SubscriptionSuccessUrl,
+        $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/admin/billing?subscription=success") ?? string.Empty;
+    options.SubscriptionCancelUrl = FirstConfigured(
+        builder.Configuration["STRIPE_SUBSCRIPTION_CANCEL_URL"],
+        options.SubscriptionCancelUrl,
+        $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/admin/billing?subscription=cancelled") ?? string.Empty;
+    options.BillingPortalReturnUrl = FirstConfigured(
+        builder.Configuration["STRIPE_BILLING_PORTAL_RETURN_URL"],
+        options.BillingPortalReturnUrl,
+        $"{FirstConfigured(builder.Configuration["FRONTEND_BASE_URL"], "http://localhost:5173")}/admin/billing") ?? string.Empty;
 });
 builder.Services.Configure<AvatarStorageOptions>(
     builder.Configuration.GetSection(AvatarStorageOptions.SectionName));
@@ -338,7 +351,11 @@ builder.Services
     });
 builder.Services.AddHostedService<UnconfirmedCustomerCleanupService>();
 builder.Services.AddHostedService<PendingStripePaymentReconciliationService>();
-builder.Services.AddHostedService<PlatformBillingReconciliationService>();
+// Registered as itself as well as a hosted service, so the same reconciliation the sweep runs
+// can be demanded on the spot from the billing page.
+builder.Services.AddSingleton<PlatformBillingReconciliationService>();
+builder.Services.AddHostedService(provider =>
+    provider.GetRequiredService<PlatformBillingReconciliationService>());
 builder.Services.AddHostedService<UnacceptableOrderRefundService>();
 builder.Services.AddHostedService<AbandonedOrderExpiryService>();
 

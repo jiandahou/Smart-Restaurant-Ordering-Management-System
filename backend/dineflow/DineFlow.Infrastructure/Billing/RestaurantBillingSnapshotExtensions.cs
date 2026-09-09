@@ -17,10 +17,8 @@ public static class RestaurantBillingSnapshotExtensions
         new(
             restaurant.PlatformBillingModel,
             ActivationFeePaid: restaurant.OneTimePlatformFeePaidAt is not null,
-            // Subscriptions are not issued yet, so this is always null today. The rule already
-            // reads it, which is why the wiring lands here rather than in a later edit to the rule.
-            SubscriptionStatus: null,
-            SubscriptionCancelAtPeriodEnd: false,
+            SubscriptionStatus: restaurant.PlatformSubscriptionStatus,
+            SubscriptionCancelAtPeriodEnd: restaurant.PlatformSubscriptionCancelAtPeriodEnd,
             DelinquentSince: restaurant.PlatformBillingDelinquentSince,
             EnforcedFrom: restaurant.PlatformBillingEnforcedFrom,
             FactsSyncedAt: restaurant.PlatformBillingSyncedAt,
@@ -30,4 +28,16 @@ public static class RestaurantBillingSnapshotExtensions
         this RestaurantEntity restaurant,
         DateTime utcNow) =>
         PlatformBilling.Evaluate(restaurant.ToBillingSnapshot(), utcNow);
+
+    /// <summary>
+    /// Whether the platform is currently being paid, ignoring deadlines entirely.
+    /// </summary>
+    /// <remarks>
+    /// Asked when a payment has just been observed and the only question is whether to stop the
+    /// clock. Deliberately independent of dates, so that clearing a clock never depends on one.
+    /// </remarks>
+    public static bool BillingStandingIsHealthy(this RestaurantEntity restaurant) =>
+        PlatformBilling.Evaluate(
+            restaurant.ToBillingSnapshot() with { DelinquentSince = null, EnforcedFrom = null },
+            DateTime.UtcNow) is PlatformBillingStanding.Current or PlatformBillingStanding.NotBilled;
 }

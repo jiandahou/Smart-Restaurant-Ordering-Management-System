@@ -212,6 +212,18 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(restaurant => restaurant.OneTimePlatformFeeIdempotencyKey)
                 .HasMaxLength(255);
 
+            entity.Property(restaurant => restaurant.PlatformStripeCustomerId).HasMaxLength(255);
+            entity.Property(restaurant => restaurant.PlatformSubscriptionId).HasMaxLength(255);
+            entity.Property(restaurant => restaurant.PlatformSubscriptionStatus).HasMaxLength(32);
+            entity.Property(restaurant => restaurant.PlatformSubscriptionPriceId).HasMaxLength(255);
+            entity.Property(restaurant => restaurant.PlatformSubscriptionCheckoutSessionId).HasMaxLength(255);
+            entity.Property(restaurant => restaurant.PlatformSubscriptionCheckoutUrl).HasMaxLength(2_048);
+            entity.Property(restaurant => restaurant.PlatformSubscriptionIdempotencyKey).HasMaxLength(255);
+
+            // Subscription webhooks arrive knowing a customer or a subscription, not a restaurant.
+            entity.HasIndex(restaurant => restaurant.PlatformStripeCustomerId);
+            entity.HasIndex(restaurant => restaurant.PlatformSubscriptionId);
+
             entity.HasIndex(restaurant => restaurant.StripeAccountId)
                 .IsUnique();
 

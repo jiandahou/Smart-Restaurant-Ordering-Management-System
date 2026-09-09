@@ -25,4 +25,12 @@ public sealed class StripeOptions
     public string PlatformFeeSuccessUrl { get; set; } = string.Empty;
 
     public string PlatformFeeCancelUrl { get; set; } = string.Empty;
+
+    /// <summary>Where Stripe returns a restaurant after starting or declining a subscription.</summary>
+    public string SubscriptionSuccessUrl { get; set; } = string.Empty;
+
+    public string SubscriptionCancelUrl { get; set; } = string.Empty;
+
+    /// <summary>Where the Stripe billing portal returns a restaurant when they are done.</summary>
+    public string BillingPortalReturnUrl { get; set; } = string.Empty;
 }

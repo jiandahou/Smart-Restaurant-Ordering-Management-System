@@ -2548,6 +2548,37 @@ export function runRestaurantStripeDiagnostics(restaurantId: string) {
   })
 }
 
+/** Starts, or hands back, the checkout that begins this restaurant's platform subscription. */
+export function startRestaurantSubscriptionCheckout(restaurantId: string) {
+  return request<PlatformFeeCheckoutResponse>(
+    `/api/restaurant/${restaurantId}/billing/subscription/checkout`,
+    { method: 'POST' },
+  )
+}
+
+/** A link into Stripe's billing portal, where cards, invoices and cancellation live. */
+export function openRestaurantBillingPortal(restaurantId: string) {
+  return request<PlatformFeeCheckoutResponse>(
+    `/api/restaurant/${restaurantId}/billing/portal`,
+    { method: 'POST' },
+  )
+}
+
+/**
+ * Re-reads this restaurant's billing straight from Stripe.
+ *
+ * <p>
+ * The escape hatch for a payment whose webhook never arrived: the sweep would find it within the
+ * hour, but somebody looking at a warning about their ordering stopping should not have to wait.
+ * </p>
+ */
+export function syncRestaurantBilling(restaurantId: string) {
+  return request<RestaurantBillingStanding>(
+    `/api/restaurant/${restaurantId}/billing/sync`,
+    { method: 'POST' },
+  )
+}
+
 export function createRestaurantPlatformFeeCheckout(restaurantId: string) {
   return request<PlatformFeeCheckoutResponse>(`/api/restaurant/${restaurantId}/platform-fee/checkout`, {
     method: 'POST',

@@ -45,6 +45,7 @@ public class PaymentsController : ControllerBase
     private readonly OrderRefundProcessor _orderRefundProcessor;
     private readonly StripeOrderCheckoutService _stripeOrderCheckoutService;
     private readonly PaymentSyncService _paymentSyncService;
+    private readonly PlatformSubscriptionService _platformSubscriptionService;
     private readonly PaymentNotificationService _paymentNotificationService;
     private readonly ReportLogWriter _reportLogWriter;
     private readonly ILogger<PaymentsController> _logger;
@@ -59,6 +60,7 @@ public class PaymentsController : ControllerBase
         OrderRefundProcessor orderRefundProcessor,
         StripeOrderCheckoutService stripeOrderCheckoutService,
         PaymentSyncService paymentSyncService,
+        PlatformSubscriptionService platformSubscriptionService,
         PaymentNotificationService paymentNotificationService,
         ReportLogWriter reportLogWriter,
         ILogger<PaymentsController> logger)
@@ -72,6 +74,7 @@ public class PaymentsController : ControllerBase
         _orderRefundProcessor = orderRefundProcessor;
         _stripeOrderCheckoutService = stripeOrderCheckoutService;
         _paymentSyncService = paymentSyncService;
+        _platformSubscriptionService = platformSubscriptionService;
         _paymentNotificationService = paymentNotificationService;
         _reportLogWriter = reportLogWriter;
         _logger = logger;
@@ -1235,7 +1238,8 @@ public class PaymentsController : ControllerBase
                     await UpdateRestaurantFromStripeAccountAsync(stripeEvent, cancellationToken);
                     break;
                 case "checkout.session.completed":
-                    if (!await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, true, cancellationToken))
+                    if (!await UpdateSubscriptionFromCheckoutSessionAsync(stripeEvent, cancellationToken) &&
+                        !await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, true, cancellationToken))
                     {
                         var checkoutStatus = stripeEvent.Data.Object is Session completedSession &&
                             string.Equals(completedSession.PaymentStatus, "paid", StringComparison.OrdinalIgnoreCase)
@@ -1244,20 +1248,32 @@ public class PaymentsController : ControllerBase
                         await UpdatePaymentFromCheckoutSessionAsync(stripeEvent, checkoutStatus, cancellationToken);
                     }
                     break;
+                case "customer.subscription.created":
+                case "customer.subscription.updated":
+                case "customer.subscription.deleted":
+                    await UpdateRestaurantSubscriptionAsync(stripeEvent, cancellationToken);
+                    break;
+                case "invoice.paid":
+                case "invoice.payment_failed":
+                    await UpdateRestaurantSubscriptionFromInvoiceAsync(stripeEvent, cancellationToken);
+                    break;
                 case "checkout.session.async_payment_succeeded":
-                    if (!await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, true, cancellationToken))
+                    if (!await UpdateSubscriptionFromCheckoutSessionAsync(stripeEvent, cancellationToken) &&
+                        !await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, true, cancellationToken))
                     {
                         await UpdatePaymentFromCheckoutSessionAsync(stripeEvent, PaymentStatus.Paid, cancellationToken);
                     }
                     break;
                 case "checkout.session.async_payment_failed":
-                    if (!await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, false, cancellationToken))
+                    if (!await UpdateSubscriptionFromCheckoutSessionAsync(stripeEvent, cancellationToken) &&
+                        !await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, false, cancellationToken))
                     {
                         await UpdatePaymentFromCheckoutSessionAsync(stripeEvent, PaymentStatus.Failed, cancellationToken);
                     }
                     break;
                 case "checkout.session.expired":
-                    if (!await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, false, cancellationToken))
+                    if (!await UpdateSubscriptionFromCheckoutSessionAsync(stripeEvent, cancellationToken) &&
+                        !await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, false, cancellationToken))
                     {
                         await UpdatePaymentFromCheckoutSessionAsync(stripeEvent, PaymentStatus.Expired, cancellationToken);
                     }
@@ -1658,6 +1674,210 @@ public class PaymentsController : ControllerBase
             },
             actorOverride: ReportActor.Provider(PaymentProviders.Stripe),
             correlationId: stripeEvent.Id);
+    }
+
+    /// <summary>
+    /// Attaches a subscription to the restaurant that just checked out for it.
+    /// </summary>
+    /// <remarks>
+    /// Claimed ahead of the order-payment handler by the same metadata sniff the activation fee
+    /// uses, so a restaurant paying the platform is never mistaken for a diner paying a restaurant.
+    /// </remarks>
+    private async Task<bool> UpdateSubscriptionFromCheckoutSessionAsync(
+        Event stripeEvent,
+        CancellationToken cancellationToken)
+    {
+        if (stripeEvent.Data.Object is not Session session ||
+            !session.Metadata.TryGetValue("mode", out var mode) ||
+            !string.Equals(mode, PlatformSubscriptionService.SessionMode, StringComparison.Ordinal) ||
+            !session.Metadata.TryGetValue("restaurantId", out var restaurantId) ||
+            !Guid.TryParse(restaurantId, out var parsedRestaurantId))
+        {
+            return false;
+        }
+
+        // Charged on the platform account, so its events carry no connected account.
+        if (stripeEvent.Account is not null)
+        {
+            _logger.LogWarning(
+                "Ignored subscription checkout event {EventId} on connected account {StripeAccount}.",
+                stripeEvent.Id,
+                stripeEvent.Account);
+            return true;
+        }
+
+        var restaurant = await _dbContext.Restaurants
+            .FirstOrDefaultAsync(item => item.Id == parsedRestaurantId, cancellationToken);
+
+        if (restaurant is null)
+        {
+            _logger.LogWarning("No restaurant for subscription session {SessionId}.", session.Id);
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(session.CustomerId))
+        {
+            restaurant.PlatformStripeCustomerId = session.CustomerId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(session.SubscriptionId))
+        {
+            restaurant.PlatformSubscriptionId = session.SubscriptionId;
+        }
+
+        // The link has been used; a fresh one is minted if it is ever needed again.
+        restaurant.PlatformSubscriptionCheckoutUrl = null;
+        restaurant.PlatformSubscriptionIdempotencyKey = null;
+        restaurant.PlatformBillingSyncedAt = DateTime.UtcNow;
+        restaurant.UpdatedAt = DateTime.UtcNow;
+
+        _reportLogWriter.AddAudit(
+            "Restaurant.SubscriptionStarted",
+            "Restaurant",
+            restaurant.Id.ToString(),
+            restaurant.Id,
+            $"{restaurant.Name} started a platform subscription.",
+            after: new { sessionId = session.Id, session.SubscriptionId },
+            actorOverride: ReportActor.Provider(PaymentProviders.Stripe),
+            correlationId: stripeEvent.Id);
+        return true;
+    }
+
+    /// <summary>
+    /// Records what Stripe says about a subscription. Facts only — the sweep decides what they mean.
+    /// </summary>
+    private async Task UpdateRestaurantSubscriptionAsync(
+        Event stripeEvent,
+        CancellationToken cancellationToken)
+    {
+        if (stripeEvent.Data.Object is not Subscription subscription)
+        {
+            return;
+        }
+
+        var restaurant = await FindBillingRestaurantAsync(
+            subscription.Metadata,
+            subscription.CustomerId,
+            subscription.Id,
+            cancellationToken);
+
+        if (restaurant is null)
+        {
+            _logger.LogWarning("No restaurant for Stripe subscription {SubscriptionId}.", subscription.Id);
+            return;
+        }
+
+        // A subscription this restaurant has moved on from says nothing about where it stands now.
+        if (!string.IsNullOrWhiteSpace(restaurant.PlatformSubscriptionId) &&
+            !string.Equals(restaurant.PlatformSubscriptionId, subscription.Id, StringComparison.Ordinal))
+        {
+            _logger.LogWarning(
+                "Ignored stale subscription {SubscriptionId} for restaurant {RestaurantId}.",
+                subscription.Id,
+                restaurant.Id);
+            return;
+        }
+
+        PlatformSubscriptionService.ApplySubscription(restaurant, subscription, DateTime.UtcNow);
+
+        _reportLogWriter.AddAudit(
+            "Restaurant.SubscriptionUpdated",
+            "Restaurant",
+            restaurant.Id.ToString(),
+            restaurant.Id,
+            $"{restaurant.Name}'s platform subscription is {subscription.Status}.",
+            after: new { subscription.Id, subscription.Status, subscription.CancelAtPeriodEnd },
+            actorOverride: ReportActor.Provider(PaymentProviders.Stripe),
+            correlationId: stripeEvent.Id);
+    }
+
+    /// <summary>
+    /// An invoice paid or failed. Re-reads the subscription rather than inferring from the invoice.
+    /// </summary>
+    /// <remarks>
+    /// The invoice says an attempt succeeded or failed; the subscription says what that left behind,
+    /// and it is the subscription the rule reads. Asking Stripe for it costs one call and removes a
+    /// whole class of "the invoice failed but the subscription had already recovered" disagreement.
+    /// </remarks>
+    private async Task UpdateRestaurantSubscriptionFromInvoiceAsync(
+        Event stripeEvent,
+        CancellationToken cancellationToken)
+    {
+        if (stripeEvent.Data.Object is not Invoice invoice)
+        {
+            return;
+        }
+
+        var restaurant = await FindBillingRestaurantAsync(
+            invoice.Metadata,
+            invoice.CustomerId,
+            subscriptionId: null,
+            cancellationToken);
+
+        if (restaurant?.PlatformSubscriptionId is null)
+        {
+            return;
+        }
+
+        var subscription = await _platformSubscriptionService.FetchSubscriptionAsync(
+            restaurant.PlatformSubscriptionId,
+            cancellationToken);
+
+        if (subscription is null)
+        {
+            return;
+        }
+
+        PlatformSubscriptionService.ApplySubscription(restaurant, subscription, DateTime.UtcNow);
+
+        _reportLogWriter.AddAudit(
+            stripeEvent.Type == "invoice.paid"
+                ? "Restaurant.SubscriptionInvoicePaid"
+                : "Restaurant.SubscriptionInvoiceFailed",
+            "Restaurant",
+            restaurant.Id.ToString(),
+            restaurant.Id,
+            stripeEvent.Type == "invoice.paid"
+                ? $"{restaurant.Name} paid a platform subscription invoice."
+                : $"A platform subscription payment failed for {restaurant.Name}.",
+            after: new { invoiceId = invoice.Id, subscriptionStatus = subscription.Status },
+            actorOverride: ReportActor.Provider(PaymentProviders.Stripe),
+            correlationId: stripeEvent.Id);
+    }
+
+    /// <summary>
+    /// The restaurant a billing event belongs to: by the id we put on it, else by the customer or
+    /// subscription it names.
+    /// </summary>
+    private async Task<DineFlow.Infrastructure.Restaurant.Restaurant?> FindBillingRestaurantAsync(
+        IDictionary<string, string>? metadata,
+        string? customerId,
+        string? subscriptionId,
+        CancellationToken cancellationToken)
+    {
+        if (metadata is not null &&
+            metadata.TryGetValue("restaurantId", out var restaurantId) &&
+            Guid.TryParse(restaurantId, out var parsed))
+        {
+            return await _dbContext.Restaurants
+                .FirstOrDefaultAsync(item => item.Id == parsed, cancellationToken);
+        }
+
+        if (!string.IsNullOrWhiteSpace(subscriptionId))
+        {
+            var bySubscription = await _dbContext.Restaurants
+                .FirstOrDefaultAsync(item => item.PlatformSubscriptionId == subscriptionId, cancellationToken);
+
+            if (bySubscription is not null)
+            {
+                return bySubscription;
+            }
+        }
+
+        return string.IsNullOrWhiteSpace(customerId)
+            ? null
+            : await _dbContext.Restaurants
+                .FirstOrDefaultAsync(item => item.PlatformStripeCustomerId == customerId, cancellationToken);
     }
 
     private async Task<bool> UpdatePlatformFeeFromCheckoutSessionAsync(
