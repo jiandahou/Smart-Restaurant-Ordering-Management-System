@@ -73,6 +73,8 @@ public sealed class OrderStockLedger(AppDbContext dbContext, MenuItemStockServic
             return false;
         }
 
+        await EnsureItemsLoadedAsync(order, cancellationToken);
+
         await stockService.ReleaseAsync(
             OrderItemStock.RequestedQuantities(order.OrderItems),
             cancellationToken);
@@ -82,6 +84,45 @@ public sealed class OrderStockLedger(AppDbContext dbContext, MenuItemStockServic
 
         order.StockReleasedAt = now;
         return true;
+    }
+
+    /// <summary>
+    /// Makes sure the lines are actually in memory before their quantities are read.
+    /// </summary>
+    /// <remarks>
+    /// The quantities come from the order's navigation property, so a caller that loaded the order
+    /// without its items handed over an empty list — and the release then claimed the row, stamped
+    /// it as released, and gave nothing back. Silent, permanent, and indistinguishable from a
+    /// working release right up until somebody counted the stock.
+    /// <para>
+    /// Loading here rather than asking every caller to remember: the ones that already include the
+    /// items pay nothing, and a new closing path cannot get this wrong.
+    /// </para>
+    /// </remarks>
+    private async Task EnsureItemsLoadedAsync(Order order, CancellationToken cancellationToken)
+    {
+        var entry = dbContext.Entry(order);
+        if (entry.State == EntityState.Detached)
+        {
+            return;
+        }
+
+        var items = entry.Collection(item => item.OrderItems);
+        if (!items.IsLoaded)
+        {
+            await items.Query().Include(item => item.SelectedOptions).LoadAsync(cancellationToken);
+            return;
+        }
+
+        // Items loaded but their extras were not: option stock would go back unreleased.
+        foreach (var item in order.OrderItems)
+        {
+            var options = dbContext.Entry(item).Collection(line => line.SelectedOptions);
+            if (!options.IsLoaded)
+            {
+                await options.LoadAsync(cancellationToken);
+            }
+        }
     }
 
     /// <summary>

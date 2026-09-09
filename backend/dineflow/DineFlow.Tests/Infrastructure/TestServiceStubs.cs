@@ -19,8 +19,14 @@ public static class TestServiceStubs
         new(
             context,
             CreateOrderRealtimeNotifier(),
+            CreateStockLedger(context),
             CreateReportLogWriter(context),
             NullLogger<CounterPaymentReversalService>.Instance);
+
+    /// Real, against the real database: a refund that settles an order gives its portions back, and
+    /// a stub here would let that regress unnoticed.
+    public static OrderStockLedger CreateStockLedger(AppDbContext context) =>
+        new(context, new MenuItemStockService(context));
 
     public static OrderRealtimeNotifier CreateOrderRealtimeNotifier() =>
         new(new NoOpHubContext(), NullLogger<OrderRealtimeNotifier>.Instance);

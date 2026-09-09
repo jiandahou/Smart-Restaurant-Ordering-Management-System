@@ -82,6 +82,11 @@ import {
   type FrontCounterOrderAction,
   type FrontCounterQueue,
 } from '@/lib/frontCounterManagement'
+import {
+  counterReversalLabel,
+  getCounterReversalActions,
+  type CounterReversalAction,
+} from '@/lib/counterReversalActions'
 import { hasSafetyNote, isSafetyNoteText } from '@/lib/staffOrderManagement'
 import { cn } from '@/lib/utils'
 
@@ -167,29 +172,6 @@ function getOrderDisplayCode(order: AdminOrder) {
   return formatServiceCode(order)
 }
 
-const counterProviders = new Set(['Counter', 'CounterCash', 'CounterCard'])
-
-/**
- * Mirrors CounterPaymentPolicy on the backend. A clean counter payment can be voided outright;
- * once anything has been refunded against it the only honest action left is another refund.
- */
-function getCounterReversalMode(order: AdminOrder): 'void' | 'refund' | null {
-  const payment = order.latestPayment
-  if (!payment || !counterProviders.has(payment.provider)) {
-    return null
-  }
-
-  if (payment.status === 'Paid' && payment.refundCount === 0) {
-    return 'void'
-  }
-
-  if ((payment.status === 'Paid' || payment.status === 'PartiallyRefunded')
-    && payment.refundableAmountCents > 0) {
-    return 'refund'
-  }
-
-  return null
-}
 
 function shiftIsoDate(isoDate: string, days: number) {
   const [year, month, day] = isoDate.split('-').map(Number)
@@ -671,9 +653,8 @@ export function FrontCounterPage() {
     }
   }, [restaurantParams])
 
-  const requestCounterReversal = useCallback((order: AdminOrder) => {
-    const mode = getCounterReversalMode(order)
-    if (!mode) {
+  const requestCounterReversal = useCallback((order: AdminOrder, mode: CounterReversalAction) => {
+    if (!getCounterReversalActions(order).includes(mode)) {
       return
     }
 
@@ -1160,7 +1141,7 @@ export function FrontCounterPage() {
                         busy={busyOrderId === order.id}
                         onSettle={() => requestOrderSettlement(order)}
                         onOpenTable={() => openTableForOrder(order)}
-                        onReverse={() => requestCounterReversal(order)}
+                        onReverse={(action) => requestCounterReversal(order, action)}
                         onPrint={() => queueReceiptPrint({
                           kind: 'order',
                           order,
@@ -1426,7 +1407,7 @@ export function FrontCounterPage() {
                   : `No counter payments have been taken in the last ${recentPaymentsWindowHours} hours.`}
               </p>
             ) : recentPayments.map((order) => {
-              const mode = getCounterReversalMode(order)
+              const reversals = getCounterReversalActions(order)
 
               return (
                 <div key={order.id} className="front-counter-recent-payment">
@@ -1438,8 +1419,9 @@ export function FrontCounterPage() {
                     <OrderStatusBadge status={order.status} />
                     <PaymentStatusBadge status={order.paymentStatus} />
                   </div>
-                  {mode ? (
+                  {reversals.map((reversal) => (
                     <Button
+                      key={reversal}
                       type="button"
                       variant="outline"
                       size="sm"
@@ -1447,15 +1429,16 @@ export function FrontCounterPage() {
                         // Stand this dialog down first: the reversal asks for a reason and needs the
                         // screen to itself.
                         setRecentPaymentsOpen(false)
-                        requestCounterReversal(order)
+                        requestCounterReversal(order, reversal)
                       }}
                     >
                       <Undo2 size={15} />
-                      {mode === 'void' ? 'Void payment' : 'Record refund'}
+                      {counterReversalLabel(reversal)}
                     </Button>
-                  ) : (
+                  ))}
+                  {reversals.length === 0 ? (
                     <span className="text-sm text-muted-foreground">Nothing left to reverse.</span>
-                  )}
+                  ) : null}
                 </div>
               )
             })}
@@ -1732,10 +1715,10 @@ function FrontCounterOrderCard({
   busy: boolean
   onSettle: () => void
   onOpenTable: () => void
-  onReverse: () => void
+  onReverse: (action: CounterReversalAction) => void
   onPrint: () => void
 }) {
-  const counterReversal = getCounterReversalMode(order)
+  const counterReversals = getCounterReversalActions(order)
   const blockReason = getFrontCounterBlockReason(order)
   const action = getFrontCounterOrderAction(order)
   const isDineIn = order.orderType === 'DineIn'
@@ -1858,18 +1841,21 @@ function FrontCounterOrderCard({
               Open table
             </Button>
           )}
-          {counterReversal ? (
+          {/* Both, when both apply. They are different decisions about what happened to real
+              money, and only the cashier knows which one it was. */}
+          {counterReversals.map((reversal) => (
             <Button
+              key={reversal}
               type="button"
               variant="outline"
               className="front-counter-reverse-button"
               disabled={busy}
-              onClick={onReverse}
+              onClick={() => onReverse(reversal)}
             >
               <Undo2 size={16} />
-              {counterReversal === 'void' ? 'Void payment' : 'Refund'}
+              {counterReversalLabel(reversal)}
             </Button>
-          ) : null}
+          ))}
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>

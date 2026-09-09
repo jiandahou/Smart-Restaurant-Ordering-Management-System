@@ -21,6 +21,7 @@ public sealed record CounterReversalResult(bool IsSuccess, int StatusCode, strin
 public sealed class CounterPaymentReversalService(
     AppDbContext dbContext,
     OrderRealtimeNotifier orderRealtimeNotifier,
+    OrderStockLedger orderStockLedger,
     ReportLogWriter reportLogWriter,
     ILogger<CounterPaymentReversalService> logger)
 {
@@ -187,6 +188,20 @@ public sealed class CounterPaymentReversalService(
         payment.UpdatedAt = now;
         order.PaymentStatus = payment.Status;
         order.UpdatedAt = now;
+
+        // A fully refunded order can never be charged or completed — the counter refuses both — so
+        // it can never consume the portions it reserved. Holding them would take that stock off the
+        // menu for everyone else until somebody happened to cancel the order, and nothing obliges
+        // anyone to. Released here, inside the same transaction as the refund, so the money going
+        // back and the portions going back are one act.
+        //
+        // This does not close the order. A refund is a decision about money and cancelling is a
+        // decision about food, and staff are already told to make the second one separately. It
+        // only stops an order that cannot be fulfilled from holding stock while they do.
+        if (payment.Status == PaymentStatus.Refunded)
+        {
+            await orderStockLedger.ReleaseAsync(order, now, cancellationToken);
+        }
 
         reportLogWriter.AddAudit(
             "Payment.CounterRefunded",
