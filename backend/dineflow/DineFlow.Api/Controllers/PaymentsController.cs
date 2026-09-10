@@ -1170,20 +1170,47 @@ public class PaymentsController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// The signing secrets to try, each tagged with the endpoint it belongs to.
+    /// </summary>
+    /// <remarks>
+    /// Tagged only when the two can actually be told apart. One secret configured, or the same
+    /// string entered for both, leaves nothing to bind against — and refusing every event in that
+    /// case would take a working restaurant's payments offline over a settings page. So those are
+    /// left untagged, which reproduces exactly the behaviour that existed before, for exactly the
+    /// deployments that had no second endpoint anyway.
+    /// </remarks>
+    private static List<(string Secret, StripeWebhookDestination? Destination)> BuildWebhookSecrets(
+        StripeOptions options)
+    {
+        var platform = options.WebhookSecret;
+        var connect = options.ConnectWebhookSecret;
+        var hasPlatform = !string.IsNullOrWhiteSpace(platform);
+        var hasConnect = !string.IsNullOrWhiteSpace(connect);
+        var canDistinguish = hasPlatform && hasConnect && !string.Equals(platform, connect, StringComparison.Ordinal);
+
+        var secrets = new List<(string, StripeWebhookDestination?)>();
+
+        if (hasPlatform)
+        {
+            secrets.Add((platform, canDistinguish ? StripeWebhookDestination.Platform : null));
+        }
+
+        if (hasConnect && !string.Equals(platform, connect, StringComparison.Ordinal))
+        {
+            secrets.Add((connect, canDistinguish ? StripeWebhookDestination.ConnectedAccount : null));
+        }
+
+        return secrets;
+    }
+
     [AllowAnonymous]
     [HttpPost("stripe/webhook")]
     public async Task<IActionResult> StripeWebhook(CancellationToken cancellationToken)
     {
-        var webhookSecrets = new[]
-            {
-                _stripeOptions.WebhookSecret,
-                _stripeOptions.ConnectWebhookSecret
-            }
-            .Where(secret => !string.IsNullOrWhiteSpace(secret))
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
+        var webhookSecrets = BuildWebhookSecrets(_stripeOptions);
 
-        if (webhookSecrets.Length == 0)
+        if (webhookSecrets.Count == 0)
         {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {
@@ -1194,15 +1221,19 @@ public class PaymentsController : ControllerBase
         var payload = await new StreamReader(HttpContext.Request.Body).ReadToEndAsync(cancellationToken);
         var signatureHeader = Request.Headers["Stripe-Signature"].ToString();
         Event? stripeEvent = null;
+        StripeWebhookDestination? verifiedWith = null;
 
-        foreach (var webhookSecret in webhookSecrets)
+        foreach (var candidate in webhookSecrets)
         {
             try
             {
                 stripeEvent = EventUtility.ConstructEvent(
                     payload,
                     signatureHeader,
-                    webhookSecret);
+                    candidate.Secret);
+                // Kept, because which secret verified is half of what says whether this event is
+                // allowed to be acted on at all.
+                verifiedWith = candidate.Destination;
                 break;
             }
             catch (StripeException)
@@ -1214,6 +1245,25 @@ public class PaymentsController : ControllerBase
         if (stripeEvent is null)
         {
             _logger.LogWarning("Rejected Stripe webhook with invalid signature.");
+            return BadRequest(new
+            {
+                message = "Invalid Stripe webhook signature."
+            });
+        }
+
+        // A valid signature proves who sent the payload, not which endpoint they are entitled to
+        // speak for. The event says where it came from and the secret says where it was delivered;
+        // when those disagree the event is not evidence about anything.
+        if (!StripeWebhookRouting.Accepts(verifiedWith, stripeEvent.Account))
+        {
+            _logger.LogWarning(
+                "Rejected Stripe webhook {EventId} ({EventType}): {Reason}.",
+                stripeEvent.Id,
+                stripeEvent.Type,
+                StripeWebhookRouting.ExplainRefusal(verifiedWith!.Value, stripeEvent.Account));
+
+            // The same answer a bad signature gets. A sender probing which endpoint a secret
+            // belongs to learns nothing from the reply.
             return BadRequest(new
             {
                 message = "Invalid Stripe webhook signature."

@@ -177,10 +177,32 @@ Passkeys__Origins__0=<frontend-staging-url>
 
 Stripe__SecretKey=<stripe-secret-key>
 Stripe__PublishableKey=<stripe-publishable-key>
-Stripe__WebhookSecret=<stripe-webhook-secret>
+Stripe__WebhookSecret=<platform-endpoint-signing-secret>
+Stripe__ConnectWebhookSecret=<connect-endpoint-signing-secret>
 Stripe__Currency=aud
 Stripe__SuccessUrl=<frontend-staging-url>/payment/success
 Stripe__CancelUrl=<frontend-staging-url>/payment/cancelled
+Stripe__ConnectReturnUrl=<frontend-staging-url>/admin/restaurants?stripeConnect=return
+Stripe__ConnectRefreshUrl=<frontend-staging-url>/admin/restaurants?stripeConnect=refresh
+Stripe__PlatformFeeSuccessUrl=<frontend-staging-url>/admin/restaurants?platformFee=success
+Stripe__PlatformFeeCancelUrl=<frontend-staging-url>/admin/restaurants?platformFee=cancelled
+Stripe__SubscriptionSuccessUrl=<frontend-staging-url>/admin/billing?subscription=success
+Stripe__SubscriptionCancelUrl=<frontend-staging-url>/admin/billing?subscription=cancelled
+Stripe__BillingPortalReturnUrl=<frontend-staging-url>/admin/billing
+
+# Whether an unpaid restaurant is actually stopped from taking public orders.
+# Leave false until the billing facts have been watched for a while: a wrong
+# suspension closes a working shop, and the cost of the two mistakes is not
+# remotely symmetric.
+PlatformBilling__EnforcementEnabled=false
+
+# Where uploaded images go. The default provider is Local, which on ECS means
+# the container's own filesystem — the images survive until the task is
+# replaced, and then they are gone, with nothing having reported a problem.
+AvatarStorage__Provider=S3
+AvatarStorage__Bucket=<uploads-bucket>
+AvatarStorage__Region=<aws-region>
+AvatarStorage__PublicBaseUrl=<cloudfront-or-bucket-public-url>
 
 SeedOwner__Email=<staging-owner-email>
 SeedOwner__Password=<staging-owner-password>
@@ -190,8 +212,24 @@ Database__MigrateOnStartup=false
 Seed__DemoData=false
 ```
 
-For `ASPNETCORE_ENVIRONMENT=Production`, the API also refuses to start until external report
-retention is backed by named operational evidence:
+For `ASPNETCORE_ENVIRONMENT=Production`, the API refuses to start until it has a legal identity to
+put on receipts, invoices and privacy notices. These are checked before anything else boots, so
+getting them wrong looks like a container that will not start rather than a page with a blank
+footer:
+
+```text
+Compliance__OperatorName=<registered-operator-name>
+Compliance__OperatorAbn=<11-digit-abn>
+Compliance__OperatorAddress=<registered-address>
+Compliance__PrivacyEmail=<privacy-contact-email>
+Compliance__SupportEmail=<support-contact-email>
+```
+
+`Compliance__OperatorAbn` must be exactly eleven digits and nothing else — no spaces, no `ABN`
+prefix — or startup fails naming that variable.
+
+Production also refuses to start until external report retention is backed by named operational
+evidence:
 
 ```text
 ReportRetention__ExternalMaintenanceEnabled=true
@@ -298,23 +336,29 @@ curl https://<app-runner-url>/health/ready
 
 ## Stripe Staging Setup
 
-After the backend URL is available, create a Stripe webhook endpoint:
+After the backend URL is available, create **two** Stripe event destinations, both pointing at:
 
 ```text
 https://<app-runner-url>/api/payments/stripe/webhook
 ```
 
-Listen for at least:
-
-- `checkout.session.completed`
-- `checkout.session.expired`
-- `payment_intent.payment_failed`
-
-Copy the Stripe webhook signing secret into:
+One for your own account and one for connected accounts. They have separate signing secrets:
 
 ```text
-Stripe__WebhookSecret=<whsec_...>
+Stripe__WebhookSecret=<whsec_... from the account destination>
+Stripe__ConnectWebhookSecret=<whsec_... from the connected accounts destination>
 ```
+
+Both are needed. The endpoint binds each event to the destination it was delivered to — an event
+carrying a connected account id is accepted only when signed with the Connect secret, and one
+carrying none only with the platform secret. Set just one, or the same value for both, and there is
+nothing to bind against; the endpoint falls back to accepting whatever either secret signed and
+warns about it at startup.
+
+**`docs/stripe-connect.md` holds the list of events to subscribe to, and is the only copy.** It ran
+to three events here while the endpoint handled twenty, which is the failure a second list always
+eventually has: the deployment looks configured, and the events nobody subscribed to are the ones
+that reconcile refunds, disputes and subscription billing.
 
 ## Google OAuth Staging Setup
 

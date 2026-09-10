@@ -181,6 +181,18 @@ See `.env.example` for all variables. Key ones:
 | `POSTGRES_PASSWORD` | Docker Compose, connection string |
 | `JWT_SECRET_KEY` | Token signing (min 32 chars) |
 | `STRIPE_SECRET_KEY` | Stripe API calls |
-| `STRIPE_WEBHOOK_SECRET` | Webhook signature verification |
+| `STRIPE_WEBHOOK_SECRET` | Signature verification for the **platform** event destination |
+| `STRIPE_CONNECT_WEBHOOK_SECRET` | Signature verification for the **connected accounts** destination. Both are needed: each secret is bound to its own destination, and with only one set the endpoint accepts whatever either signed and warns at startup |
+| `STRIPE_CONNECT_RETURN_URL` / `STRIPE_CONNECT_REFRESH_URL` | Where Stripe sends a restaurant back after onboarding |
+| `STRIPE_PLATFORM_FEE_SUCCESS_URL` / `STRIPE_PLATFORM_FEE_CANCEL_URL` | Return from the one-time activation fee checkout |
+| `STRIPE_SUBSCRIPTION_SUCCESS_URL` / `STRIPE_SUBSCRIPTION_CANCEL_URL` | Return from the subscription checkout |
+| `STRIPE_BILLING_PORTAL_RETURN_URL` | Return from the Stripe customer portal |
+| `PLATFORM_BILLING_ENFORCEMENT_ENABLED` | Whether an unpaid restaurant is actually stopped from taking public orders. Default `false` |
 | `RESEND_API_KEY` | Transactional email |
 | `GOOGLE_CLIENT_ID/SECRET` | OAuth login |
+
+Production refuses to start without `Compliance__*` (operator name, 11-digit ABN, address, privacy
+and support emails) and the `ReportRetention__*` evidence. See
+[docs/deployment/aws-staging.md](docs/deployment/aws-staging.md) for the full deployment set, and
+[docs/stripe-connect.md](docs/stripe-connect.md) for the webhook events to subscribe to — that is
+the only list of them.

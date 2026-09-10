@@ -240,7 +240,7 @@
 | ID | 优先级 | 条件 | 操作步骤 | 预期 | 类型 |
 |---|---|---|---|---|---|
 | PS-WEB-01 | P0 | 无效签名/无 secret | POST webhook | 400/503；不写 Event/Payment/Order | Auto |
-| PS-WEB-02 | P0 | 平台 secret 签 Connect event/反向 | 发送 | 只接受匹配 destination；不串模式 | Auto |
+| PS-WEB-02 | P0 | 平台 secret 签 Connect event/反向 | 发送 | 400 + 不写 Event/Payment/Order；拒绝话术与验签失败完全一致，探测不出密钥归属。判定依据是事件自带的 `account` 字段（有=连接账户，无=平台），不是事件类型清单。**例外**：只配了一个 webhook secret、或两个填成同一个值时无从绑定，此时沿用旧行为并在启动日志告警 | Auto |
 | PS-WEB-03 | P0 | 相同 event.id 重放 2–10 次 | 重放 | Event、状态、通知、自动接单、打印各最多一次 | Auto |
 | PS-WEB-04 | P0 | 并发重复 event | 同时 POST | 唯一约束/事务保证一个生效；其余安全 2xx/幂等 | Auto |
 | PS-WEB-05 | P0 | account 不等于 Payment.StripeAccountId | 发送有效签名事件 | 忽略并告警；不改别店 Payment | Auto |

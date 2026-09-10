@@ -639,6 +639,37 @@ builder.Services.AddSwaggerGen(options =>
 
 var app = builder.Build();
 
+{
+    // Webhook events are bound to the endpoint they were delivered to, and that binding needs two
+    // distinguishable secrets to exist. Where it cannot be done the endpoint still works and simply
+    // accepts what either secret signed — which is the older, laxer behaviour, and worth saying out
+    // loud at startup rather than leaving somebody to infer it from a security review.
+    var stripeStartupOptions = app.Services
+        .GetRequiredService<Microsoft.Extensions.Options.IOptions<StripeOptions>>()
+        .Value;
+    var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Stripe.Webhooks");
+
+    if (!string.IsNullOrWhiteSpace(stripeStartupOptions.SecretKey))
+    {
+        if (string.IsNullOrWhiteSpace(stripeStartupOptions.ConnectWebhookSecret))
+        {
+            startupLogger.LogWarning(
+                "Stripe:ConnectWebhookSecret is not set, so webhook events cannot be bound to the "
+                + "endpoint that delivered them. Set it to the Connect endpoint's signing secret.");
+        }
+        else if (string.Equals(
+            stripeStartupOptions.ConnectWebhookSecret,
+            stripeStartupOptions.WebhookSecret,
+            StringComparison.Ordinal))
+        {
+            startupLogger.LogWarning(
+                "Stripe:WebhookSecret and Stripe:ConnectWebhookSecret are the same value, so webhook "
+                + "events cannot be bound to the endpoint that delivered them. Each Stripe endpoint "
+                + "has its own signing secret.");
+        }
+    }
+}
+
 app.UseExceptionHandler();
 
 app.UseForwardedHeaders();

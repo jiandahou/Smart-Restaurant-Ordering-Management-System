@@ -47,6 +47,17 @@ public sealed class DineFlowApiFactory : WebApplicationFactory<Program>, IAsyncL
     /// <summary>Lets a test sign a webhook the way Stripe does, so the endpoint's own verification runs.</summary>
     public const string StripeWebhookSecret = "whsec_dineflow_integration_test";
 
+    /// <summary>
+    /// The other endpoint's secret, so the two can actually be told apart.
+    /// </summary>
+    /// <remarks>
+    /// Configured deliberately: with only one secret there is nothing to bind an event to, and the
+    /// endpoint accepts anything either secret signed — which is the behaviour the destination
+    /// check exists to remove. A test host that configured one secret would be testing the
+    /// exemption rather than the rule.
+    /// </remarks>
+    public const string StripeConnectWebhookSecret = "whsec_dineflow_integration_test_connect";
+
     public async Task InitializeAsync()
     {
         _adminConnectionString = PostgresTestDatabase.AdminConnectionStringOrNull;
@@ -105,6 +116,7 @@ public sealed class DineFlowApiFactory : WebApplicationFactory<Program>, IAsyncL
             ["Jwt:ExpirationMinutes"] = "60",
             ["Stripe:SecretKey"] = "sk_test_dineflow_integration",
             ["Stripe:WebhookSecret"] = StripeWebhookSecret,
+            ["Stripe:ConnectWebhookSecret"] = StripeConnectWebhookSecret,
             ["SeedOwner:Email"] = OwnerEmail,
             ["SeedOwner:Password"] = OwnerPassword,
             ["SeedOwner:FullName"] = "API Test Owner",

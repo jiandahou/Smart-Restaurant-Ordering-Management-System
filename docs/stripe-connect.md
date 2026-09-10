@@ -22,6 +22,9 @@ STRIPE_CONNECT_RETURN_URL=https://app.example.com/admin/restaurants?stripeConnec
 STRIPE_CONNECT_REFRESH_URL=https://app.example.com/admin/restaurants?stripeConnect=refresh
 STRIPE_PLATFORM_FEE_SUCCESS_URL=https://app.example.com/admin/restaurants?platformFee=success
 STRIPE_PLATFORM_FEE_CANCEL_URL=https://app.example.com/admin/restaurants?platformFee=cancelled
+STRIPE_SUBSCRIPTION_SUCCESS_URL=https://app.example.com/admin/billing?subscription=success
+STRIPE_SUBSCRIPTION_CANCEL_URL=https://app.example.com/admin/billing?subscription=cancelled
+STRIPE_BILLING_PORTAL_RETURN_URL=https://app.example.com/admin/billing
 ```
 
 Never put Stripe secret keys or webhook signing secrets in frontend environment
@@ -40,6 +43,12 @@ https://api.example.com/api/payments/stripe/webhook
    `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
    `checkout.session.async_payment_failed`, and `checkout.session.expired`.
    These events reconcile the optional one-time activation fee.
+   If restaurants are billed by subscription, also subscribe to
+   `customer.subscription.created`, `customer.subscription.updated`,
+   `customer.subscription.deleted`, `invoice.paid`, and
+   `invoice.payment_failed`. Without these a subscription that lapses is never
+   noticed, and one that is paid never clears — the restaurant is stopped from
+   taking orders over an invoice Stripe settled days earlier.
 2. **Connected accounts** destination. Store its separate signing secret in
    `STRIPE_CONNECT_WEBHOOK_SECRET`. Subscribe to:
    `account.updated`, `checkout.session.completed`,
@@ -51,9 +60,29 @@ https://api.example.com/api/payments/stripe/webhook
    Also subscribe to `charge.dispute.created`, `charge.dispute.updated`, and
    `charge.dispute.closed` so dispute activity appears in DineFlow reports.
 
-The endpoint verifies both secrets, records every Stripe event ID, ignores
-duplicates, rejects events from the wrong connected account, and prevents older
-events from regressing a settled payment.
+The endpoint records every Stripe event ID, ignores duplicates, rejects events
+from the wrong connected account, and prevents older events from regressing a
+settled payment.
+
+Each secret speaks only for its own destination: an event carrying a connected
+account id is accepted only when signed with `STRIPE_CONNECT_WEBHOOK_SECRET`,
+and one carrying none only with `STRIPE_WEBHOOK_SECRET`. A mismatch is refused
+in exactly the words a bad signature gets, so probing the endpoint reveals
+nothing about which secret belongs where.
+
+**This binding needs both secrets to be set, and to differ.** Configure only one,
+or paste the same value into both, and there is nothing to bind against: the
+endpoint falls back to accepting whatever either secret signed. It says so at
+startup —
+
+```text
+warn: Stripe.Webhooks[0]
+      Stripe:ConnectWebhookSecret is not set, so webhook events cannot be bound
+      to the endpoint that delivered them.
+```
+
+— which is worth reading the first time a deployment starts, because nothing
+else about the running service looks any different.
 
 ## Sandbox testing workflow
 
