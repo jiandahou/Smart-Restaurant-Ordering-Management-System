@@ -57,6 +57,7 @@ import { type CheckoutNavigationState } from '@/pages/CheckoutPage'
 import { LEGAL_VERSIONS } from '@/legal/legalConfig'
 import {
   getPublicRestaurantMenu,
+  getPublicRestaurantMenuStock,
   getPublicRestaurantOrderingContext,
   getPublicTableOrderingContext,
   resolvePublicAssetUrl,
@@ -121,6 +122,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { getStoredGuestOrders, rememberGuestOrder } from '@/lib/guestOrders'
+import { mergeMenuStock } from '@/lib/menuStockMerge'
 import { applyOptionAdjustment, describeOptionAdjustment } from '@/lib/menuOptionPricing'
 import {
   describeStock,
@@ -845,6 +847,80 @@ export function CustomerMenuPage() {
       window.clearInterval(intervalId)
     }
   }, [activeCartId, activeParticipantToken])
+
+  /**
+   * What is left of the menu, kept current while it sits on screen.
+   *
+   * <p>
+   * A diner opens the menu, reads it, talks to the table, and orders ten minutes later. In between,
+   * somebody else took the last portion — and the page went on offering it until the customer
+   * happened to reload. Checkout does refuse, so nothing is oversold, but being told at the till
+   * that the dish you chose and configured was gone before you started is a bad way to find out.
+   * </p>
+   *
+   * <p>
+   * Separate from the cart poll above, and slower: the cart is this diner's own and changes when
+   * they or the person opposite touches it, while stock changes at the pace of the whole room. It
+   * also runs before there is a cart at all, because reading the menu is exactly when this is
+   * wrong. Coming back to the tab asks immediately, since that is the moment a stale menu is most
+   * likely and the diner is about to act on it.
+   * </p>
+   */
+  const activeMenuRestaurantId = state.status === 'ready' || state.status === 'choosing'
+    ? state.menu.restaurantId
+    : null
+
+  useEffect(() => {
+    if (!activeMenuRestaurantId) {
+      return undefined
+    }
+
+    let stopped = false
+    const restaurantId = activeMenuRestaurantId
+
+    const refresh = async () => {
+      try {
+        const stock = await getPublicRestaurantMenuStock(restaurantId)
+
+        if (stopped) {
+          return
+        }
+
+        setState((current) => {
+          if (current.status !== 'ready' && current.status !== 'choosing') {
+            return current
+          }
+
+          if (current.menu.restaurantId !== restaurantId) {
+            return current
+          }
+
+          const menu = mergeMenuStock(current.menu, stock)
+          // Both identities are kept when nothing moved, so a diner mid-scroll is not re-rendered
+          // every fifteen seconds to be shown the same menu.
+          return menu === current.menu ? current : { ...current, menu }
+        })
+      } catch {
+        // A missed reading leaves the page showing what it last knew, which is what it showed all
+        // the time before this existed. Checkout is still the thing that refuses.
+      }
+    }
+
+    const intervalId = window.setInterval(() => void refresh(), 15_000)
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void refresh()
+      }
+    }
+
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+
+    return () => {
+      stopped = true
+      window.clearInterval(intervalId)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [activeMenuRestaurantId])
 
   const visibleCategories = useMemo(() => {
     if (state.status !== 'ready') {
@@ -3061,7 +3137,7 @@ function ItemDetailContent({
                 size="icon"
                 aria-label="Decrease quantity"
                 className="size-9"
-                disabled={quantity <= 1 || isAdding}
+                disabled={disabled || quantity <= 1 || isAdding}
                 onClick={() => onQuantityChange(Math.max(1, quantity - 1))}
               >
                 <Minus className="size-4" />
@@ -3073,7 +3149,7 @@ function ItemDetailContent({
                 size="icon"
                 aria-label="Increase quantity"
                 className="size-9"
-                disabled={isAdding || (addableNow !== null && quantity >= addableNow)}
+                disabled={disabled || isAdding || (addableNow !== null && quantity >= addableNow)}
                 onClick={() => onQuantityChange(quantity + 1)}
               >
                 <Plus className="size-4" />

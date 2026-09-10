@@ -127,6 +127,28 @@ export function getPublicTableOrderingContext(qrToken: string) {
   )
 }
 
+/**
+ * What is left of a menu, and nothing else.
+ *
+ * <p>
+ * A menu open on a phone shows stock that stopped being true the moment somebody else ordered, and
+ * before this the only correction was the diner happening to reload. Re-fetching the whole menu on
+ * a timer would fix that by resending every description, allergen statement and option group to
+ * every phone in the room, several times a minute, to learn that none of them had changed.
+ * </p>
+ */
+export type PublicMenuStock = {
+  restaurantId: string
+  items: { id: string; isSoldOut: boolean; remainingStock: number | null }[]
+  options: { id: string; remainingStock: number | null }[]
+}
+
+export function getPublicRestaurantMenuStock(restaurantId: string) {
+  return publicRequest<PublicMenuStock>(
+    `/api/public/menu/restaurants/${encodeURIComponent(restaurantId)}/stock`,
+  )
+}
+
 export function getPublicRestaurantMenu(restaurantId: string, search?: string) {
   const params = new URLSearchParams()
   const normalizedSearch = search?.trim()

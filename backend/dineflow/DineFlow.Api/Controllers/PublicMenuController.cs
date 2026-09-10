@@ -14,6 +14,89 @@ namespace DineFlow.Api.Controllers;
 [Route("api/public/menu")]
 public class PublicMenuController(AppDbContext dbContext) : ControllerBase
 {
+    /// <summary>
+    /// What is left, for a menu that is already on screen.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A diner opens the menu, reads it, talks to the people at the table, and orders ten minutes
+    /// later. In between, somebody else took the last portion. The page went on offering it, and
+    /// the only correction came at checkout — which does refuse, so nothing is oversold, but a
+    /// customer who has chosen a dish and picked its options should not be told at the till that it
+    /// was gone before they started.
+    /// </para>
+    /// <para>
+    /// Deliberately not the whole menu on a timer. Descriptions, allergen statements and option
+    /// groups do not change during service; sending them to every phone in the room every few
+    /// seconds to discover that would be the cost of a real-time menu without the benefit.
+    /// </para>
+    /// <para>
+    /// Sold-out dishes are still listed rather than omitted, because the page has them on screen
+    /// and needs to be told to cross them out. Only unavailable ones — the ones the menu never
+    /// showed — are left out, which is the same set the full menu leaves out.
+    /// </para>
+    /// </remarks>
+    [HttpGet("restaurants/{restaurantId:guid}/stock")]
+    public async Task<IActionResult> GetRestaurantMenuStock(
+        Guid restaurantId,
+        CancellationToken cancellationToken)
+    {
+        var restaurantIsActive = await dbContext.Restaurants
+            .AsNoTracking()
+            .AnyAsync(
+                restaurant => restaurant.Id == restaurantId && restaurant.IsActive,
+                cancellationToken);
+
+        if (!restaurantIsActive)
+        {
+            return NotFound(new { message = "Restaurant is not available for ordering." });
+        }
+
+        var items = await dbContext.MenuItems
+            .AsNoTracking()
+            .Where(item =>
+                item.RestaurantId == restaurantId &&
+                item.IsAvailable &&
+                item.Category!.IsActive)
+            .Select(item => new PublicMenuItemStock
+            {
+                Id = item.Id,
+                IsSoldOut = item.IsSoldOut,
+                // Carried raw and resolved below, so the rule about what a customer may see stays
+                // in one place and cannot drift from the full menu's answer.
+                RemainingStock = item.StockQuantity,
+            })
+            .ToListAsync(cancellationToken);
+
+        foreach (var item in items)
+        {
+            item.RemainingStock = PublicStockDisclosure.RemainingToPublish(
+                item.RemainingStock,
+                item.IsSoldOut);
+        }
+
+        var options = await dbContext.MenuItemOptions
+            .AsNoTracking()
+            .Where(option =>
+                option.IsAvailable &&
+                option.Group!.IsActive &&
+                option.Group.MenuItem!.RestaurantId == restaurantId &&
+                option.Group.MenuItem.IsAvailable)
+            .Select(option => new PublicMenuOptionStock
+            {
+                Id = option.Id,
+                RemainingStock = option.StockQuantity,
+            })
+            .ToListAsync(cancellationToken);
+
+        return Ok(new PublicMenuStockResponse
+        {
+            RestaurantId = restaurantId,
+            Items = items,
+            Options = options,
+        });
+    }
+
     [HttpGet("restaurants/{restaurantId:guid}")]
     public async Task<IActionResult> GetRestaurantMenu(
         Guid restaurantId,
