@@ -47,6 +47,29 @@ public class RestaurantResponse
     public DateTime? OldestPendingRefundRequestAt { get; set; }
 
     /// <summary>
+    /// Orders this restaurant turned away that are still holding the customer's money.
+    /// </summary>
+    /// <remarks>
+    /// Not the same thing as a pending refund request, and carried separately for that reason: a
+    /// request is a customer who noticed and asked, while this is the case where nobody asked. The
+    /// order was cancelled or rejected after it had been paid for, so the person owed the money may
+    /// not know it was ever taken, and nothing is chasing it from their end.
+    /// </remarks>
+    public int RefundOwedCount { get; set; }
+
+    /// <summary>How much, in total, in the restaurant's own currency.</summary>
+    public long RefundOwedAmountCents { get; set; }
+
+    /// <summary>
+    /// When the oldest of that money was taken, or null when none is outstanding.
+    /// </summary>
+    /// <remarks>
+    /// Measured from the charge rather than from the cancellation, because what the customer is
+    /// counting is how long the restaurant has held their money.
+    /// </remarks>
+    public DateTime? OldestRefundOwedAt { get; set; }
+
+    /// <summary>
     /// Where this restaurant stands with the platform.
     /// </summary>
     /// <remarks>
@@ -143,6 +166,18 @@ public class RestaurantOperationsResponse
     /// those is on screen.
     /// </remarks>
     public DateTime? OldestPendingRefundRequestAt { get; set; }
+
+    /// <summary>
+    /// Orders turned away here that are still holding the customer's money — see
+    /// <see cref="RestaurantResponse.RefundOwedCount"/>.
+    /// </summary>
+    public int RefundOwedCount { get; set; }
+
+    /// <summary>How much, in total, in the restaurant's own currency.</summary>
+    public long RefundOwedAmountCents { get; set; }
+
+    /// <summary>When the oldest of that money was taken, or null when none is outstanding.</summary>
+    public DateTime? OldestRefundOwedAt { get; set; }
 
     /// <summary>
     /// Where this restaurant stands with the platform, and when ordering stops if nothing is paid.

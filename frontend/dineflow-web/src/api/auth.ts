@@ -230,6 +230,18 @@ export type Restaurant = {
   pendingRefundRequestCount?: number
   /** When the longest-waiting of those was filed, or null when none are waiting. */
   oldestPendingRefundRequestAt?: string | null
+  /**
+   * Orders turned away here that are still holding the customer's money.
+   *
+   * Not the same as a pending refund request: a request is a customer who noticed and asked, while
+   * this is the case where nobody asked — the order was cancelled or rejected after it had been
+   * paid for, so the person owed the money may not know it was ever taken.
+   */
+  refundOwedCount?: number
+  /** How much, in total, in the restaurant's own currency. */
+  refundOwedAmountCents?: number
+  /** When the oldest of that money was taken, or null when none is outstanding. */
+  oldestRefundOwedAt?: string | null
   billing?: RestaurantBillingStanding
   orderPlatformFeePercent?: number
   oneTimePlatformFeeCents?: number
@@ -426,6 +438,12 @@ export type RestaurantOperations = {
   pendingRefundRequestCount: number
   /** When the longest-waiting of those was filed, or null when none are waiting. */
   oldestPendingRefundRequestAt: string | null
+  /** Orders turned away here that are still holding the customer's money. */
+  refundOwedCount: number
+  /** How much, in total, in the restaurant's own currency. */
+  refundOwedAmountCents: number
+  /** When the oldest of that money was taken, or null when none is outstanding. */
+  oldestRefundOwedAt: string | null
   billing: RestaurantBillingStanding
 }
 

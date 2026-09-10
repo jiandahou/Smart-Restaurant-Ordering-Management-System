@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { AdminOrder } from '@/api/auth'
+import type { AdminOrder, AdminPayment } from '@/api/auth'
 import {
   canStaffProcessOrder,
   getStaffDestructiveActions,
@@ -206,5 +206,82 @@ describe('an order closed while still holding the money', () => {
     const value = order({ status: 'Rejected', paymentStatus: 'Paid', paymentMethod: 'PayAtCounter' })
 
     expect(getStaffPaymentState(value)).not.toBe('unsettledClosure')
+  })
+})
+
+describe('money held by a closed order is read off the payment', () => {
+  function payment(overrides: Partial<AdminPayment> = {}): AdminPayment {
+    return {
+      status: 'Paid',
+      amountCents: 2_550,
+      refundCount: 0,
+      refundedAmountCents: 0,
+      refundableAmountCents: 2_550,
+      ...overrides,
+    } as AdminPayment
+  }
+
+  /**
+   * The bug. An order whose summary field says the payment was cancelled, with a succeeded charge
+   * sitting underneath it, used to read as settled — so no screen ever mentioned the money and no
+   * action offered to send it back.
+   */
+  it('sees money the order\'s own summary has lost track of', () => {
+    const stranded = order({
+      status: 'Cancelled',
+      paymentStatus: 'Cancelled',
+      latestPayment: payment(),
+    })
+
+    expect(getStaffPaymentState(stranded)).toBe('unsettledClosure')
+    expect(getStaffPaymentMessage(stranded)).toMatch(/still paid/i)
+  })
+
+  /**
+   * The mirror, and the reason the payment's status is checked alongside its amount: a checkout
+   * that expired without charging reports its full amount as refundable, because that figure is
+   * only "charged less refunded" and does not know whether the charge ever happened.
+   */
+  it('does not invent money from a payment that never went through', () => {
+    const nothingTaken = order({
+      status: 'Cancelled',
+      paymentStatus: 'Cancelled',
+      latestPayment: payment({ status: 'Expired' }),
+    })
+
+    expect(getStaffPaymentState(nothingTaken)).not.toBe('unsettledClosure')
+  })
+
+  it('lets go once the payment has been refunded down to nothing', () => {
+    const settled = order({
+      status: 'Rejected',
+      paymentStatus: 'Paid',
+      latestPayment: payment({ refundedAmountCents: 2_550, refundableAmountCents: 0 }),
+    })
+
+    expect(getStaffPaymentState(settled)).not.toBe('unsettledClosure')
+  })
+
+  it('still counts what a partial refund left behind', () => {
+    const partly = order({
+      status: 'Rejected',
+      paymentStatus: 'PartiallyRefunded',
+      latestPayment: payment({
+        status: 'PartiallyRefunded',
+        refundedAmountCents: 1_000,
+        refundableAmountCents: 1_550,
+      }),
+    })
+
+    expect(getStaffPaymentState(partly)).toBe('unsettledClosure')
+  })
+
+  /** With no payment on the card there is nothing better to read, so the summary still answers. */
+  it('falls back to the summary when the card carries no payment', () => {
+    expect(getStaffPaymentState(order({
+      status: 'Rejected',
+      paymentStatus: 'Paid',
+      latestPayment: null,
+    }))).toBe('unsettledClosure')
   })
 })

@@ -43,11 +43,47 @@ const expectedNextAction: Partial<Record<AdminOrder['status'], OrderTransitionAc
  * needs a person.
  * </p>
  */
+const moneyHoldingPaymentStatuses = new Set<AdminPaymentStatus>(['Paid', 'PartiallyRefunded'])
+
+/**
+ * Whether this order is still sitting on money the customer handed over.
+ *
+ * <p>
+ * The payment is asked first, because it is where the money is. Asking only the order's own
+ * <code>paymentStatus</code> — a summary of the payments kept beside them — meant that whenever the
+ * two disagreed, the summary won and always in the same direction: an order reading Cancelled with
+ * a succeeded charge against it was declared square, and the card that should have said "refund it"
+ * said nothing at all.
+ * </p>
+ *
+ * <p>
+ * The status is still checked alongside the amount. <code>refundableAmountCents</code> is only
+ * "charged less refunded" and is not itself told whether the charge ever went through, so an
+ * expired checkout that took nothing would otherwise read as money owed — the same bug pointing the
+ * other way.
+ * </p>
+ *
+ * <p>
+ * Only the latest payment reaches this screen, so an order paid across two of them is answered on
+ * the newer one. The server sums all of them; this is the narrower view the card is given, and it
+ * covers the case that actually happens — one charge, one order.
+ * </p>
+ */
+function holdsCustomerMoney(order: AdminOrder) {
+  const payment = order.latestPayment
+  if (payment) {
+    return moneyHoldingPaymentStatuses.has(payment.status) && payment.refundableAmountCents > 0
+  }
+
+  // No payment on the card to read, so the summary is the only thing that knows.
+  return moneyHoldingPaymentStatuses.has(order.paymentStatus)
+}
+
 function isUnsettledClosure(order: AdminOrder) {
   return (
     (order.status === 'Cancelled' || order.status === 'Rejected') &&
     order.paymentMethod === 'Online' &&
-    (order.paymentStatus === 'Paid' || order.paymentStatus === 'PartiallyRefunded')
+    holdsCustomerMoney(order)
   )
 }
 

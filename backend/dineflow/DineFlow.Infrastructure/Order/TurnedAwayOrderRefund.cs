@@ -21,13 +21,24 @@ namespace DineFlow.Infrastructure.Orders;
 /// </remarks>
 public static class TurnedAwayOrderRefund
 {
-    /// <summary>Payment states that mean money was taken and has not all come back.</summary>
-    private static bool HoldsCustomerMoney(PaymentStatus status) =>
-        status is PaymentStatus.Paid or PaymentStatus.PartiallyRefunded;
-
     /// <summary>
     /// What is still owed back on an order the restaurant has turned away, or null when nothing is.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Answered from the payments, and only from the payments. There used to be a gate above the
+    /// sum asking <c>order.PaymentStatus</c> whether the order was holding money at all — a summary
+    /// field, asked about money that lives somewhere else. Whenever the two disagreed the gate won,
+    /// and it always answered "nothing owed": an order reading Cancelled with a succeeded charge
+    /// against it was declared square, so nothing offered to refund it and no screen said a word.
+    /// The customer had paid, been turned away, and become invisible.
+    /// </para>
+    /// <para>
+    /// The sum below already asks the only question that matters — what came in, less what has gone
+    /// back — so the gate could never make the answer more correct, only override it. A summary
+    /// field is a cache of the payments; where money is concerned, read the ledger.
+    /// </para>
+    /// </remarks>
     /// <param name="order">The order, with its payments and their refunds loaded.</param>
     /// <param name="closedByCustomer">
     /// True when the customer ended it themselves — their own cancellation has its own policy and
@@ -35,7 +46,7 @@ public static class TurnedAwayOrderRefund
     /// </param>
     public static long? AmountOwedCents(Order order, bool closedByCustomer)
     {
-        if (closedByCustomer || !HoldsCustomerMoney(order.PaymentStatus))
+        if (closedByCustomer)
         {
             return null;
         }

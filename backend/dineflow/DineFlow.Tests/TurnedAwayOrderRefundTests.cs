@@ -108,6 +108,56 @@ public class TurnedAwayOrderRefundTests
     }
 
     /// <summary>
+    /// The order's own summary field disagreeing with its payments must not be able to hide money.
+    /// </summary>
+    /// <remarks>
+    /// This is the shape that goes unnoticed: a cancellation writes Cancelled across the order while
+    /// a charge succeeds underneath it. Asking the summary first answered "nothing owed", so nothing
+    /// offered to refund it and no screen raised it — the customer had paid, been turned away, and
+    /// disappeared. The payments are the ledger; the summary is a cache of them.
+    /// </remarks>
+    [Theory]
+    [InlineData(PaymentStatus.Cancelled)]
+    [InlineData(PaymentStatus.Unpaid)]
+    [InlineData(PaymentStatus.Failed)]
+    [InlineData(PaymentStatus.Expired)]
+    [InlineData(PaymentStatus.Pending)]
+    public void MoneyTakenIsOwedBackEvenWhenTheOrderSaysItWasNot(PaymentStatus orderSays)
+    {
+        var order = Order(orderSays, PaymentMethod.Online, Paid(2_550));
+
+        Assert.Equal(2_550, TurnedAwayOrderRefund.AmountOwedCents(order, closedByCustomer: false));
+    }
+
+    /// <summary>
+    /// And the same rule pointing the other way: the summary cannot invent money either. A checkout
+    /// that never charged owes nothing, whatever the order believes about itself.
+    /// </summary>
+    [Fact]
+    public void APaymentThatNeverWentThroughOwesNothingEvenWhenTheOrderSaysPaid()
+    {
+        var expired = new Payment
+        {
+            Id = Guid.NewGuid(),
+            Status = PaymentStatus.Expired,
+            AmountCents = 2_550,
+            Provider = PaymentProviders.Stripe,
+        };
+        var order = Order(PaymentStatus.Paid, PaymentMethod.Online, expired);
+
+        Assert.Null(TurnedAwayOrderRefund.AmountOwedCents(order, closedByCustomer: false));
+    }
+
+    /// <summary>Two charges on one order owe the sum of what is left on both.</summary>
+    [Fact]
+    public void EveryPaymentCounts()
+    {
+        var order = Order(PaymentStatus.Paid, PaymentMethod.Online, Paid(950), Paid(2_550, Refund(1_000)));
+
+        Assert.Equal(950 + 1_550, TurnedAwayOrderRefund.AmountOwedCents(order, closedByCustomer: false));
+    }
+
+    /// <summary>
     /// Counter payments are settled in cash at the till, so the platform has nothing to send back.
     /// Attempting one would ask Stripe to refund money it never took.
     /// </summary>

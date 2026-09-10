@@ -35,6 +35,7 @@ import { toast } from 'sonner'
 import { useAuth } from '../auth/AuthContext'
 import { adminRoles } from '../auth/postLoginDestination'
 import { buildBillingNotice } from '@/lib/billingNotice'
+import { buildRefundOwedNotice } from '@/lib/refundOwedNotice'
 import { buildRefundQueueNotice } from '@/lib/refundQueueNotice'
 import { BrandLogo } from '../components/BrandLogo'
 import { DemoIdentitySwitcher } from '../components/DemoIdentitySwitcher'
@@ -358,6 +359,10 @@ export function AppLayout() {
               name: restaurant.name,
               count: restaurant.pendingRefundRequestCount ?? 0,
               oldest: restaurant.oldestPendingRefundRequestAt ?? null,
+              owedCount: restaurant.refundOwedCount ?? 0,
+              owedAmountCents: restaurant.refundOwedAmountCents ?? 0,
+              owedOldest: restaurant.oldestRefundOwedAt ?? null,
+              currency: restaurant.currency,
             }))
         : printing.activeRestaurantOperations
           ? [{
@@ -365,14 +370,16 @@ export function AppLayout() {
               name: printing.activeRestaurantOperations.name,
               count: printing.activeRestaurantOperations.pendingRefundRequestCount,
               oldest: printing.activeRestaurantOperations.oldestPendingRefundRequestAt,
+              owedCount: printing.activeRestaurantOperations.refundOwedCount ?? 0,
+              owedAmountCents: printing.activeRestaurantOperations.refundOwedAmountCents ?? 0,
+              owedOldest: printing.activeRestaurantOperations.oldestRefundOwedAt ?? null,
+              currency: printing.activeRestaurantOperations.billing?.currency ?? null,
             }]
           : []
 
       refundQueues.forEach((queue) => {
         const pendingRefunds = buildRefundQueueNotice(queue.count, queue.oldest)
-        if (!pendingRefunds) return
-
-        notices.push({
+        if (pendingRefunds) notices.push({
           id: `refund-requests-pending-${queue.id}`,
           severity: pendingRefunds.severity,
           title: refundQueues.length > 1
@@ -382,6 +389,30 @@ export function AppLayout() {
           actionLabel: 'Review refund requests',
           onAction: () => navigate(
             `/admin/payments?view=requests&requestStatus=Pending&restaurant=${queue.id}`,
+          ),
+        })
+
+        // Separate from the queue above on purpose. That one is customers who asked; this one is
+        // customers who were never told, and folding them into a single number would let the
+        // quieter, worse case hide inside the busier one.
+        const owed = buildRefundOwedNotice(
+          queue.owedCount,
+          queue.owedAmountCents,
+          queue.owedOldest,
+          queue.currency,
+        )
+        if (owed) notices.push({
+          id: `refund-owed-${queue.id}`,
+          severity: owed.severity,
+          title: refundQueues.length > 1
+            ? `${queue.name}: ${owed.title}`
+            : owed.title,
+          message: owed.message,
+          // Lands on the orders these are, not on the refund request list — there are no requests
+          // to review here, which is the whole difficulty.
+          actionLabel: 'Review these orders',
+          onAction: () => navigate(
+            `/staff/orders?queue=closed&restaurant=${queue.id}`,
           ),
         })
       })

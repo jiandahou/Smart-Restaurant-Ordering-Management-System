@@ -211,10 +211,22 @@ public class RestaurantController : ControllerBase
         });
         var page = await responseQuery.ToPagedResponseAsync(request.Page, request.PageSize, cancellationToken);
 
+        // One query for the whole page rather than three correlated sub-selects per row, and the
+        // rule lives in RefundsOwedQuery beside the one the refund itself uses.
+        var refundsOwed = await RefundsOwedQuery.ByRestaurantAsync(
+            _dbContext,
+            page.Items.Select(item => item.Id).ToList(),
+            cancellationToken);
+
         // Availability can't be evaluated inside the EF projection, so fill it in once materialised.
         var utcNow = DateTime.UtcNow;
         foreach (var item in page.Items)
         {
+            var owed = refundsOwed.GetValueOrDefault(item.Id, RefundsOwedQuery.RefundsOwed.None);
+            item.RefundOwedCount = owed.Count;
+            item.RefundOwedAmountCents = owed.AmountCents;
+            item.OldestRefundOwedAt = owed.OldestTakenAt;
+
             // Neither the standing nor the availability can be evaluated inside the EF projection,
             // and they are fed the same facts so the list cannot disagree with the shop front.
             var billingSnapshot = new PlatformBillingSnapshot(

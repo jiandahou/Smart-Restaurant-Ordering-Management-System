@@ -118,6 +118,7 @@ public class RestaurantOperationsController(
             : Ok(MapToResponse(
                 restaurant,
                 await GetPendingRefundsAsync(id, cancellationToken),
+                await GetRefundsOwedAsync(id, cancellationToken),
                 DateTime.UtcNow,
                 billingPresenter));
     }
@@ -157,6 +158,7 @@ public class RestaurantOperationsController(
         return Ok(MapToResponse(
             restaurant,
             await GetPendingRefundsAsync(id, cancellationToken),
+            await GetRefundsOwedAsync(id, cancellationToken),
             DateTime.UtcNow,
             billingPresenter));
     }
@@ -205,15 +207,32 @@ public class RestaurantOperationsController(
                 .FirstOrDefaultAsync(cancellationToken));
     }
 
+    /// <summary>
+    /// Money this restaurant is holding from customers it turned away.
+    /// </summary>
+    /// <remarks>
+    /// The rule itself lives in <see cref="RefundsOwedQuery"/> beside the one the refund uses, so
+    /// the badge and the refund can never come to disagree about which orders owe money.
+    /// </remarks>
+    private async Task<RefundsOwedQuery.RefundsOwed> GetRefundsOwedAsync(
+        Guid restaurantId,
+        CancellationToken cancellationToken) =>
+        (await RefundsOwedQuery.ByRestaurantAsync(dbContext, [restaurantId], cancellationToken))
+            .GetValueOrDefault(restaurantId, RefundsOwedQuery.RefundsOwed.None);
+
     private static RestaurantOperationsResponse MapToResponse(
         DineFlow.Infrastructure.Restaurant.Restaurant restaurant,
         (int Count, DateTime? OldestCreatedAt) pendingRefunds,
+        RefundsOwedQuery.RefundsOwed refundsOwed,
         DateTime utcNow,
         PlatformBillingPresenter billingPresenter) => new()
     {
         Billing = billingPresenter.Describe(restaurant, utcNow),
         PendingRefundRequestCount = pendingRefunds.Count,
         OldestPendingRefundRequestAt = pendingRefunds.OldestCreatedAt,
+        RefundOwedCount = refundsOwed.Count,
+        RefundOwedAmountCents = refundsOwed.AmountCents,
+        OldestRefundOwedAt = refundsOwed.OldestTakenAt,
         Id = restaurant.Id,
         Name = restaurant.Name,
         AutoAcceptOrders = restaurant.AutoAcceptOrders,
