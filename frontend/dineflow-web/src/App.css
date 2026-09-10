@@ -13293,6 +13293,16 @@ button.menu-metric[aria-pressed='true'] {
 }
 
 .front-counter-settlement-summary,
+/* The reason a greyed-out Confirm is greyed out. Tied to the field by aria-describedby, so it is
+   read out with it rather than sitting nearby looking decorative. */
+.front-counter-cash-notice {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
 .front-counter-change-due {
   display: grid;
   gap: 3px;

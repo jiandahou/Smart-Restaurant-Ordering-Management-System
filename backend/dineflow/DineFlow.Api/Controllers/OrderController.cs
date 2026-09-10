@@ -268,14 +268,11 @@ public class OrderController : ControllerBase
             return Conflict(new { message = refusal });
         }
 
-        if (order.PaymentMethod == paymentMethod)
+        if (!OrderPaymentMethodPolicy.Apply(order, paymentMethod, DateTime.UtcNow))
         {
             return Ok(MapToResponse(order));
         }
 
-        order.PaymentMethod = paymentMethod;
-        order.PaymentStatus = PaymentStatus.Unpaid;
-        order.UpdatedAt = DateTime.UtcNow;
         await _orderAutoAcceptanceService.TryAcceptAsync(order, cancellationToken);
         await _dbContext.SaveChangesAsync(cancellationToken);
         await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);

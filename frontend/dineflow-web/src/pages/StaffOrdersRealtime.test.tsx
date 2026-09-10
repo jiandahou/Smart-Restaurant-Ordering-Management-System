@@ -165,7 +165,16 @@ function queuesAskedForSince(callCount: number) {
   return calls.slice(callCount).map(([params]) => params.queue)
 }
 
-/** The view toggle and the queue tabs both have a "Kitchen"; this is the queue one. */
+/**
+ * The queue tabs, as opposed to the display toggle above them.
+ *
+ * <p>
+ * These two lists used both to contain a tab called "Kitchen" — the toggle counting the whole board
+ * and the queue counting only what was being made — which is why this helper had to exist at all.
+ * The queue is called "Cooking" now, but the two lists are still distinct things and a test should
+ * still say which one it means.
+ * </p>
+ */
 function queueTab(name: RegExp) {
   const tabs = screen.getAllByRole('tablist')
     .find((list) => list.getAttribute('aria-label') !== 'Staff order display mode')!

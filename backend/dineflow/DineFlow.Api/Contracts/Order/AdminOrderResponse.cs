@@ -19,6 +19,17 @@ public sealed class AdminOrderResponse
     public Guid? RestaurantId { get; set; }
 
     public string? RestaurantName { get; set; }
+
+    /// <summary>
+    /// Whether this restaurant takes money at the counter at all.
+    /// </summary>
+    /// <remarks>
+    /// Carried on the order so the counter can tell, before it offers to move an unpaid online
+    /// order onto the till, whether the shop would accept that — a button whose every press is
+    /// refused is worse than one that is not there, because somebody takes the cash first and finds
+    /// out afterwards.
+    /// </remarks>
+    public string? RestaurantPaymentPolicy { get; set; }
     public string? RestaurantLegalBusinessName { get; set; }
     public string? RestaurantAbn { get; set; }
     public bool RestaurantGstRegistered { get; set; }

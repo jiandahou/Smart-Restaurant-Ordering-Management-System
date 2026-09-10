@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   AlertCircle,
   AlertTriangle,
@@ -32,6 +33,7 @@ import {
   getFrontCounterTakeaway,
   getRestaurants,
   recordFrontCounterPayment,
+  switchFrontCounterOrderToCounterPayment,
   voidCounterPayment,
   refundCounterPayment,
   settleCompleteFrontCounterTableSession,
@@ -71,12 +73,14 @@ import {
   resolveReceiptTitle,
   type ReceiptDocument,
 } from '@/lib/receipt'
+import { getCashEntryNotice } from '@/lib/cashEntryNotice'
 import { formatServiceCode } from '@/lib/serviceCode'
 import {
   getFrontCounterActionLabel,
   getFrontCounterAmountDue,
   getFrontCounterBlockReason,
   getFrontCounterOrderAction,
+  getTableSettlementBlockReason,
   isFrontCounterCarriedOver,
   matchesFrontCounterQueue,
   type FrontCounterOrderAction,
@@ -263,24 +267,11 @@ function describePickupDay(
   return { heading, dayLabel, kind: 'upcoming' }
 }
 
+/** The address-bar key the selected restaurant is kept under. */
+const restaurantParam = 'restaurant'
+
 function getRestaurantParam(isPlatformOwner: boolean, restaurantId: string) {
   return isPlatformOwner && restaurantId ? { restaurantId } : {}
-}
-
-function getTableSettlementBlockReason(table: FrontCounterTableDetail) {
-  if (!table.activeSessionId || table.activeOrders.length === 0) {
-    return 'This table has no active bill to settle.'
-  }
-
-  if (table.activeOrders.some((order) => order.status !== 'Ready')) {
-    return 'Every active order must be marked Ready before closing the table.'
-  }
-
-  if (table.activeOrders.some((order) => getFrontCounterOrderAction(order) === null)) {
-    return 'Resolve refunded or online payment issues before closing the table.'
-  }
-
-  return null
 }
 
 function refreshReceiptTarget(target: ReceiptPrintTarget): ReceiptPrintTarget {
@@ -315,7 +306,41 @@ export function FrontCounterPage() {
   const isPlatformOwner = user?.roles.includes('PlatformOwner') ?? false
   const [activeTab, setActiveTab] = useState<FrontCounterTab>('takeaway')
   const [restaurants, setRestaurants] = useState<Restaurant[]>([])
-  const [restaurantFilter, setRestaurantFilter] = useState('')
+  const [searchParams, setSearchParams] = useSearchParams()
+  /**
+   * Which restaurant's till is on screen, kept in the address bar rather than in component state.
+   *
+   * <p>
+   * It used to live in <code>useState</code> alone, which meant it survived exactly as long as the
+   * component did: a reload, a trip to another page and back, or anything else that remounted took
+   * the cashier silently back to whichever restaurant sorts first. Nothing announced it, and the
+   * screen looked the same either way — the same queue layout, the same buttons, someone else's
+   * orders. On a screen used to take money, "looks chosen" and "is chosen" have to be the same
+   * thing.
+   * </p>
+   *
+   * <p>
+   * The URL is the right place for it and not merely a convenient one: it is what the browser
+   * restores on reload, what back and forward already mean, and what a cashier can be sent in a
+   * message when they are looking at the wrong shop.
+   * </p>
+   */
+  const restaurantFilter = searchParams.get(restaurantParam) ?? ''
+  const setRestaurantFilter = useCallback((next: string | ((current: string) => string)) => {
+    setSearchParams((current) => {
+      const params = new URLSearchParams(current)
+      const value = typeof next === 'function' ? next(params.get(restaurantParam) ?? '') : next
+      if (value) {
+        params.set(restaurantParam, value)
+      } else {
+        params.delete(restaurantParam)
+      }
+      return params
+      // Replace rather than push: choosing a restaurant is changing what this screen shows, not
+      // arriving somewhere new, and a shift's worth of them would bury the page someone actually
+      // came from under fifty entries of Back.
+    }, { replace: true })
+  }, [setSearchParams])
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [takeawayOrders, setTakeawayOrders] = useState<AdminOrder[]>([])
@@ -476,6 +501,8 @@ export function FrontCounterPage() {
     void getRestaurants()
       .then((items) => {
         setRestaurants(items)
+        // Only when the address bar names none. A link that carries one is an instruction, and a
+        // reload is the cashier expecting to find the shop they left open.
         setRestaurantFilter((current) => current || items[0]?.id || '')
       })
       .catch((restaurantError) => {
@@ -483,7 +510,7 @@ export function FrontCounterPage() {
           description: restaurantError instanceof Error ? restaurantError.message : 'The request failed.',
         })
       })
-  }, [isPlatformOwner])
+  }, [isPlatformOwner, setRestaurantFilter])
 
   useEffect(() => {
     const initialLoadTimer = window.setTimeout(() => void loadFrontCounter(), 0)
@@ -621,7 +648,7 @@ export function FrontCounterPage() {
     setReceiptPrompt(nextTarget)
   }, [])
 
-  const requestOrderSettlement = useCallback((order: AdminOrder) => {
+  const requestOrderSettlement = useCallback(async (order: AdminOrder) => {
     const action = getFrontCounterOrderAction(order)
     if (!action) {
       toast.error('Order is not ready for a counter action', {
@@ -632,8 +659,39 @@ export function FrontCounterPage() {
 
     setTender('Card')
     setCashReceived('')
+
+    // One press for one intention. The cashier means "I am taking this money now", and moving the
+    // order onto the till is a step on the way to that, not a thing anybody came to the counter to
+    // do — so it happens here and the tender dialog opens behind it, showing the amount before any
+    // money changes hands.
+    if (action === 'switchToCounter') {
+      setBusyOrderId(order.id)
+      try {
+        const response = await switchFrontCounterOrderToCounterPayment(order.id, restaurantParams)
+        const switched = response.order
+        const next = getFrontCounterOrderAction(switched)
+        if (next === 'recordPayment' || next === 'payAndComplete') {
+          setPendingSettlement({ kind: 'order', order: switched, action: next })
+        } else {
+          // The server allowed the change but the order still has no counter action — nothing has
+          // been taken, so say what happened rather than opening a dialog that cannot settle.
+          toast.success('This order is now payable at the counter', {
+            description: getOrderDisplayCode(order),
+          })
+        }
+        await loadFrontCounter()
+      } catch (switchError) {
+        toast.error('Could not move this order to the counter', {
+          description: switchError instanceof Error ? switchError.message : 'The request failed.',
+        })
+      } finally {
+        setBusyOrderId(null)
+      }
+      return
+    }
+
     setPendingSettlement({ kind: 'order', order, action })
-  }, [])
+  }, [loadFrontCounter, restaurantParams])
 
   const loadRecentPayments = useCallback(async (searchTerm: string) => {
     setRecentPaymentsLoading(true)
@@ -918,6 +976,16 @@ export function FrontCounterPage() {
   const changeDue = tender === 'Cash' && cashEntryValid
     ? Math.max(0, parsedCashReceived - pendingAmountDue)
     : 0
+  const pendingCurrency = pendingSettlement?.kind === 'table'
+    ? pendingSettlement.table.currency
+    : pendingSettlement?.order.currency
+  const cashEntryNotice = tender === 'Cash'
+    ? getCashEntryNotice(
+        cashReceived,
+        pendingAmountDue,
+        (amount) => formatMoney(amount, pendingCurrency),
+      )
+    : null
 
   return (
     <main className="front-counter-page">
@@ -1139,7 +1207,7 @@ export function FrontCounterPage() {
                         order={order}
                         group={group}
                         busy={busyOrderId === order.id}
-                        onSettle={() => requestOrderSettlement(order)}
+                        onSettle={() => void requestOrderSettlement(order)}
                         onOpenTable={() => openTableForOrder(order)}
                         onReverse={(action) => requestCounterReversal(order, action)}
                         onPrint={() => queueReceiptPrint({
@@ -1616,8 +1684,21 @@ export function FrontCounterPage() {
                         value={cashReceived}
                         onChange={(event) => setCashReceived(event.target.value)}
                         aria-invalid={!cashEntryValid}
+                        // Tied to the field, not merely placed near it: a cashier working by ear
+                        // hears the reason with the field, rather than being told "invalid" and
+                        // left to hunt for the rest.
+                        aria-describedby={cashEntryNotice ? 'front-counter-cash-received-notice' : undefined}
                         placeholder={pendingAmountDue.toFixed(2)}
                       />
+                      {cashEntryNotice ? (
+                        <p
+                          id="front-counter-cash-received-notice"
+                          className="front-counter-cash-notice"
+                          role="alert"
+                        >
+                          {cashEntryNotice}
+                        </p>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>

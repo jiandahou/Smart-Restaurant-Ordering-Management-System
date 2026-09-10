@@ -1143,6 +1143,7 @@ public class AdminOrdersController : ControllerBase
             PendingRefundRequest = BuildPendingRefundRequest(order, latestPayment),
             RestaurantId = order.RestaurantId,
             RestaurantName = order.Restaurant?.Name,
+            RestaurantPaymentPolicy = order.Restaurant?.PaymentPolicy.ToString(),
             RestaurantLegalBusinessName = order.Restaurant?.LegalBusinessName,
             RestaurantAbn = order.Restaurant?.Abn,
             RestaurantGstRegistered = order.Restaurant?.GstRegistered ?? false,

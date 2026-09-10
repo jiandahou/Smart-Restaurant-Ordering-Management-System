@@ -57,6 +57,36 @@ public static class OrderPaymentMethodPolicy
         };
     }
 
+    /// <summary>
+    /// Writes an allowed change onto the order, and says whether it changed anything.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two lines that have to move together. Switching the method without also clearing the payment
+    /// status leaves an order marked Failed or Expired from an attempt at the method it no longer
+    /// uses, and the screens downstream read that status to decide whether the till may take money.
+    /// Reached from the customer's own screen and from the counter, so it is written here rather
+    /// than twice.
+    /// </para>
+    /// <para>
+    /// The decision belongs to <see cref="Refuse"/>, which callers must ask first. This only
+    /// records it.
+    /// </para>
+    /// </remarks>
+    /// <returns>False when the order was already going to be paid this way.</returns>
+    public static bool Apply(Order order, PaymentMethod requested, DateTime now)
+    {
+        if (order.PaymentMethod == requested)
+        {
+            return false;
+        }
+
+        order.PaymentMethod = requested;
+        order.PaymentStatus = PaymentStatus.Unpaid;
+        order.UpdatedAt = now;
+        return true;
+    }
+
     /// <summary>Whether the restaurant lets an order be settled at the till.</summary>
     public static bool AllowsCounterPayment(RestaurantEntity? restaurant) =>
         restaurant?.PaymentPolicy == RestaurantPaymentPolicy.PayAtCounterAllowed;

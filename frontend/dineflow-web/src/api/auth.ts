@@ -911,6 +911,13 @@ export type AdminOrder = {
   pendingRefundRequest: AdminOrderPendingRefundRequest | null
   restaurantId: string | null
   restaurantName: string | null
+  /**
+   * Whether this restaurant takes money at the counter at all.
+   *
+   * Carried on the order so the counter can tell, before offering to move an unpaid online order
+   * onto the till, whether the shop would accept that.
+   */
+  restaurantPaymentPolicy?: 'PrepayRequired' | 'PayAtCounterAllowed' | null
   restaurantLegalBusinessName?: string | null
   restaurantAbn?: string | null
   restaurantGstRegistered?: boolean
@@ -2908,6 +2915,27 @@ export function refundCounterPayment(
   return request<FrontCounterSettleOrderResponse>(
     `/api/staff/front-counter/payments/${paymentId}/offline-refund${toQueryString(params)}`,
     { method: 'POST', body: JSON.stringify(payload) },
+  )
+}
+
+/**
+ * Moves an order that was going to be paid online onto the till, so cash can be taken for it.
+ *
+ * <p>
+ * For the diner who chose to pay online, never finished, and walked up to the counter with a note
+ * in their hand. Their own phone could always make this change; this is the same change made by the
+ * person they are standing in front of.
+ * </p>
+ */
+export function switchFrontCounterOrderToCounterPayment(
+  orderId: string,
+  params: { restaurantId?: string } = {},
+) {
+  return request<FrontCounterSettleOrderResponse>(
+    `/api/staff/front-counter/orders/${orderId}/pay-at-counter${toQueryString(params)}`,
+    {
+      method: 'POST',
+    },
   )
 }
 

@@ -150,7 +150,12 @@ const queueStatuses: Record<Queue, Set<string>> = {
 const queueLabels: Record<Queue, string> = {
   active: 'Active',
   new: 'New',
-  kitchen: 'Kitchen',
+  // "Cooking", not "Kitchen". The display toggle above these tabs is also called Kitchen and counts
+  // the whole board — everything waiting to be accepted, everything being made, everything ready —
+  // while this queue is only the middle of those three. One word, two numbers, side by side on one
+  // screen, and no way to tell from either which question it was answering. This is the narrower
+  // one, so it takes the narrower name: what the pass is actually working on now.
+  kitchen: 'Cooking',
   ready: 'Ready',
   late: 'Over 20 min',
   payment: 'Payment holds',

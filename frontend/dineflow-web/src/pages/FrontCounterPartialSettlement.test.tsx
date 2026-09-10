@@ -1,6 +1,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 
 import type { AdminOrder } from '@/api/auth'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -156,7 +157,7 @@ afterEach(() => {
 
 async function takePaymentAndComplete() {
   const user = userEvent.setup()
-  render(<TooltipProvider><FrontCounterPage /></TooltipProvider>)
+  render(<MemoryRouter><TooltipProvider><FrontCounterPage /></TooltipProvider></MemoryRouter>)
 
   await user.click(await screen.findByRole('button', { name: /take payment & complete/i }))
   const dialog = await screen.findByRole('dialog')
@@ -203,7 +204,7 @@ describe('a counter payment that goes through while the pickup completion fails'
 
   it('reloads the counter so the lists behind agree with the till', async () => {
     const user = userEvent.setup()
-    render(<TooltipProvider><FrontCounterPage /></TooltipProvider>)
+    render(<MemoryRouter><TooltipProvider><FrontCounterPage /></TooltipProvider></MemoryRouter>)
 
     await user.click(await screen.findByRole('button', { name: /take payment & complete/i }))
     const dialog = await screen.findByRole('dialog')

@@ -24,6 +24,7 @@ public sealed class StaffFrontCounterController(
     UserManager<ApplicationUser> userManager,
     OrderRealtimeNotifier orderRealtimeNotifier,
     CounterPaymentReversalService counterPaymentReversalService,
+    OrderAutoAcceptanceService orderAutoAcceptanceService,
     ReportLogWriter reportLogWriter) : ControllerBase
 {
     private static readonly OrderStatus[] ActiveOrderStatuses =
@@ -480,6 +481,93 @@ public sealed class StaffFrontCounterController(
         {
             await orderRealtimeNotifier.OrderUpdatedAsync(order, cancellationToken);
         }
+
+        return Ok(new FrontCounterSettleOrderResponse
+        {
+            Order = AdminOrdersController.MapToAdminResponse(order)
+        });
+    }
+
+    /// <summary>
+    /// Moves an order that was going to be paid online onto the till, so cash can be taken for it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The gap this closes. A diner orders, chooses to pay online, and never finishes — the tab is
+    /// closed, the phone is flat, they simply walk to the counter with a note in their hand. The
+    /// order sits unpaid, the kitchen is stopped on purpose because the money is unresolved, and
+    /// until now every screen a member of staff had offered exactly one thing to do about it:
+    /// reject the order and key the whole thing in again. The till showed nothing owing, because
+    /// nothing is owed <em>at the till</em> until the order says that is where it will be paid.
+    /// </para>
+    /// <para>
+    /// The customer could already do this from their own phone; the endpoint behind it just would
+    /// not answer to anybody else. So this is the same change, made by the person the customer is
+    /// standing in front of — the rule that decides whether it is allowed is
+    /// <see cref="OrderPaymentMethodPolicy"/>, unchanged and shared, which is what keeps the two
+    /// doors from drifting apart.
+    /// </para>
+    /// <para>
+    /// One direction only. Sending an order the other way, back to online, would hand the customer
+    /// in front of you a payment link they have already given up on; that choice is theirs to make
+    /// on their own screen, where they can act on it.
+    /// </para>
+    /// </remarks>
+    [HttpPost("orders/{orderId:guid}/pay-at-counter")]
+    public async Task<ActionResult<FrontCounterSettleOrderResponse>> SwitchOrderToCounterPayment(
+        Guid orderId,
+        [FromQuery] Guid? restaurantId,
+        CancellationToken cancellationToken)
+    {
+        var scope = await ResolveRestaurantIdAsync(restaurantId, cancellationToken);
+        if (scope.Error is not null)
+        {
+            return scope.Error;
+        }
+
+        var order = await LoadTrackedOrderQuery(scope.RestaurantId!.Value)
+            .FirstOrDefaultAsync(item => item.Id == orderId, cancellationToken);
+
+        if (order is null)
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
+        // Refusals here are the ones that protect money — an order already paid, or one whose
+        // checkout session is live and may be taking payment at this very second. The customer is
+        // standing at the counter, so the message has to be something the cashier can say out loud.
+        var refusal = OrderPaymentMethodPolicy.Refuse(order, PaymentMethod.PayAtCounter);
+        if (refusal is not null)
+        {
+            return Conflict(new { message = refusal });
+        }
+
+        var previousMethod = order.PaymentMethod;
+        if (!OrderPaymentMethodPolicy.Apply(order, PaymentMethod.PayAtCounter, DateTime.UtcNow))
+        {
+            return Ok(new FrontCounterSettleOrderResponse
+            {
+                Order = AdminOrdersController.MapToAdminResponse(order)
+            });
+        }
+
+        // Nothing was holding the kitchen back except the money, so it can start now.
+        await orderAutoAcceptanceService.TryAcceptAsync(order, cancellationToken);
+
+        // Audited, unlike the customer's own version of this: here there is a member of staff who
+        // decided it, and "why is this order suddenly cash" is a question the day's takings will
+        // eventually ask.
+        reportLogWriter.AddAudit(
+            "Order.SwitchedToCounterPayment",
+            "Order",
+            order.Id.ToString(),
+            order.RestaurantId,
+            $"{order.OrderNumber} will be paid at the counter instead of online.",
+            before: new { paymentMethod = previousMethod.ToString() },
+            after: new { paymentMethod = order.PaymentMethod.ToString() });
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 
         return Ok(new FrontCounterSettleOrderResponse
         {
