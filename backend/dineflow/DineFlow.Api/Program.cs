@@ -370,6 +370,7 @@ builder.Services.AddHostedService(provider =>
     provider.GetRequiredService<PlatformBillingReconciliationService>());
 builder.Services.AddHostedService<UnacceptableOrderRefundService>();
 builder.Services.AddHostedService<AbandonedOrderExpiryService>();
+builder.Services.AddHostedService<FinishedTableSessionSweep>();
 
 builder.Services
     .AddIdentity<ApplicationUser, IdentityRole>(options =>

@@ -1000,6 +1000,18 @@ public class PublicCartsController(
                         cancellationToken);
             }
 
+            // The cart's own session still has to be tonight's. A cart outlives a sitting by less
+            // than a session does, but not by nothing, and reusing a stale one here would walk
+            // straight past the check the scan route makes.
+            if (tableSession is not null && !await tableSessionService.IsSameServiceAsync(
+                    cart.RestaurantId,
+                    tableSession.OpenedAt,
+                    DateTime.UtcNow,
+                    cancellationToken))
+            {
+                tableSession = null;
+            }
+
             tableSession ??= await tableSessionService.GetOrCreateOpenSessionAsync(
                 cart.RestaurantId,
                 cart.TableId.Value,
