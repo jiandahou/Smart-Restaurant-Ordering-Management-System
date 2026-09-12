@@ -543,12 +543,60 @@ public sealed class StaffFrontCounterController(
         }
 
         var previousMethod = order.PaymentMethod;
-        if (!OrderPaymentMethodPolicy.Apply(order, PaymentMethod.PayAtCounter, DateTime.UtcNow))
+        var now = DateTime.UtcNow;
+
+        // Claimed on the database row, not decided from the copy in memory.
+        //
+        // A till with a touchscreen gets double-tapped, and a busy counter has two of them. Each
+        // request had read the order before any of them wrote, so each saw Online, each believed it
+        // was the one making the change, and each recorded that it had: eight presses in a test
+        // produced one switch and eight audit entries saying so. Nothing was mischarged — the
+        // writes were identical and the payment path has its own guard — but "why is this order
+        // suddenly cash?" is the question this record exists to answer, and answering it eight
+        // times over reads as something having gone wrong when nothing had.
+        //
+        // So exactly one request may replace the method it read. The rest find zero rows, and say
+        // so by staying quiet.
+        var claimed = dbContext.Database.IsRelational()
+            ? await dbContext.Orders
+                .Where(item => item.Id == order.Id && item.PaymentMethod == previousMethod)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(item => item.PaymentMethod, PaymentMethod.PayAtCounter)
+                        .SetProperty(item => item.PaymentStatus, PaymentStatus.Unpaid)
+                        .SetProperty(item => item.UpdatedAt, now),
+                    cancellationToken)
+            : 1;
+
+        // Whoever lost still answers with the order as it now stands: pressing twice is one
+        // intention, not an error to interpret at a counter with somebody waiting.
+        if (claimed == 0 || !OrderPaymentMethodPolicy.Apply(order, PaymentMethod.PayAtCounter, now))
         {
+            await dbContext.Entry(order).ReloadAsync(cancellationToken);
             return Ok(new FrontCounterSettleOrderResponse
             {
                 Order = AdminOrdersController.MapToAdminResponse(order)
             });
+        }
+
+        // The claim above already wrote those three columns, so the tracker is told they are no
+        // longer pending — by moving the original values up to the new ones, not by clearing
+        // IsModified. Clearing it reverts the property to its original value, which quietly put
+        // Online back on the order in memory and left the kitchen waiting on a payment that was no
+        // longer coming. The tests caught it; the flag reads like a no-op and is not one.
+        if (dbContext.Database.IsRelational())
+        {
+            var entry = dbContext.Entry(order);
+            foreach (var property in new[]
+                     {
+                         entry.Property(item => item.PaymentMethod).Metadata.Name,
+                         entry.Property(item => item.PaymentStatus).Metadata.Name,
+                         entry.Property(item => item.UpdatedAt).Metadata.Name,
+                     })
+            {
+                var tracked = entry.Property(property);
+                tracked.OriginalValue = tracked.CurrentValue;
+            }
         }
 
         // Nothing was holding the kitchen back except the money, so it can start now.

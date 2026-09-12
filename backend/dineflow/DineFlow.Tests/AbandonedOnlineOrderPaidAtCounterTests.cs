@@ -213,6 +213,39 @@ public sealed class AbandonedOnlineOrderPaidAtCounterTests : IAsyncLifetime
         Assert.Equal(PaymentMethod.PayAtCounter, (await ReadAsync(_abandonedOrderId)).PaymentMethod);
     }
 
+    /// <summary>
+    /// And a double-tapped touchscreen — or two tills at once — records it once.
+    /// </summary>
+    /// <remarks>
+    /// Every request reads the order before any of them writes, so each one sees Online and each
+    /// believes it is the one making the change. Deciding that from the copy in memory had all of
+    /// them record that they had: one switch, six entries saying so. Nothing was mischarged, but
+    /// "why is this order suddenly cash?" is the question this record exists to answer, and
+    /// answering it six times reads as something having gone wrong when nothing had.
+    /// </remarks>
+    [RequiresPostgresFact]
+    public async Task SimultaneousPressesRecordOneSwitch()
+    {
+        var presses = await Task.WhenAll(Enumerable
+            .Range(0, 6)
+            .Select(_ => SwitchAsync(_abandonedOrderId)));
+
+        Assert.All(presses, press => Assert.Equal(HttpStatusCode.OK, press.StatusCode));
+        Assert.Equal(PaymentMethod.PayAtCounter, (await ReadAsync(_abandonedOrderId)).PaymentMethod);
+
+        await _api.UseDbAsync(async context =>
+        {
+            var entityId = _abandonedOrderId.ToString();
+            var switches = await context.AuditLogs
+                .AsNoTracking()
+                .CountAsync(log =>
+                    log.EntityId == entityId &&
+                    log.Action == "Order.SwitchedToCounterPayment");
+
+            Assert.Equal(1, switches);
+        });
+    }
+
     // ---- who may do it ------------------------------------------------------------------------
 
     [RequiresPostgresFact]
