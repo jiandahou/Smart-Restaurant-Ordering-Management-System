@@ -434,20 +434,144 @@ export type ThermalDocument =
   | { kind: 'kitchen'; ticket: KitchenTicket }
   | { kind: 'receipt'; receipt: ReceiptDocument }
 
+export const unsupportedPrinterTextMarker = '[UNSUPPORTED TEXT - SEE SCREEN]'
+export const removedPrinterMarkupMarker = '[MARKUP REMOVED - SEE SCREEN]'
+export const removedPrinterControlMarker = '[CONTROL REMOVED - SEE SCREEN]'
+
+function supportsPrinterCharacter(character: string, encoding: QzPrintEncoding): boolean {
+  const codePoint = character.codePointAt(0) ?? 0
+  if (character === '\n' || (codePoint >= 0x20 && codePoint <= 0x7e)) return true
+
+  if (encoding === 'ISO-8859-1') {
+    return codePoint >= 0xa0 && codePoint <= 0xff
+  }
+
+  if (encoding === 'CP1252') {
+    return (codePoint >= 0xa0 && codePoint <= 0xff)
+      || [0x20ac, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6,
+        0x2030, 0x0160, 0x2039, 0x0152, 0x017d, 0x2018, 0x2019, 0x201c,
+        0x201d, 0x2022, 0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a,
+        0x0153, 0x017e, 0x0178].includes(codePoint)
+  }
+
+  if (encoding === 'GBK' || encoding === 'GB2312') {
+    return (codePoint >= 0x3400 && codePoint <= 0x9fff)
+      || (codePoint >= 0x3000 && codePoint <= 0x303f)
+      || (codePoint >= 0xff01 && codePoint <= 0xff60)
+  }
+
+  // A raw ESC/POS queue advertising UTF-8 does not imply that the printer firmware contains
+  // Unicode glyphs. The Star queue used in the physical test printed UTF-8 emoji and Arabic as
+  // mojibake. ASCII is the only portable safe set; anything else must send staff to the screen.
+  return false
+}
+
+/**
+ * Keeps customer-controlled text from being mistaken for readable kitchen instructions.
+ * Unsupported scripts are made explicit instead of becoming mojibake, and ESC/POS/control bytes
+ * are removed before the document's own trusted printer commands are added.
+ */
+export function makePrinterSafeText(value: string, encoding: QzPrintEncoding = 'UTF-8'): string {
+  const withoutMarkup = value
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/giu, removedPrinterMarkupMarker)
+    .replace(/<\/?[a-z][^>\r\n]{0,200}>/giu, removedPrinterMarkupMarker)
+    .replace(/\r\n?/g, '\n')
+    .replace(/\t/g, '  ')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, removedPrinterControlMarker)
+
+  let result = ''
+  let replacingUnsupportedRun = false
+  for (const character of withoutMarkup) {
+    if (supportsPrinterCharacter(character, encoding)) {
+      result += character
+      replacingUnsupportedRun = false
+    } else if (!replacingUnsupportedRun) {
+      result += unsupportedPrinterTextMarker
+      replacingUnsupportedRun = true
+    }
+  }
+
+  return result
+}
+
+function makeDocumentPrinterSafe(job: ThermalDocument, encoding: QzPrintEncoding): ThermalDocument {
+  const safe = (value: string) => makePrinterSafeText(value, encoding)
+  const safeNullable = (value: string | null | undefined) => value == null ? value : safe(value)
+
+  if (job.kind === 'kitchen') {
+    return {
+      kind: 'kitchen',
+      ticket: {
+        ...job.ticket,
+        serviceCode: safe(job.ticket.serviceCode),
+        orderNumber: safe(job.ticket.orderNumber),
+        restaurantName: safe(job.ticket.restaurantName),
+        orderScope: safe(job.ticket.orderScope),
+        status: safe(job.ticket.status),
+        orderNote: safeNullable(job.ticket.orderNote),
+        items: job.ticket.items.map((item) => ({
+          ...item,
+          name: safe(item.name),
+          note: safeNullable(item.note),
+          optionGroups: item.optionGroups.map((group) => ({
+            groupName: safe(group.groupName),
+            options: group.options.map(safe),
+          })),
+        })),
+      },
+    }
+  }
+
+  return {
+    kind: 'receipt',
+    receipt: {
+      ...job.receipt,
+      documentTitle: safe(job.receipt.documentTitle),
+      scopeLabel: safe(job.receipt.scopeLabel),
+      code: safe(job.receipt.code),
+      supplier: {
+        restaurantName: safe(job.receipt.supplier.restaurantName),
+        legalBusinessName: safeNullable(job.receipt.supplier.legalBusinessName) ?? null,
+        abn: safeNullable(job.receipt.supplier.abn) ?? null,
+        address: safeNullable(job.receipt.supplier.address) ?? null,
+        phone: safeNullable(job.receipt.supplier.phone) ?? null,
+      },
+      meta: job.receipt.meta.map((row) => ({ label: safe(row.label), value: safe(row.value) })),
+      items: job.receipt.items.map((item) => ({
+        ...item,
+        name: safe(item.name),
+        note: safeNullable(item.note) ?? null,
+        modifiers: item.modifiers.map((modifier) => ({ ...modifier, label: safe(modifier.label) })),
+        optionGroups: item.optionGroups.map((group) => ({
+          groupName: safe(group.groupName),
+          options: group.options.map(safe),
+        })),
+      })),
+      surchargeNotice: safeNullable(job.receipt.surchargeNotice) ?? null,
+      refundContactEmail: safeNullable(job.receipt.refundContactEmail) ?? null,
+    },
+  }
+}
+
 export function buildEscPosDocument(
   job: ThermalDocument,
-  settings: Pick<ThermalPrinterSettings, 'paperWidth' | 'cutPaper' | 'beepOnPrint'>,
+  settings: Pick<ThermalPrinterSettings, 'paperWidth' | 'cutPaper' | 'beepOnPrint'> &
+    Partial<Pick<ThermalPrinterSettings, 'qzEncoding'>>,
 ): string {
-  return job.kind === 'receipt'
-    ? buildEscPosReceipt(job.receipt, settings)
-    : buildEscPosKitchenTicket(job.ticket, settings)
+  const safeJob = makeDocumentPrinterSafe(job, settings.qzEncoding ?? 'UTF-8')
+  return safeJob.kind === 'receipt'
+    ? buildEscPosReceipt(safeJob.receipt, settings)
+    : buildEscPosKitchenTicket(safeJob.ticket, settings)
 }
 
 export function encodeEscPosDocument(
   job: ThermalDocument,
   settings: Pick<ThermalPrinterSettings, 'paperWidth' | 'cutPaper' | 'beepOnPrint'>,
 ): Uint8Array {
-  return new TextEncoder().encode(buildEscPosDocument(job, settings))
+  // Direct browser transports always use TextEncoder (UTF-8); a QZ-only legacy encoding setting
+  // must not make us preserve characters that these paths will send as the wrong bytes.
+  return new TextEncoder().encode(buildEscPosDocument(job, { ...settings, qzEncoding: 'UTF-8' }))
 }
 
 /** A label for logs and toasts — the order number, or the table code for a merged bill. */

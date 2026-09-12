@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReceiptDocument } from './receipt'
 import {
+  buildEscPosDocument,
   buildEscPosKitchenTicket,
   buildEscPosReceipt,
   defaultThermalPrinterSettings,
@@ -13,12 +14,15 @@ import {
   QzTrayError,
   QZ_TRAY_DOWNLOAD_URL,
   qzWebsocketPingIntervalSeconds,
+  removedPrinterControlMarker,
+  removedPrinterMarkupMarker,
   releaseWebSerialSession,
   testQzSerialConnection,
   testWebSerialConnection,
   testWebUsbConnection,
   type KitchenTicket,
   type QzTrayPrinterDescriptor,
+  unsupportedPrinterTextMarker,
 } from './thermalPrinter'
 
 const sampleTicket: KitchenTicket = {
@@ -239,6 +243,62 @@ describe('buildEscPosKitchenTicket', () => {
   it('emits the cut command only when cutPaper is enabled', () => {
     expect(buildEscPosKitchenTicket(sampleTicket, baseSettings)).toContain('\x1dV\x41\x00')
     expect(buildEscPosKitchenTicket(sampleTicket, { ...baseSettings, cutPaper: false })).not.toContain('\x1dV\x41\x00')
+  })
+})
+
+describe('raw ESC/POS customer text safety', () => {
+  const baseSettings = {
+    paperWidth: '80mm' as const,
+    cutPaper: true,
+    beepOnPrint: false,
+    qzEncoding: 'UTF-8' as const,
+  }
+
+  it('makes unsupported text and markup explicit while preserving trusted printer commands', () => {
+    const ticket: KitchenTicket = {
+      ...sampleTicket,
+      restaurantName: 'Test 😀 مطعم',
+      orderNote: '<script>alert(1)</script> allergy\x1bV',
+      items: [{
+        quantity: 1,
+        name: 'Falafel 😀',
+        note: 'مرحبا',
+        optionGroups: [],
+      }],
+    }
+
+    const output = buildEscPosDocument({ kind: 'kitchen', ticket }, baseSettings)
+
+    expect(output).toContain(unsupportedPrinterTextMarker)
+    expect(output).toContain(removedPrinterMarkupMarker)
+    expect(output).toContain(removedPrinterControlMarker)
+    expect(output).not.toContain('<script>')
+    expect(output).not.toContain('alert(1)')
+    expect(output).not.toContain('😀')
+    expect(output).not.toContain('مرحبا')
+    expect(output.startsWith('\x1b@')).toBe(true)
+    expect(output).toContain('\x1dV\x41\x00')
+  })
+
+  it('keeps Chinese for a selected GBK-capable printer but still flags emoji', () => {
+    const output = buildEscPosDocument({
+      kind: 'kitchen',
+      ticket: { ...sampleTicket, orderNote: '不要花生 😀' },
+    }, { ...baseSettings, qzEncoding: 'GBK' })
+
+    expect(output).toContain('不要花生')
+    expect(output).toContain(unsupportedPrinterTextMarker)
+    expect(output).not.toContain('😀')
+  })
+
+  it('keeps CP1252 text when that printer code page is selected', () => {
+    const output = buildEscPosDocument({
+      kind: 'kitchen',
+      ticket: { ...sampleTicket, restaurantName: 'Café €' },
+    }, { ...baseSettings, qzEncoding: 'CP1252' })
+
+    expect(output).toContain('Café €')
+    expect(output).not.toContain(unsupportedPrinterTextMarker)
   })
 })
 
