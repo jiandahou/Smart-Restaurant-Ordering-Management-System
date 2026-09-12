@@ -33,6 +33,7 @@ pnpm-debug.log*
 bin/
 obj/
 TestResults/
+test-results/
 *.nupkg
 *.snupkg
 
@@ -40,4 +41,3 @@ TestResults/
 docker-compose.override.yml
 *.pid
 *.log
-
