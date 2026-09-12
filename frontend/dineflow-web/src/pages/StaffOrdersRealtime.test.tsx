@@ -20,6 +20,7 @@ import { StaffOrdersPage } from './StaffOrdersPage'
 
 const getStaffOrders = vi.hoisted(() => vi.fn())
 const getRestaurants = vi.hoisted(() => vi.fn())
+const transitionAdminOrder = vi.hoisted(() => vi.fn())
 const printing = vi.hoisted(() => ({ orderEventRevision: 0 }))
 
 const restaurantId = '11111111-1111-1111-1111-111111111111'
@@ -93,7 +94,7 @@ vi.mock('@/api/auth', async (importOriginal) => ({
   getStaffOrders,
   getAdminOrders: vi.fn(),
   getRestaurants,
-  transitionAdminOrder: vi.fn(),
+  transitionAdminOrder,
   recordCounterPayment: vi.fn(),
 }))
 
@@ -182,6 +183,38 @@ function queueTab(name: RegExp) {
 }
 
 describe('an order event arriving while someone is using the screen', () => {
+  it('replaces a changed primary action and sends the status the operator actually saw', async () => {
+    const user = userEvent.setup()
+    let status: AdminOrder['status'] = 'Accepted'
+    getStaffOrders.mockImplementation(async () => pageOf([order({
+      id: 'order-live',
+      orderNumber: 'ORD-LIVE',
+      status,
+      paymentStatus: 'Paid',
+      canProcess: true,
+      availableActions: status === 'Accepted' ? ['StartPreparing', 'Cancel'] : ['MarkReady', 'Cancel'],
+      createdAt: new Date().toISOString(),
+    })]))
+    transitionAdminOrder.mockResolvedValue(order({ status: 'Ready' }))
+
+    const { rerender } = render(<TooltipProvider><StaffOrdersPage /></TooltipProvider>)
+    const oldButton = await screen.findByRole('button', { name: 'Start preparing' })
+
+    status = 'Preparing'
+    printing.orderEventRevision = 1
+    rerender(<TooltipProvider><StaffOrdersPage /></TooltipProvider>)
+    const newButton = await screen.findByRole('button', { name: 'Mark ready' })
+
+    expect(newButton).not.toBe(oldButton)
+    await user.click(newButton)
+    await waitFor(() => expect(transitionAdminOrder).toHaveBeenCalledWith(
+      'order-live',
+      'MarkReady',
+      undefined,
+      'Preparing',
+    ))
+  })
+
   it('leaves them on the queue they chose', async () => {
     const user = userEvent.setup()
     const { rerender } = render(<TooltipProvider><StaffOrdersPage /></TooltipProvider>)

@@ -2997,10 +2997,11 @@ export function transitionAdminOrder(
   orderId: string,
   action: OrderTransitionAction,
   reason?: string,
+  expectedStatus?: AdminOrderStatus,
 ) {
   return request<AdminOrder>(`/api/admin/orders/${orderId}/transitions`, {
     method: 'POST',
-    body: JSON.stringify({ action, reason }),
+    body: JSON.stringify({ action, reason, expectedStatus }),
   })
 }
 

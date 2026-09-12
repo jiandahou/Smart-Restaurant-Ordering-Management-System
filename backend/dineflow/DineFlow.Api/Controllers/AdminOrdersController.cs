@@ -641,6 +641,21 @@ public class AdminOrdersController : ControllerBase
             });
         }
 
+        OrderStatus? expectedStatus = null;
+        if (!string.IsNullOrWhiteSpace(request.ExpectedStatus))
+        {
+            if (!Enum.TryParse<OrderStatus>(request.ExpectedStatus, true, out var parsedExpectedStatus) ||
+                !Enum.IsDefined(parsedExpectedStatus))
+            {
+                return BadRequest(new
+                {
+                    message = $"ExpectedStatus must be one of: {string.Join(", ", Enum.GetNames<OrderStatus>())}."
+                });
+            }
+
+            expectedStatus = parsedExpectedStatus;
+        }
+
         var reason = string.IsNullOrWhiteSpace(request.Reason) ? null : request.Reason.Trim();
         if (reason?.Length > 1_000)
         {
@@ -684,6 +699,16 @@ public class AdminOrdersController : ControllerBase
             return Forbid();
         }
 
+        if (expectedStatus.HasValue && order.Status != expectedStatus.Value)
+        {
+            return Conflict(new
+            {
+                message = $"The order changed from {expectedStatus.Value} to {order.Status} before the action was applied.",
+                currentStatus = order.Status.ToString(),
+                availableActions = GetAvailableActions(order)
+            });
+        }
+
         if (!OrderStatusTransitions.TryGetNextStatus(order.Status, action, out var nextStatus))
         {
             return Conflict(new
@@ -711,6 +736,34 @@ public class AdminOrdersController : ControllerBase
         // the change tracker. Without a transaction around both, a failure between them leaves an
         // order that was never closed holding nothing, or one that was closed holding everything.
         await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+        // The tracked order is only a snapshot. Two staff tabs can both have read Accepted and both
+        // reach this point, so the database row itself is the lock: exactly one request may replace
+        // the status it read. The loser wakes after the winner commits and affects zero rows.
+        var claimed = await _dbContext.Orders
+            .Where(item => item.Id == order.Id && item.Status == previousStatus)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(item => item.Status, nextStatus)
+                    .SetProperty(item => item.UpdatedAt, now),
+                cancellationToken);
+
+        if (claimed == 0)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            var currentStatus = await _dbContext.Orders
+                .AsNoTracking()
+                .Where(item => item.Id == order.Id)
+                .Select(item => item.Status)
+                .SingleAsync(cancellationToken);
+            order.Status = currentStatus;
+            return Conflict(new
+            {
+                message = $"The order changed to {currentStatus} before the action was applied.",
+                currentStatus = currentStatus.ToString(),
+                availableActions = GetAvailableActions(order)
+            });
+        }
 
         // Reviving a closed order takes its portions back before anything else commits. They were
         // handed to whoever wanted them when it closed, and an order reopened onto stock that is

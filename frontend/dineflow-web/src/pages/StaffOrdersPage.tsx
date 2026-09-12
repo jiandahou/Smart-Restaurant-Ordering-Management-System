@@ -8,6 +8,7 @@ import {
   getStaffOrders,
   recordCounterPayment,
   transitionAdminOrder,
+  ApiError,
   type AdminOrder,
   type OrderTransitionAction,
   type Restaurant,
@@ -557,7 +558,7 @@ export function StaffOrdersPage() {
   ) => {
     setBusyOrderId(order.id)
     try {
-      const updatedOrder = await transitionAdminOrder(order.id, action, transitionReason)
+      const updatedOrder = await transitionAdminOrder(order.id, action, transitionReason, order.status)
       replaceOrder(updatedOrder)
       setPendingTransition(null)
       setReason('')
@@ -571,8 +572,13 @@ export function StaffOrdersPage() {
         )
       }
     } catch (transitionError) {
+      if (transitionError instanceof ApiError && transitionError.status === 409) {
+        await loadOrders()
+      }
       toast.error('Order could not be processed', {
-        description: transitionError instanceof Error ? transitionError.message : 'The request failed.',
+        description: transitionError instanceof ApiError && transitionError.status === 409
+          ? `${transitionError.message} The queue has been refreshed.`
+          : transitionError instanceof Error ? transitionError.message : 'The request failed.',
       })
     } finally {
       setBusyOrderId(null)
@@ -997,6 +1003,7 @@ export function StaffOrdersPage() {
                               ) : null}
                               {primaryAction ? (
                                 <Button
+                                  key={`${order.id}-${order.status}-${primaryAction}`}
                                   type="button"
                                   size="sm"
                                   className="staff-order-primary-action"
@@ -1232,6 +1239,7 @@ export function StaffOrdersPage() {
                           ) : null}
                           {primaryAction && !paymentHold ? (
                             <Button
+                              key={`${order.id}-${order.status}-${primaryAction}`}
                               type="button"
                               size="sm"
                               className="staff-order-primary-action"

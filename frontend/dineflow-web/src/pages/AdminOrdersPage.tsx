@@ -33,6 +33,7 @@ import {
   recordCounterPayment,
   refundAdminOrder,
   transitionAdminOrder,
+  ApiError,
   type AdminOrder,
   type AdminOrderSummary,
   type AdminOrderStatusHistory,
@@ -571,7 +572,7 @@ export function AdminOrdersPage() {
   ) => {
     setTransitioningOrderId(order.id)
     try {
-      const updatedOrder = await transitionAdminOrder(order.id, action, reason)
+      const updatedOrder = await transitionAdminOrder(order.id, action, reason, order.status)
       setOrders((current) => current.map((item) => item.id === updatedOrder.id ? updatedOrder : item))
       setStatusHistoryByOrderId((current) => {
         const next = { ...current }
@@ -588,8 +589,13 @@ export function AdminOrdersPage() {
       setTransitionReason('')
       await loadOrders()
     } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        await loadOrders()
+      }
       toast.error('Could not update order status', {
-        description: error instanceof Error ? error.message : 'The request failed.',
+        description: error instanceof ApiError && error.status === 409
+          ? `${error.message} The order list has been refreshed.`
+          : error instanceof Error ? error.message : 'The request failed.',
       })
     } finally {
       setTransitioningOrderId(null)

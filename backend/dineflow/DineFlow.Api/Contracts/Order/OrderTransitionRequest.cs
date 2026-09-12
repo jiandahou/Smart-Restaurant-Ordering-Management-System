@@ -4,6 +4,13 @@ public sealed class OrderTransitionRequest
 {
     public string Action { get; init; } = string.Empty;
 
+    /// <summary>
+    /// The status shown when the operator chose the action. A stale screen must not apply an
+    /// action to a newer state, particularly when a realtime update replaces the primary button
+    /// between pointer-down and click.
+    /// </summary>
+    public string? ExpectedStatus { get; init; }
+
     public string? Reason { get; init; }
 
     /// <summary>
