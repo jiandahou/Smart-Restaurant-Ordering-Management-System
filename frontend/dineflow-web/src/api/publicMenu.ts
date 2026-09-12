@@ -1,3 +1,4 @@
+import { getRequestErrorMessage } from '@/lib/requestErrorMessage'
 
 export type PublicOrderingRestaurant = {
   id: string
@@ -209,7 +210,7 @@ async function publicRequest<T>(path: string) {
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => null)
-    throw new Error(errorBody?.message || `Request failed with HTTP ${response.status}`)
+    throw new Error(getRequestErrorMessage(response.status, errorBody))
   }
 
   return (await response.json()) as T

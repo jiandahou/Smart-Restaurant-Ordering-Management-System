@@ -1,3 +1,4 @@
+import { getRequestErrorMessage } from '@/lib/requestErrorMessage'
 import { getStoredToken } from './auth'
 import { createUuid } from '../lib/uuid'
 
@@ -317,7 +318,7 @@ async function cartRequest<T>(
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => null)
-    const error = new Error(errorBody?.message || `Request failed with HTTP ${response.status}`)
+    const error = new Error(getRequestErrorMessage(response.status, errorBody))
 
     // The body carried more than a message — a code, and for a conflict the cart as it now stands.
     // Throwing only the sentence discarded exactly what the caller needed to recover.
