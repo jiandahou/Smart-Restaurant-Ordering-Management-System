@@ -7,6 +7,10 @@ import path from 'node:path'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const backendTarget = env.VITE_API_PROXY_TARGET || 'http://localhost:5000'
+  const allowedHosts = env.VITE_ALLOWED_HOSTS
+    ?.split(',')
+    .map((host) => host.trim())
+    .filter(Boolean)
 
   return {
     plugins: [react(), tailwindcss()],
@@ -16,6 +20,7 @@ export default defineConfig(({ mode }) => {
       },
     },
     server: {
+      allowedHosts,
       watch: {
         usePolling: env.CHOKIDAR_USEPOLLING === 'true',
       },

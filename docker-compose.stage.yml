@@ -1,0 +1,20 @@
+services:
+  backend:
+    environment:
+      FRONTEND_BASE_URL: https://control-dineflow.theunknownfish.com
+      CORS_ALLOWED_ORIGINS: https://demo-dineflow.theunknownfish.com,https://control-dineflow.theunknownfish.com
+      PASSKEY_SERVER_DOMAIN: control-dineflow.theunknownfish.com
+      PASSKEY_ORIGINS: https://control-dineflow.theunknownfish.com
+      STRIPE_SUCCESS_URL: https://demo-dineflow.theunknownfish.com/payment/success
+      STRIPE_CANCEL_URL: https://demo-dineflow.theunknownfish.com/payment/cancelled
+      STRIPE_CONNECT_RETURN_URL: https://control-dineflow.theunknownfish.com/admin/restaurants?stripeConnect=return
+      STRIPE_CONNECT_REFRESH_URL: https://control-dineflow.theunknownfish.com/admin/restaurants?stripeConnect=refresh
+      STRIPE_PLATFORM_FEE_SUCCESS_URL: https://control-dineflow.theunknownfish.com/admin/restaurants?platformFee=success
+      STRIPE_PLATFORM_FEE_CANCEL_URL: https://control-dineflow.theunknownfish.com/admin/restaurants?platformFee=cancelled
+      AVATAR_STORAGE_UPLOAD_BASE_URL: https://api-dineflow.theunknownfish.com
+      AVATAR_STORAGE_PUBLIC_BASE_URL: https://api-dineflow.theunknownfish.com/dineflow-avatars-local
+  frontend:
+    environment:
+      VITE_API_BASE_URL: ""
+      VITE_PUBLIC_APP_BASE_URL: https://demo-dineflow.theunknownfish.com
+      VITE_ALLOWED_HOSTS: demo-dineflow.theunknownfish.com,control-dineflow.theunknownfish.com
