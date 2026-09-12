@@ -246,6 +246,42 @@ public sealed class AbandonedOnlineOrderPaidAtCounterTests : IAsyncLifetime
         });
     }
 
+    /// <summary>
+    /// Once the payment is visible, a further switch is refused and changes nothing.
+    /// </summary>
+    /// <remarks>
+    /// The straightforward half of the problem below. This one is settled by the policy before any
+    /// write happens, so it passes with or without the claim — worth having, but it is not what
+    /// guards the race.
+    /// </remarks>
+    [RequiresPostgresFact]
+    public async Task ItCannotUndoAPaymentTakenWhileItWasWaiting()
+    {
+        Assert.Equal(HttpStatusCode.OK, (await SwitchAsync(_abandonedOrderId)).StatusCode);
+
+        var paid = await _staff.PostAsJsonAsync(
+            $"/api/staff/front-counter/orders/{_abandonedOrderId}/record-payment",
+            new { tender = "Cash", amountReceived = 30m });
+        Assert.Equal(HttpStatusCode.OK, paid.StatusCode);
+
+        // The straggler, arriving with everything it knew about this order now out of date.
+        await SwitchAsync(_abandonedOrderId);
+
+        var after = await ReadAsync(_abandonedOrderId);
+        Assert.Equal(PaymentStatus.Paid, after.PaymentStatus);
+
+        await _api.UseDbAsync(async context =>
+        {
+            var charged = await context.Payments
+                .AsNoTracking()
+                .Where(payment => payment.OrderId == _abandonedOrderId
+                    && payment.Status == PaymentStatus.Paid)
+                .SumAsync(payment => payment.AmountCents);
+
+            Assert.Equal(2_550, charged);
+        });
+    }
+
     // ---- who may do it ------------------------------------------------------------------------
 
     [RequiresPostgresFact]

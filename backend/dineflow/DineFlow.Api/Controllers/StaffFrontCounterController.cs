@@ -543,7 +543,19 @@ public sealed class StaffFrontCounterController(
         }
 
         var previousMethod = order.PaymentMethod;
+        var previousStatus = order.PaymentStatus;
         var now = DateTime.UtcNow;
+
+        // Nothing to do, and nothing to write. Checked before the claim below rather than after it:
+        // writing first and asking afterwards is how a paid order got reset to unpaid and charged a
+        // second time. See the claim's WHERE clause.
+        if (previousMethod == PaymentMethod.PayAtCounter)
+        {
+            return Ok(new FrontCounterSettleOrderResponse
+            {
+                Order = AdminOrdersController.MapToAdminResponse(order)
+            });
+        }
 
         // Claimed on the database row, not decided from the copy in memory.
         //
@@ -557,9 +569,17 @@ public sealed class StaffFrontCounterController(
         //
         // So exactly one request may replace the method it read. The rest find zero rows, and say
         // so by staying quiet.
+        //
+        // The payment status is part of the claim, not just the method. A request that read this
+        // order as unpaid, waited behind a busy counter, and then wrote `PaymentStatus = Unpaid`
+        // unconditionally would erase a payment taken in the meantime — and the till, seeing an
+        // unpaid order again, would take the money a second time. A soak test did exactly that:
+        // one switch recorded, two identical charges eight hundred milliseconds apart.
         var claimed = dbContext.Database.IsRelational()
             ? await dbContext.Orders
-                .Where(item => item.Id == order.Id && item.PaymentMethod == previousMethod)
+                .Where(item => item.Id == order.Id
+                    && item.PaymentMethod == previousMethod
+                    && item.PaymentStatus == previousStatus)
                 .ExecuteUpdateAsync(
                     setters => setters
                         .SetProperty(item => item.PaymentMethod, PaymentMethod.PayAtCounter)
