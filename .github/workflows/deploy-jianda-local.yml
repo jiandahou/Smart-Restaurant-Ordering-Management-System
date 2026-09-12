@@ -27,7 +27,7 @@ jobs:
 
           $repoPath = 'D:/Smart Restaurant Ordering System/.tmp/jianda-test'
           $envFile = 'D:\Smart Restaurant Ordering System\.env'
-          $overrideFile = 'D:\Smart Restaurant Ordering System\.tmp\docker-compose.jianda-test.yml'
+          $overrideFile = 'docker-compose.jianda-test.yml'
           $composeArgs = @(
             '--project-name', 'dineflow-jianda-test',
             '--env-file', $envFile,

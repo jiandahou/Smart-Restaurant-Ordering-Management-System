@@ -1,0 +1,55 @@
+services:
+  postgres:
+    container_name: dineflow-test-postgres
+    ports: !override
+      - "5533:5432"
+    mem_limit: 512m
+    cpus: 1.0
+
+  minio:
+    container_name: dineflow-test-minio
+    environment:
+      MINIO_API_CORS_ALLOW_ORIGIN: https://test-dineflow.theunknownfish.com
+    ports: !override
+      - "9100:9000"
+      - "9101:9001"
+    mem_limit: 384m
+    cpus: 0.5
+
+  minio-init:
+    container_name: dineflow-test-minio-init
+    mem_limit: 128m
+    cpus: 0.25
+
+  backend:
+    container_name: dineflow-test-backend
+    environment:
+      FRONTEND_BASE_URL: https://control-test-dineflow.theunknownfish.com
+      CORS_ALLOWED_ORIGINS: https://test-dineflow.theunknownfish.com,https://control-test-dineflow.theunknownfish.com
+      PASSKEY_SERVER_DOMAIN: control-test-dineflow.theunknownfish.com
+      PASSKEY_ORIGINS: https://control-test-dineflow.theunknownfish.com
+      STRIPE_SUCCESS_URL: https://test-dineflow.theunknownfish.com/payment/success
+      STRIPE_CANCEL_URL: https://test-dineflow.theunknownfish.com/payment/cancelled
+      STRIPE_CONNECT_RETURN_URL: https://control-test-dineflow.theunknownfish.com/admin/restaurants?stripeConnect=return
+      STRIPE_CONNECT_REFRESH_URL: https://control-test-dineflow.theunknownfish.com/admin/restaurants?stripeConnect=refresh
+      STRIPE_PLATFORM_FEE_SUCCESS_URL: https://control-test-dineflow.theunknownfish.com/admin/restaurants?platformFee=success
+      STRIPE_PLATFORM_FEE_CANCEL_URL: https://control-test-dineflow.theunknownfish.com/admin/restaurants?platformFee=cancelled
+      AVATAR_STORAGE_UPLOAD_BASE_URL: https://api-test-dineflow.theunknownfish.com
+      AVATAR_STORAGE_PUBLIC_BASE_URL: https://api-test-dineflow.theunknownfish.com/dineflow-avatars-local
+    ports: !override
+      - "5100:8080"
+    mem_limit: 768m
+    cpus: 1.0
+
+  frontend:
+    container_name: dineflow-test-frontend
+    environment:
+      VITE_API_BASE_URL: ""
+      VITE_PUBLIC_APP_BASE_URL: https://test-dineflow.theunknownfish.com
+      VITE_ENABLE_DEMO_LOGIN: "true"
+      VITE_DEMO_SEED_PASSWORD: ${VITE_DEMO_SEED_PASSWORD:-DineFlow123!}
+      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: .theunknownfish.com
+    ports: !override
+      - "5273:5173"
+    mem_limit: 768m
+    cpus: 1.0
