@@ -850,6 +850,12 @@ public class PublicCartsController(
             IsolationLevel.ReadCommitted,
             cancellationToken);
 
+        // Everyone ordering the popular dish queues on its row, which is what stops it overselling.
+        // Without a bound on that wait the queue ran into the driver's thirty second command
+        // timeout and surfaced as an unhandled failure — half a minute of spinner, then "an
+        // unexpected error occurred", with nothing said about whether the card had been charged.
+        await DatabaseContention.LimitLockWaitAsync(dbContext.Database, cancellationToken);
+
         var access = await AuthorizeCartAsync(cartId, participantToken, cancellationToken);
 
         if (access.ErrorResult is not null)
