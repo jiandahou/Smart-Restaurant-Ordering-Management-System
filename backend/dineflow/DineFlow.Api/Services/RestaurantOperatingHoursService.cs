@@ -292,6 +292,15 @@ public sealed class RestaurantOperatingHoursService(IOptions<PlatformBillingOpti
                 if (closesAt <= opensAt)
                 {
                     end = end.AddDays(1);
+
+                    // A special definition owns its whole calendar date, including the hours
+                    // after midnight. IsWithinOpeningHours applies that precedence already, so
+                    // the transition timeline must not let yesterday's regular overnight window
+                    // leak into the special date and advertise a later closure than reality.
+                    if (HasSpecialDate(date.AddDays(1), specialOpeningDays))
+                    {
+                        end = dayStart.AddDays(1);
+                    }
                 }
 
                 intervals.Add(new OpeningInterval(start, end));

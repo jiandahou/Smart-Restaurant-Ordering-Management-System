@@ -154,6 +154,51 @@ public class RestaurantOperatingHoursServiceTests
     }
 
     [Fact]
+    public void GetAvailability_SpecialClosure_CutsOffPreviousOvernightWindowAtMidnight()
+    {
+        var service = new RestaurantOperatingHoursService();
+        var restaurant = CreateRestaurant(DailyJson("18:00", "02:00"));
+        restaurant.SpecialOpeningDaysJson = "[{\"date\":\"2026-07-28\",\"isClosed\":true,\"windows\":[]}]";
+
+        var beforeMidnight = service.GetAvailability(
+            restaurant,
+            new DateTime(2026, 7, 27, 23, 0, 0, DateTimeKind.Utc));
+        var atMidnight = service.GetAvailability(
+            restaurant,
+            new DateTime(2026, 7, 28, 0, 0, 0, DateTimeKind.Utc));
+
+        Assert.True(beforeMidnight.IsWithinOpeningHours);
+        Assert.Equal(new DateTime(2026, 7, 28, 0, 0, 0), beforeMidnight.NextTransitionLocal);
+        Assert.False(atMidnight.IsWithinOpeningHours);
+        Assert.Equal(new DateTime(2026, 7, 29, 18, 0, 0), atMidnight.NextTransitionLocal);
+    }
+
+    [Fact]
+    public void GetAvailability_SpecialHours_ReplaceRatherThanExtendPreviousOvernightWindow()
+    {
+        var service = new RestaurantOperatingHoursService();
+        var restaurant = CreateRestaurant(DailyJson("18:00", "02:00"));
+        restaurant.SpecialOpeningDaysJson =
+            "[{\"date\":\"2026-07-28\",\"isClosed\":false,\"windows\":[{\"opensAt\":\"00:30\",\"closesAt\":\"01:00\"}]}]";
+
+        var beforeMidnight = service.GetAvailability(
+            restaurant,
+            new DateTime(2026, 7, 27, 23, 0, 0, DateTimeKind.Utc));
+        var beforeSpecialOpening = service.GetAvailability(
+            restaurant,
+            new DateTime(2026, 7, 28, 0, 15, 0, DateTimeKind.Utc));
+        var duringSpecialHours = service.GetAvailability(
+            restaurant,
+            new DateTime(2026, 7, 28, 0, 45, 0, DateTimeKind.Utc));
+
+        Assert.Equal(new DateTime(2026, 7, 28, 0, 0, 0), beforeMidnight.NextTransitionLocal);
+        Assert.False(beforeSpecialOpening.IsWithinOpeningHours);
+        Assert.Equal(new DateTime(2026, 7, 28, 0, 30, 0), beforeSpecialOpening.NextTransitionLocal);
+        Assert.True(duringSpecialHours.IsWithinOpeningHours);
+        Assert.Equal(new DateTime(2026, 7, 28, 1, 0, 0), duringSpecialHours.NextTransitionLocal);
+    }
+
+    [Fact]
     public void IsAcceptingOrders_TimedPause_ResumesOnceItLapses()
     {
         var restaurant = CreateRestaurant(DailyJson("09:00", "21:00"));
