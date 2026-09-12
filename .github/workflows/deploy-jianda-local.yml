@@ -1,0 +1,89 @@
+name: Deploy jianda test (self-hosted)
+
+on:
+  push:
+    branches: [ jianda ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-jianda-local
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy jianda to Windows test
+    runs-on: [ self-hosted, dineflow ]
+    timeout-minutes: 40
+
+    steps:
+      - name: Sync and redeploy jianda test
+        shell: powershell -ExecutionPolicy Bypass -NoProfile -File {0}
+        working-directory: 'D:\Smart Restaurant Ordering System\.tmp\jianda-test'
+        run: |
+          $ErrorActionPreference = 'Continue'
+
+          $repoPath = 'D:/Smart Restaurant Ordering System/.tmp/jianda-test'
+          $envFile = 'D:\Smart Restaurant Ordering System\.env'
+          $overrideFile = 'D:\Smart Restaurant Ordering System\.tmp\docker-compose.jianda-test.yml'
+          $composeArgs = @(
+            '--project-name', 'dineflow-jianda-test',
+            '--env-file', $envFile,
+            '-f', 'docker-compose.yml',
+            '-f', $overrideFile
+          )
+
+          $safeDirectories = git config --global --get-all safe.directory
+          if ($safeDirectories -notcontains $repoPath) {
+            git config --global --add safe.directory $repoPath
+            if ($LASTEXITCODE -ne 0) { throw "git safe.directory failed ($LASTEXITCODE)" }
+          }
+
+          Write-Host "==> Syncing test worktree to origin/$env:GITHUB_REF_NAME"
+          git fetch origin --prune
+          if ($LASTEXITCODE -ne 0) { throw "git fetch failed ($LASTEXITCODE)" }
+          git reset --hard "origin/$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0) { throw "git reset failed ($LASTEXITCODE)" }
+
+          Write-Host '==> Building and starting isolated jianda stack'
+          docker compose @composeArgs up -d --build --remove-orphans
+          if ($LASTEXITCODE -ne 0) { throw "docker compose up failed ($LASTEXITCODE)" }
+
+          Write-Host '==> Waiting for local frontend proxy and backend'
+          $localReady = $false
+          for ($attempt = 1; $attempt -le 40; $attempt++) {
+            try {
+              $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:5273/health/ready' -TimeoutSec 5
+              if ($response.StatusCode -eq 200) { $localReady = $true; break }
+            } catch { }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $localReady) {
+            docker compose @composeArgs logs --tail=120 backend frontend
+            throw 'Local jianda health check failed'
+          }
+
+          Write-Host '==> Verifying public Cloudflare Tunnel route'
+          $publicReady = $false
+          for ($attempt = 1; $attempt -le 12; $attempt++) {
+            try {
+              $response = Invoke-WebRequest -UseBasicParsing -Uri 'https://api-test-dineflow.theunknownfish.com/health/ready' -TimeoutSec 10
+              if ($response.StatusCode -eq 200) { $publicReady = $true; break }
+            } catch { }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $publicReady) { throw 'Public jianda health check failed' }
+
+          Write-Host '==> Deployed services'
+          docker compose @composeArgs ps
+
+          @(
+            '# Jianda test deployed',
+            '',
+            "- Commit: ``$env:GITHUB_SHA``",
+            '- Customer: https://test-dineflow.theunknownfish.com',
+            '- Control: https://control-test-dineflow.theunknownfish.com/admin',
+            '- API: https://api-test-dineflow.theunknownfish.com/health/ready'
+          ) | Add-Content -Encoding UTF8 -LiteralPath $env:GITHUB_STEP_SUMMARY
