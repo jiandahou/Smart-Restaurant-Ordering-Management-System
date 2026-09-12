@@ -21,17 +21,22 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Redeploy stage production build
-        shell: pwsh
+        shell: powershell
         working-directory: 'D:\Smart Restaurant Ordering System'
         run: |
-          $ErrorActionPreference = 'Stop'
+          # ErrorActionPreference=Continue so docker/git writing to stderr is not
+          # treated as a terminating error; check $LASTEXITCODE explicitly instead.
+          $ErrorActionPreference = 'Continue'
 
           Write-Host "==> Syncing to origin/$env:GITHUB_REF_NAME"
           git fetch origin --prune
+          if ($LASTEXITCODE -ne 0) { throw "git fetch failed ($LASTEXITCODE)" }
           git reset --hard "origin/$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0) { throw "git reset failed ($LASTEXITCODE)" }
 
           Write-Host "==> Building & starting stage-prod stack"
           docker compose -f docker-compose.stage.prod.yml up -d --build --remove-orphans
+          if ($LASTEXITCODE -ne 0) { throw "docker compose up failed ($LASTEXITCODE)" }
           docker image prune -f | Out-Null
 
           Write-Host "==> Health check (via nginx -> backend)"
