@@ -28,6 +28,12 @@ jobs:
           # treated as a terminating error; check $LASTEXITCODE explicitly instead.
           $ErrorActionPreference = 'Continue'
 
+          # The repo dir is owned by the interactive user but the runner runs as
+          # a service account, so git needs it marked safe (idempotent).
+          $repoPath = 'D:/Smart Restaurant Ordering System'
+          $safe = git config --global --get-all safe.directory
+          if ($safe -notcontains $repoPath) { git config --global --add safe.directory $repoPath }
+
           Write-Host "==> Syncing to origin/$env:GITHUB_REF_NAME"
           git fetch origin --prune
           if ($LASTEXITCODE -ne 0) { throw "git fetch failed ($LASTEXITCODE)" }
