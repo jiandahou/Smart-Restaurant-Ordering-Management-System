@@ -1,0 +1,51 @@
+name: Deploy stage (self-hosted)
+
+# Auto-redeploys the LOCAL stage (this Windows host) whenever `stage` is pushed.
+# Runs on the self-hosted runner labeled `dineflow`, against the canonical repo
+# checkout at D:\Smart Restaurant Ordering System (so it reuses the local .env,
+# data volumes, and the cloudflared tunnel). Demo-login build args come from that
+# .env, so no secrets live in this file.
+
+on:
+  push:
+    branches: [ stage ]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-stage-local
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [ self-hosted, dineflow ]
+    timeout-minutes: 30
+    steps:
+      - name: Redeploy stage production build
+        shell: pwsh
+        working-directory: 'D:\Smart Restaurant Ordering System'
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host "==> Syncing to origin/$env:GITHUB_REF_NAME"
+          git fetch origin --prune
+          git reset --hard "origin/$env:GITHUB_REF_NAME"
+
+          Write-Host "==> Building & starting stage-prod stack"
+          docker compose -f docker-compose.stage.prod.yml up -d --build --remove-orphans
+          docker image prune -f | Out-Null
+
+          Write-Host "==> Health check (via nginx -> backend)"
+          $ok = $false
+          for ($i = 1; $i -le 30; $i++) {
+            try {
+              if ((Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:5173/health' -TimeoutSec 5).StatusCode -eq 200) { $ok = $true; break }
+            } catch { }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $ok) {
+            docker compose -f docker-compose.stage.prod.yml logs --tail=100 backend frontend
+            throw 'health check failed'
+          }
+
+          Write-Host "==> Deployed. Current services:"
+          docker compose -f docker-compose.stage.prod.yml ps
