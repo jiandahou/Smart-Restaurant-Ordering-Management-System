@@ -58,6 +58,21 @@ function renderCheckout() {
   )
 }
 
+describe('checkout recovery without navigation state', () => {
+  it('returns an empty or stale checkout to My Orders instead of the undefined root route', async () => {
+    render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <Routes>
+          <Route path="/checkout" element={<CheckoutPage />} />
+          <Route path="/my-orders" element={<p>Recovered in My Orders</p>} />
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByText('Recovered in My Orders')).toBeInTheDocument()
+  })
+})
+
 /**
  * Stripe's expired Checkout page is a dead end — it says the session timed out and offers no link
  * back to the restaurant and no retry. Replacing DineFlow with it left the customer with nothing but

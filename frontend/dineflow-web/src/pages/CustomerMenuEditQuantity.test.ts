@@ -34,3 +34,14 @@ describe('the item sheet while editing a cart line', () => {
     expect(label).toContain('more available')
   })
 })
+
+describe('the item sheet for an unavailable dish', () => {
+  it('disables both quantity controls together with the rest of the ordering form', () => {
+    expect(page).toMatch(
+      /aria-label="Decrease quantity"[\s\S]{0,160}disabled=\{disabled \|\| quantity <= 1 \|\| isAdding\}/,
+    )
+    expect(page).toMatch(
+      /aria-label="Increase quantity"[\s\S]{0,160}disabled=\{disabled \|\| isAdding \|\| \(addableNow !== null && quantity >= addableNow\)\}/,
+    )
+  })
+})

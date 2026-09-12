@@ -125,7 +125,10 @@ export function CheckoutPage() {
       return <CheckoutReopenScreen error={reopenError} onLeave={() => navigate('/my-orders')} />
     }
 
-    return <Navigate to="/" replace />
+    // `/` is not an application route, so sending an expired/stale checkout there strands the
+    // customer on the 404 page. My Orders is available to both signed-in customers and guests with
+    // remembered order tokens, and gives them a useful place to recover from.
+    return <Navigate to="/my-orders" replace />
   }
 
   const {
@@ -144,7 +147,7 @@ export function CheckoutPage() {
     onlinePaymentsEnabled,
   } = routerState
   const returnPath = routerState.returnPath
-    ?? (order.restaurantId ? buildRestaurantMenuPath(order.restaurantId, order.orderType) : '/')
+    ?? (order.restaurantId ? buildRestaurantMenuPath(order.restaurantId, order.orderType) : '/my-orders')
   const isDineIn = order.orderType === 0
   const displayedTableNumber = order.tableNumber ?? tableNumber
   const orderScope = displayedTableNumber

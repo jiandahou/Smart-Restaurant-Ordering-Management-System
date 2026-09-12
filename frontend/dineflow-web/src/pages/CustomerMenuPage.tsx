@@ -147,6 +147,7 @@ import { cartSessionIsGone } from '@/lib/cartSessionRecovery'
 import { findUnpaidOrderToPrompt, type UnpaidOrderPrompt } from '@/lib/unpaidOrderPrompt'
 import { copyOrderIntoCart, describeCopyFailure } from '@/lib/copyOrderToCart'
 import { UnpaidOrderDialog } from '@/components/ordering/UnpaidOrderDialog'
+import { orderNoteMaxLength, validateOrderNote } from '@/lib/cartNoteValidation'
 
 type StoredCartSession = {
   cartId: string
@@ -189,7 +190,6 @@ const cartActivityBannerLaneCount = 4
 
 const cartSessionPrefix = 'dineflow.customer-cart'
 const itemNoteMaxLength = 180
-const orderNoteMaxLength = 4_000
 
 type MenuFilter = 'available' | 'popular' | 'recommended' | 'vegetarian' | 'vegan' | 'glutenFree' | 'halal' | 'spicy'
 
@@ -1012,6 +1012,7 @@ export function CustomerMenuPage() {
         participantToken: cartSession.participantToken,
         participantId: cartSession.participantId,
       })
+      navigate(buildRestaurantMenuPath(state.context.restaurant.id, orderType), { replace: true })
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not start ordering')
     } finally {
@@ -1053,6 +1054,7 @@ export function CustomerMenuPage() {
         participantToken: cartSession.participantToken,
         participantId: cartSession.participantId,
       })
+      navigate(buildRestaurantMenuPath(state.context.restaurant.id, orderType), { replace: true })
       toast.success(`Switched to ${orderType === 'DineIn' ? 'dine in' : 'takeaway'}`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not change order type')
@@ -1510,6 +1512,12 @@ export function CustomerMenuPage() {
   const saveCartNote = async (note: string) => {
     if (cart.status !== 'Active' || cartActionItemId || clearingCart || savingCartNote) {
       return
+    }
+
+    const validationError = validateOrderNote(note)
+    if (validationError) {
+      toast.error(validationError)
+      throw new Error(validationError)
     }
 
     setSavingCartNote(true)
@@ -3753,6 +3761,8 @@ function CartOrderNoteEditor({
   const normalizedNote = note.trim()
   const normalizedDraft = draft.trim()
   const hasChanges = normalizedDraft !== normalizedNote
+  const validationError = validateOrderNote(draft)
+  const displayedError = validationError ?? saveError
 
   useEffect(() => {
     onDirtyChange?.(open && hasChanges)
@@ -3781,6 +3791,12 @@ function CartOrderNoteEditor({
 
   const handleSave = async () => {
     updateSaveError(null)
+
+    const nextValidationError = validateOrderNote(draft)
+    if (nextValidationError) {
+      updateSaveError(nextValidationError)
+      return
+    }
 
     try {
       await onSave(draft)
@@ -3829,6 +3845,7 @@ function CartOrderNoteEditor({
           <Textarea
             value={draft}
             maxLength={orderNoteMaxLength}
+            aria-invalid={Boolean(validationError)}
             rows={3}
             placeholder="Please bring extra cutlery, keep all spicy dishes mild, allergy notes..."
             disabled={isReadOnly || isSaving}
@@ -3854,10 +3871,10 @@ function CartOrderNoteEditor({
               <span>This order note is not saved yet.</span>
             </div>
           ) : null}
-          {saveError ? (
+          {displayedError ? (
             <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm font-semibold text-destructive">
               <AlertCircle className="mt-0.5 size-4 shrink-0" />
-              <span>{saveError}</span>
+              <span>{displayedError}</span>
             </div>
           ) : null}
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -3879,7 +3896,7 @@ function CartOrderNoteEditor({
                   type="button"
                   size="sm"
                   className="min-w-28"
-                  disabled={isSaving || !hasChanges}
+                  disabled={isSaving || !hasChanges || Boolean(validationError)}
                   onClick={() => void handleSave()}
                 >
                   {isSaving ? <Loader2 className="size-4 animate-spin" /> : null}
