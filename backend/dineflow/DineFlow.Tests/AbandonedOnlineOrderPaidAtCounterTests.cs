@@ -7,6 +7,7 @@ using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Restaurant;
 using DineFlow.Tests.Infrastructure;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Xunit;
 using RestaurantEntity = DineFlow.Infrastructure.Restaurant.Restaurant;
 
@@ -280,6 +281,59 @@ public sealed class AbandonedOnlineOrderPaidAtCounterTests : IAsyncLifetime
 
             Assert.Equal(2_550, charged);
         });
+    }
+
+    /// <summary>
+    /// A switch that was already in flight must not erase a payment taken while it waited.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The worst thing this endpoint could do, and a soak test caught it doing it: one switch
+    /// recorded, two identical charges eight hundred milliseconds apart, $17.00 collected for an
+    /// $8.50 order. The request had read the order as unpaid, queued behind a busy counter, and
+    /// written <c>PaymentStatus = Unpaid</c> over a payment that landed in between — after which
+    /// the till, shown an unpaid order, took the money again.
+    /// </para>
+    /// <para>
+    /// Racing two requests will not reproduce it: in-process they finish in milliseconds and never
+    /// meet. So the window is made rather than waited for. Another connection holds the order row,
+    /// which parks the switch exactly where it used to do its damage — after its read, before its
+    /// write — and settles the order underneath it before letting go.
+    /// </para>
+    /// </remarks>
+    [RequiresPostgresFact]
+    public async Task ASwitchParkedMidFlightDoesNotUndoAPayment()
+    {
+        // Already on the till, so the arriving request reads PayAtCounter and gets past the policy.
+        Assert.Equal(HttpStatusCode.OK, (await SwitchAsync(_abandonedOrderId)).StatusCode);
+
+        await using var holder = new NpgsqlConnection(_api.ConnectionString);
+        await holder.OpenAsync();
+        await using var holding = await holder.BeginTransactionAsync();
+
+        await using (var claim = new NpgsqlCommand(
+            $"SELECT 1 FROM \"Orders\" WHERE \"Id\" = '{_abandonedOrderId}' FOR UPDATE", holder, holding))
+        {
+            await claim.ExecuteNonQueryAsync();
+        }
+
+        // Parked on the row it is about to write.
+        var parked = SwitchAsync(_abandonedOrderId);
+        await Task.Delay(300);
+
+        // The customer pays while it waits.
+        await using (var settle = new NpgsqlCommand(
+            $"UPDATE \"Orders\" SET \"PaymentStatus\" = {(int)PaymentStatus.Paid} WHERE \"Id\" = '{_abandonedOrderId}'",
+            holder,
+            holding))
+        {
+            await settle.ExecuteNonQueryAsync();
+        }
+
+        await holding.CommitAsync();
+        await parked;
+
+        Assert.Equal(PaymentStatus.Paid, (await ReadAsync(_abandonedOrderId)).PaymentStatus);
     }
 
     // ---- who may do it ------------------------------------------------------------------------
