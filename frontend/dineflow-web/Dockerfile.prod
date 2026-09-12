@@ -1,0 +1,34 @@
+# ---- Build stage: compile the Vite/React app to static files ----
+FROM node:20-alpine AS build
+WORKDIR /app
+
+# Install deps against the lockfile for reproducible builds
+COPY package*.json ./
+RUN npm ci
+
+# Build the production bundle. VITE_* build-time vars are baked in here,
+# so pass them via --build-arg (see docker-compose.prod.yml).
+COPY . .
+ARG VITE_API_BASE_URL=""
+ARG VITE_PUBLIC_APP_BASE_URL=""
+ARG VITE_SIGNALR_BASE_URL=""
+ARG VITE_PRINTER_BRIDGE_URL="http://127.0.0.1:17891"
+# Demo auto-login (pre-fills the seeded owner on the login page). Keep "true"
+# only for a showcase/demo site; set "false" for a real production deployment.
+ARG VITE_ENABLE_DEMO_LOGIN="false"
+ARG VITE_DEMO_SEED_PASSWORD=""
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL \
+    VITE_PUBLIC_APP_BASE_URL=$VITE_PUBLIC_APP_BASE_URL \
+    VITE_SIGNALR_BASE_URL=$VITE_SIGNALR_BASE_URL \
+    VITE_PRINTER_BRIDGE_URL=$VITE_PRINTER_BRIDGE_URL \
+    VITE_ENABLE_DEMO_LOGIN=$VITE_ENABLE_DEMO_LOGIN \
+    VITE_DEMO_SEED_PASSWORD=$VITE_DEMO_SEED_PASSWORD
+RUN npm run build
+
+# ---- Runtime stage: serve the static bundle with nginx ----
+FROM nginx:1.27-alpine AS final
+# SPA + reverse-proxy config (proxies /api, /health, /uploads, /api/hubs to backend)
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]

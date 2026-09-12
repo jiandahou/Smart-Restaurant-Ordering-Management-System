@@ -1,0 +1,13 @@
+{
+  "CORSRules": [
+    {
+      "AllowedOrigins": [
+        "https://demo-dineflow.theunknownfish.com",
+        "https://control-dineflow.theunknownfish.com"
+      ],
+      "AllowedMethods": ["GET", "HEAD"],
+      "AllowedHeaders": ["*"],
+      "MaxAgeSeconds": 3600
+    }
+  ]
+}

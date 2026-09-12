@@ -1,0 +1,145 @@
+# DineFlow — production stack for a single AWS EC2 host.
+#
+#   - postgres   : data lives on a named volume (EBS-backed)
+#   - backend    : .NET 8 API (Production), auto-migrates + seeds on startup
+#   - frontend   : Vite build served by nginx, reverse-proxies /api etc. to backend
+#   - cloudflared: Cloudflare Tunnel — publishes the app with NO open inbound ports
+#
+# Avatar/file storage uses real AWS S3 (no MinIO container).
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+services:
+  postgres:
+    image: postgres:16
+    container_name: dineflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dineflow_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}
+      POSTGRES_DB: dineflow_db
+    volumes:
+      - dineflow_postgres_data:/var/lib/postgresql/data
+    # No host port published — only the backend (same network) needs it.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dineflow_user -d dineflow_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend/dineflow
+      dockerfile: DineFlow.Api/Dockerfile
+    image: dineflow-backend:prod
+    container_name: dineflow-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=dineflow_db;Username=dineflow_user;Password=${POSTGRES_PASSWORD}
+
+      # --- Public URLs (behind Cloudflare Tunnel) ---
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+
+      # --- Auth / JWT ---
+      Jwt__Issuer: ${JWT_ISSUER:-DineFlow.Api}
+      Jwt__Audience: ${JWT_AUDIENCE:-DineFlow.Client}
+      Jwt__SecretKey: ${JWT_SECRET_KEY:?set a long random JWT_SECRET_KEY in .env.prod}
+      Jwt__ExpirationMinutes: ${JWT_EXPIRATION_MINUTES:-60}
+      Jwt__RefreshTokenExpirationDays: ${JWT_REFRESH_TOKEN_EXPIRATION_DAYS:-90}
+
+      # --- Seed platform owner (change the password!) ---
+      SeedOwner__Email: ${SEED_OWNER_EMAIL:-owner@dineflow.com}
+      SeedOwner__Password: ${SEED_OWNER_PASSWORD:?set SEED_OWNER_PASSWORD in .env.prod}
+      SeedOwner__FullName: ${SEED_OWNER_FULL_NAME:-DineFlow Owner}
+
+      # --- Email (Resend) ---
+      Email__From: ${AUTH_EMAIL_FROM}
+      Email__Server: ${EMAIL_SERVER}
+      Email__ResendApiKey: ${RESEND_API_KEY}
+      Email__FrontendBaseUrl: ${FRONTEND_BASE_URL}
+
+      # --- Passkeys ---
+      Passkeys__ServerDomain: ${PASSKEY_SERVER_DOMAIN}
+      Passkeys__ServerName: ${PASSKEY_SERVER_NAME:-DineFlow}
+      Passkeys__Origins__0: ${PASSKEY_ORIGINS}
+
+      # --- OAuth (optional) ---
+      Authentication__Google__ClientId: ${GOOGLE_CLIENT_ID:-}
+      Authentication__Google__ClientSecret: ${GOOGLE_CLIENT_SECRET:-}
+      Authentication__Google__CallbackPath: ${GOOGLE_CALLBACK_PATH:-/api/auth/google/signin}
+
+      # --- Stripe ---
+      Stripe__SecretKey: ${STRIPE_SECRET_KEY}
+      Stripe__PublishableKey: ${STRIPE_PUBLISHABLE_KEY}
+      Stripe__WebhookSecret: ${STRIPE_WEBHOOK_SECRET}
+      Stripe__ConnectWebhookSecret: ${STRIPE_CONNECT_WEBHOOK_SECRET}
+      Stripe__Currency: ${STRIPE_CURRENCY:-aud}
+      Stripe__SuccessUrl: ${STRIPE_SUCCESS_URL}
+      Stripe__CancelUrl: ${STRIPE_CANCEL_URL}
+      Stripe__ConnectReturnUrl: ${STRIPE_CONNECT_RETURN_URL}
+      Stripe__ConnectRefreshUrl: ${STRIPE_CONNECT_REFRESH_URL}
+      Stripe__PlatformFeeSuccessUrl: ${STRIPE_PLATFORM_FEE_SUCCESS_URL}
+      Stripe__PlatformFeeCancelUrl: ${STRIPE_PLATFORM_FEE_CANCEL_URL}
+
+      # --- Avatar storage: real AWS S3 ---
+      AvatarStorage__Provider: S3
+      AvatarStorage__Bucket: ${AVATAR_STORAGE_BUCKET}
+      AvatarStorage__Region: ${AVATAR_STORAGE_REGION:-ap-southeast-2}
+      # Leave ServiceUrl empty to use the standard AWS S3 endpoint for the region
+      AvatarStorage__ServiceUrl: ${AVATAR_STORAGE_SERVICE_URL:-}
+      AvatarStorage__UploadBaseUrl: ${AVATAR_STORAGE_UPLOAD_BASE_URL:-}
+      AvatarStorage__PublicBaseUrl: ${AVATAR_STORAGE_PUBLIC_BASE_URL}
+      AvatarStorage__ForcePathStyle: ${AVATAR_STORAGE_FORCE_PATH_STYLE:-false}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+
+      # --- QZ Tray signing (optional) ---
+      QzPrint__CertificatePemBase64: ${QZ_CERT_PEM_B64:-}
+      QzPrint__PrivateKeyPemBase64: ${QZ_PRIVATE_KEY_PEM_B64:-}
+    volumes:
+      - dineflow_backend_uploads:/app/wwwroot/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8080/health/ready > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend/dineflow-web
+      dockerfile: Dockerfile.prod
+      args:
+        # Same-origin API calls: frontend nginx proxies /api to backend.
+        VITE_API_BASE_URL: ""
+        VITE_PUBLIC_APP_BASE_URL: ${VITE_PUBLIC_APP_BASE_URL}
+        # Demo auto-login: "true" keeps the showcase pre-fill, "false" for real prod.
+        VITE_ENABLE_DEMO_LOGIN: ${VITE_ENABLE_DEMO_LOGIN:-false}
+        VITE_DEMO_SEED_PASSWORD: ${VITE_DEMO_SEED_PASSWORD:-}
+    image: dineflow-frontend:prod
+    container_name: dineflow-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: dineflow-cloudflared
+    restart: unless-stopped
+    depends_on:
+      - frontend
+      - backend
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./deploy/cloudflared:/etc/cloudflared:ro
+
+volumes:
+  dineflow_postgres_data:
+  dineflow_backend_uploads:

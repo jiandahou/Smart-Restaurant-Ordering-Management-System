@@ -1,0 +1,24 @@
+# Cloudflare Tunnel config for the DineFlow production stack on EC2.
+#
+# This reuses your EXISTING tunnel (same ID as the current stage tunnel), so the
+# DNS CNAMEs in Cloudflare keep pointing at it — no DNS changes needed. Just:
+#   1. Stop the tunnel on your Windows machine (so it only runs on EC2).
+#   2. Copy the tunnel credentials JSON next to this file as:
+#        deploy/cloudflared/16f95d76-7fd8-4604-be21-ba71e2bfe302.json
+#      (from C:\Users\mr\.cloudflared\ on your current machine)
+#
+# Hostnames resolve to CONTAINER names on the compose network:
+#   frontend:80  -> nginx serving the built SPA (+ proxies /api to backend)
+#   backend:8080 -> .NET API directly (Stripe webhooks, OAuth callbacks, uploads)
+
+tunnel: 16f95d76-7fd8-4604-be21-ba71e2bfe302
+credentials-file: /etc/cloudflared/16f95d76-7fd8-4604-be21-ba71e2bfe302.json
+
+ingress:
+  - hostname: control-dineflow.theunknownfish.com
+    service: http://frontend:80
+  - hostname: demo-dineflow.theunknownfish.com
+    service: http://frontend:80
+  - hostname: api-dineflow.theunknownfish.com
+    service: http://backend:8080
+  - service: http_status:404

@@ -16,7 +16,11 @@ Desktop.ini
 .env
 .env.*
 !.env.example
+!.env.prod.example
 certs/
+
+# Cloudflare Tunnel credentials (never commit)
+deploy/cloudflared/*.json
 appsettings.*.local.json
 appsettings.Development.json
 

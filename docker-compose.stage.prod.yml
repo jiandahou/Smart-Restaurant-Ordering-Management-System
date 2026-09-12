@@ -1,0 +1,174 @@
+# DineFlow — STAGE, but serving the PRODUCTION frontend build.
+#
+# Same topology as your current stage (Postgres + MinIO + .NET backend), except
+# the frontend is the nginx production build instead of the Vite dev server.
+# Host ports match your existing cloudflared tunnel (127.0.0.1:5173 / 5000 / 9000),
+# so the tunnel config and DNS need NO changes.
+#
+# This is a SELF-CONTAINED file — run it on its own (do NOT combine with the base
+# docker-compose.yml), so its single frontend port mapping wins cleanly:
+#
+#   docker compose -f docker-compose.stage.prod.yml up -d --build
+#
+# Reads secrets from the root .env (Stripe/Resend/JWT/etc.) via ${VAR} the same
+# way the base compose does. Keep running your Windows cloudflared as before.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: dineflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dineflow_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dineflow_password}
+      POSTGRES_DB: dineflow_db
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - dineflow_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dineflow_user -d dineflow_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: dineflow-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_API_CORS_ALLOW_ORIGIN:-https://demo-dineflow.theunknownfish.com}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - dineflow_minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --show-error http://localhost:9000/minio/health/ready > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: dineflow-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      AVATAR_STORAGE_BUCKET: ${AVATAR_STORAGE_BUCKET:-dineflow-avatars-local}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      mc mb --ignore-existing local/$$AVATAR_STORAGE_BUCKET &&
+      mc anonymous set download local/$$AVATAR_STORAGE_BUCKET
+      "
+    restart: "no"
+
+  backend:
+    build:
+      context: ./backend/dineflow
+      dockerfile: DineFlow.Api/Dockerfile
+    container_name: dineflow-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      # Production runtime, but pointed at the stage domains + MinIO storage.
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=dineflow_db;Username=dineflow_user;Password=${POSTGRES_PASSWORD:-dineflow_password}
+
+      FRONTEND_BASE_URL: https://control-dineflow.theunknownfish.com
+      CORS_ALLOWED_ORIGINS: https://demo-dineflow.theunknownfish.com,https://control-dineflow.theunknownfish.com
+
+      Jwt__Issuer: ${JWT_ISSUER:-DineFlow.Api}
+      Jwt__Audience: ${JWT_AUDIENCE:-DineFlow.Client}
+      Jwt__SecretKey: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required in .env}
+      Jwt__ExpirationMinutes: ${JWT_EXPIRATION_MINUTES:-60}
+      Jwt__RefreshTokenExpirationDays: ${JWT_REFRESH_TOKEN_EXPIRATION_DAYS:-90}
+
+      SeedOwner__Email: ${SEED_OWNER_EMAIL:-owner@dineflow.com}
+      SeedOwner__Password: ${SEED_OWNER_PASSWORD:-ChangeMe123!}
+      SeedOwner__FullName: ${SEED_OWNER_FULL_NAME:-DineFlow Owner}
+
+      Email__From: ${AUTH_EMAIL_FROM:-noreply@theunknownfish.com}
+      Email__Server: ${EMAIL_SERVER:-}
+      Email__ResendApiKey: ${RESEND_API_KEY:-}
+      Email__FrontendBaseUrl: https://control-dineflow.theunknownfish.com
+
+      Authentication__Google__ClientId: ${GOOGLE_CLIENT_ID:-}
+      Authentication__Google__ClientSecret: ${GOOGLE_CLIENT_SECRET:-}
+      Authentication__Google__CallbackPath: ${GOOGLE_CALLBACK_PATH:-/api/auth/google/signin}
+
+      Passkeys__ServerDomain: control-dineflow.theunknownfish.com
+      Passkeys__ServerName: ${PASSKEY_SERVER_NAME:-DineFlow}
+      Passkeys__Origins__0: https://control-dineflow.theunknownfish.com
+
+      Stripe__SecretKey: ${STRIPE_SECRET_KEY:-}
+      Stripe__PublishableKey: ${STRIPE_PUBLISHABLE_KEY:-}
+      Stripe__WebhookSecret: ${STRIPE_WEBHOOK_SECRET:-}
+      Stripe__ConnectWebhookSecret: ${STRIPE_CONNECT_WEBHOOK_SECRET:-}
+      Stripe__Currency: ${STRIPE_CURRENCY:-aud}
+      Stripe__SuccessUrl: https://demo-dineflow.theunknownfish.com/payment/success
+      Stripe__CancelUrl: https://demo-dineflow.theunknownfish.com/payment/cancelled
+      Stripe__ConnectReturnUrl: https://control-dineflow.theunknownfish.com/admin/restaurants?stripeConnect=return
+      Stripe__ConnectRefreshUrl: https://control-dineflow.theunknownfish.com/admin/restaurants?stripeConnect=refresh
+      Stripe__PlatformFeeSuccessUrl: https://control-dineflow.theunknownfish.com/admin/restaurants?platformFee=success
+      Stripe__PlatformFeeCancelUrl: https://control-dineflow.theunknownfish.com/admin/restaurants?platformFee=cancelled
+
+      # Avatar storage stays on MinIO (unchanged from current stage)
+      AvatarStorage__Provider: ${AVATAR_STORAGE_PROVIDER:-S3}
+      AvatarStorage__Bucket: ${AVATAR_STORAGE_BUCKET:-dineflow-avatars-local}
+      AvatarStorage__Region: ${AVATAR_STORAGE_REGION:-ap-southeast-2}
+      AvatarStorage__ServiceUrl: ${AVATAR_STORAGE_SERVICE_URL:-http://minio:9000}
+      AvatarStorage__UploadBaseUrl: https://api-dineflow.theunknownfish.com
+      AvatarStorage__PublicBaseUrl: https://api-dineflow.theunknownfish.com/dineflow-avatars-local
+      AvatarStorage__ForcePathStyle: ${AVATAR_STORAGE_FORCE_PATH_STYLE:-true}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+
+      QzPrint__CertificatePemBase64: ${QZ_CERT_PEM_B64:-}
+      QzPrint__PrivateKeyPemBase64: ${QZ_PRIVATE_KEY_PEM_B64:-}
+    ports:
+      - "127.0.0.1:5000:8080"
+    volumes:
+      - dineflow_backend_uploads:/app/wwwroot/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8080/health/ready > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend/dineflow-web
+      dockerfile: Dockerfile.prod
+      args:
+        VITE_API_BASE_URL: ""
+        VITE_PUBLIC_APP_BASE_URL: https://demo-dineflow.theunknownfish.com
+        VITE_ENABLE_DEMO_LOGIN: ${VITE_ENABLE_DEMO_LOGIN:-false}
+        VITE_DEMO_SEED_PASSWORD: ${VITE_DEMO_SEED_PASSWORD:-}
+    image: dineflow-frontend:stage-prod
+    container_name: dineflow-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:5173:80"
+
+volumes:
+  dineflow_postgres_data:
+  dineflow_backend_uploads:
+  dineflow_minio_data:
