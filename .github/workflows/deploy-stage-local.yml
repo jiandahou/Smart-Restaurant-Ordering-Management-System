@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Redeploy stage production build
-        shell: powershell
+        shell: powershell -ExecutionPolicy Bypass -NoProfile -File {0}
         working-directory: 'D:\Smart Restaurant Ordering System'
         run: |
           # ErrorActionPreference=Continue so docker/git writing to stderr is not
