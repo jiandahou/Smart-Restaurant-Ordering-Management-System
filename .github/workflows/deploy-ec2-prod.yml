@@ -36,10 +36,10 @@ jobs:
 
           echo "==> Health check"
           ok=""
-          for i in $(seq 1 30); do
-            if docker exec dineflow-backend curl -fsS http://localhost:8080/health/ready >/dev/null 2>&1; then ok=1; echo "backend healthy"; break; fi
+          for i in $(seq 1 60); do
+            if docker exec dineflow-backend curl -fsS http://localhost:8080/health/ready >/dev/null 2>&1; then ok=1; echo "backend healthy after ~$((i*5))s"; break; fi
             sleep 5
           done
-          if [ -z "$ok" ]; then docker compose -f docker-compose.prod.yml logs --tail=100 backend frontend; exit 1; fi
+          if [ -z "$ok" ]; then echo "backend did not become healthy"; docker logs --tail 120 dineflow-backend || true; exit 1; fi
 
-          docker compose -f docker-compose.prod.yml ps
+          docker compose -f docker-compose.prod.yml --env-file .env.prod ps
