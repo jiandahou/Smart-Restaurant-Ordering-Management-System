@@ -1,0 +1,45 @@
+name: Deploy production (EC2 self-hosted)
+
+# Auto-redeploys the EC2 production stack on every push to `main`.
+# Runs on the self-hosted runner (label `ec2-prod`) installed on the EC2 host,
+# against the canonical checkout at /home/ubuntu/Smart Restaurant Ordering System
+# so it reuses the host's .env.prod, S3 config and cloudflared credentials.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-ec2-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [ self-hosted, ec2-prod ]
+    timeout-minutes: 40
+    steps:
+      - name: Redeploy production stack
+        shell: bash
+        working-directory: "/home/ubuntu/Smart Restaurant Ordering System"
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$PWD" || true
+
+          echo "==> Syncing to origin/${GITHUB_REF_NAME}"
+          git fetch origin --prune
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+
+          echo "==> Building & starting prod stack"
+          docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build --remove-orphans
+          docker image prune -f || true
+
+          echo "==> Health check"
+          ok=""
+          for i in $(seq 1 30); do
+            if docker exec dineflow-backend curl -fsS http://localhost:8080/health/ready >/dev/null 2>&1; then ok=1; echo "backend healthy"; break; fi
+            sleep 5
+          done
+          if [ -z "$ok" ]; then docker compose -f docker-compose.prod.yml logs --tail=100 backend frontend; exit 1; fi
+
+          docker compose -f docker-compose.prod.yml ps
