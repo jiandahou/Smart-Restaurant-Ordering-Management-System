@@ -18,6 +18,6 @@ ingress:
   # Single domain: the frontend nginx serves the SPA and reverse-proxies
   # /api, /health, /uploads and /api/hubs to the backend. Avatars are served
   # from S3 directly (prod), so no separate api/control host is needed.
-  - hostname: demo-dineflow.theunknownfish.com
+  - hostname: dineflow.theunknownfish.com
     service: http://frontend:80
   - service: http_status:404
