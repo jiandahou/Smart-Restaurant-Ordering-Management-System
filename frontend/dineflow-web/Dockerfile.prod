@@ -13,16 +13,14 @@ ARG VITE_API_BASE_URL=""
 ARG VITE_PUBLIC_APP_BASE_URL=""
 ARG VITE_SIGNALR_BASE_URL=""
 ARG VITE_PRINTER_BRIDGE_URL="http://127.0.0.1:17891"
-# Demo auto-login (pre-fills the seeded owner on the login page). Keep "true"
-# only for a showcase/demo site; set "false" for a real production deployment.
-ARG VITE_ENABLE_DEMO_LOGIN="false"
-ARG VITE_DEMO_SEED_PASSWORD=""
+# Login prefill (seeded owner). "on" pre-fills the fields (internal demo/stage build only);
+# leave unset for a real production deployment so the login page ships empty with no credentials.
+ARG VITE_DEMO_LOGIN=""
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL \
     VITE_PUBLIC_APP_BASE_URL=$VITE_PUBLIC_APP_BASE_URL \
     VITE_SIGNALR_BASE_URL=$VITE_SIGNALR_BASE_URL \
     VITE_PRINTER_BRIDGE_URL=$VITE_PRINTER_BRIDGE_URL \
-    VITE_ENABLE_DEMO_LOGIN=$VITE_ENABLE_DEMO_LOGIN \
-    VITE_DEMO_SEED_PASSWORD=$VITE_DEMO_SEED_PASSWORD
+    VITE_DEMO_LOGIN=$VITE_DEMO_LOGIN
 RUN npm run build
 
 # ---- Runtime stage: serve the static bundle with nginx ----
