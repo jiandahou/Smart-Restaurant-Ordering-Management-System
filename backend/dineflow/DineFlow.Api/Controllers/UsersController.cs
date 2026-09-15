@@ -5,6 +5,7 @@ using DineFlow.Api.Contracts.Users;
 using DineFlow.Api.Extensions;
 using DineFlow.Api.Options;
 using DineFlow.Api.Services;
+using DineFlow.Application.Authentication;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Persistence;
@@ -33,6 +34,7 @@ public class UsersController : ControllerBase
     private readonly IEmailSender _emailSender;
     private readonly EmailOptions _emailOptions;
     private readonly TransactionalEmailLayout _emailLayout;
+    private readonly IRefreshTokenService _refreshTokenService;
 
     public UsersController(
         UserManager<ApplicationUser> userManager,
@@ -40,7 +42,8 @@ public class UsersController : ControllerBase
         ReportLogWriter reportLogWriter,
         IEmailSender emailSender,
         IOptions<EmailOptions> emailOptions,
-        TransactionalEmailLayout emailLayout)
+        TransactionalEmailLayout emailLayout,
+        IRefreshTokenService refreshTokenService)
     {
         _userManager = userManager;
         _dbContext = dbContext;
@@ -48,7 +51,22 @@ public class UsersController : ControllerBase
         _emailSender = emailSender;
         _emailOptions = emailOptions.Value;
         _emailLayout = emailLayout;
+        _refreshTokenService = refreshTokenService;
     }
+
+    /// <summary>
+    /// Ends every active session for an account whose identity has changed underneath it: disabling,
+    /// a role change, or a tenant reassignment. Bumping the security stamp rejects access tokens
+    /// already issued (they carry the old stamp), and revoking the refresh family stops those
+    /// sessions minting new ones. Callers must still <see cref="AppDbContext.SaveChangesAsync"/>.
+    /// </summary>
+    private async Task EndActiveSessionsAsync(ApplicationUser targetUser)
+    {
+        await _userManager.UpdateSecurityStampAsync(targetUser);
+        await _refreshTokenService.RevokeAllForUserAsync(targetUser.Id, GetClientIpAddress());
+    }
+
+    private string? GetClientIpAddress() => HttpContext.Connection.RemoteIpAddress?.ToString();
 
     [Authorize(Policy = AuthorizationPolicies.PlatformOwnerOnly)]
     [HttpGet("users")]
@@ -331,6 +349,20 @@ public class UsersController : ControllerBase
 
         var updatedRoles = await _userManager.GetRolesAsync(targetUser);
 
+        // A role change, a tenant reassignment, or a password reset all mean the identity the
+        // account's live sessions were issued against no longer holds. End them so an old Admin
+        // token cannot keep Admin powers after a demotion (AUDIT-02); a fresh sign-in gets the new
+        // role. Password resets already rotate the stamp, but revoking the refresh family too keeps
+        // the two paths consistent.
+        var roleChanged = !targetRoles.Contains(nextRole);
+        var restaurantChanged = beforeUser.RestaurantId != targetUser.RestaurantId;
+        var passwordChanged = !string.IsNullOrWhiteSpace(request.Password);
+
+        if (roleChanged || restaurantChanged || passwordChanged)
+        {
+            await EndActiveSessionsAsync(targetUser);
+        }
+
         _reportLogWriter.AddAudit(
             "Admin.UserUpdated",
             "User",
@@ -495,7 +527,13 @@ public class UsersController : ControllerBase
             return BadRequest(new { message = "Failed to change the account status.", errors = result.Errors });
         }
 
-        if (!request.IsDisabled)
+        if (request.IsDisabled)
+        {
+            // Parking the lockout only stops future sign-ins. End the sessions the account already
+            // holds so a disabled user cannot keep using — or refreshing — a live access token.
+            await EndActiveSessionsAsync(targetUser);
+        }
+        else
         {
             // Re-enabling also clears the failed sign-in counter, otherwise the next mistake
             // immediately re-locks the account.

@@ -20,7 +20,8 @@ public class JwtTokenService : IJwtTokenService
         string userId,
         string? email,
         string? userName,
-        IEnumerable<string> roles)
+        IEnumerable<string> roles,
+        string? securityStamp = null)
     {
         var claims = new List<Claim>
         {
@@ -30,6 +31,11 @@ public class JwtTokenService : IJwtTokenService
             new(ClaimTypes.NameIdentifier, userId),
             new(ClaimTypes.Name, userName ?? string.Empty)
         };
+
+        if (!string.IsNullOrEmpty(securityStamp))
+        {
+            claims.Add(new Claim(DineFlowJwtClaims.SecurityStamp, securityStamp));
+        }
 
         claims.AddRange(roles.Select(role => new Claim(ClaimTypes.Role, role)));
 

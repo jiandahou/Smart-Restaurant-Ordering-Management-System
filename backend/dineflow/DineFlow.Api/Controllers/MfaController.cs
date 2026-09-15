@@ -799,7 +799,8 @@ public sealed class MfaController : ControllerBase
             user.Id,
             user.Email,
             user.UserName,
-            roles);
+            roles,
+            await _userManager.GetSecurityStampAsync(user));
         var refreshToken = await _refreshTokenService.IssueAsync(
             user.Id,
             HttpContext.Connection.RemoteIpAddress?.ToString());
