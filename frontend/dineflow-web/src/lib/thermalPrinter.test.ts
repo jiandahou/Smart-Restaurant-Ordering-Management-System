@@ -1,22 +1,28 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { ReceiptDocument } from './receipt'
 import {
+  buildEscPosDocument,
   buildEscPosKitchenTicket,
+  buildEscPosReceipt,
   defaultThermalPrinterSettings,
   enqueueNetworkPrint,
   escposBeep,
   formatQzPrinterConnectionLabel,
   networkPrinterCooldownMs,
-  printKitchenTicketWithQzTray,
+  printThermalDocumentWithQzTray,
   qzKeepAliveIntervalMs,
   QzTrayError,
   QZ_TRAY_DOWNLOAD_URL,
   qzWebsocketPingIntervalSeconds,
+  removedPrinterControlMarker,
+  removedPrinterMarkupMarker,
   releaseWebSerialSession,
   testQzSerialConnection,
   testWebSerialConnection,
   testWebUsbConnection,
   type KitchenTicket,
   type QzTrayPrinterDescriptor,
+  unsupportedPrinterTextMarker,
 } from './thermalPrinter'
 
 const sampleTicket: KitchenTicket = {
@@ -31,11 +37,18 @@ const sampleTicket: KitchenTicket = {
   items: [{ quantity: 1, name: 'Butter Chicken', optionGroups: [] }],
 }
 
-describe('printKitchenTicketWithQzTray typed errors', () => {
+describe('printThermalDocumentWithQzTray typed errors', () => {
+  it('enables new-order auto-printing by default', () => {
+    expect(defaultThermalPrinterSettings.autoPrintNewOrders).toBe(true)
+  })
+
   it('throws QzTrayError(no-printer) before touching the connection when no printer name is set', async () => {
     const settings = { ...defaultThermalPrinterSettings, mode: 'qz-tray' as const, qzPrinterName: '' }
 
-    await expect(printKitchenTicketWithQzTray(sampleTicket, settings)).rejects.toMatchObject({
+    await expect(printThermalDocumentWithQzTray(
+      { kind: 'kitchen', ticket: sampleTicket },
+      settings,
+    )).rejects.toMatchObject({
       name: 'QzTrayError',
       reason: 'no-printer',
     })
@@ -233,6 +246,62 @@ describe('buildEscPosKitchenTicket', () => {
   })
 })
 
+describe('raw ESC/POS customer text safety', () => {
+  const baseSettings = {
+    paperWidth: '80mm' as const,
+    cutPaper: true,
+    beepOnPrint: false,
+    qzEncoding: 'UTF-8' as const,
+  }
+
+  it('makes unsupported text and markup explicit while preserving trusted printer commands', () => {
+    const ticket: KitchenTicket = {
+      ...sampleTicket,
+      restaurantName: 'Test 😀 مطعم',
+      orderNote: '<script>alert(1)</script> allergy\x1bV',
+      items: [{
+        quantity: 1,
+        name: 'Falafel 😀',
+        note: 'مرحبا',
+        optionGroups: [],
+      }],
+    }
+
+    const output = buildEscPosDocument({ kind: 'kitchen', ticket }, baseSettings)
+
+    expect(output).toContain(unsupportedPrinterTextMarker)
+    expect(output).toContain(removedPrinterMarkupMarker)
+    expect(output).toContain(removedPrinterControlMarker)
+    expect(output).not.toContain('<script>')
+    expect(output).not.toContain('alert(1)')
+    expect(output).not.toContain('😀')
+    expect(output).not.toContain('مرحبا')
+    expect(output.startsWith('\x1b@')).toBe(true)
+    expect(output).toContain('\x1dV\x41\x00')
+  })
+
+  it('keeps Chinese for a selected GBK-capable printer but still flags emoji', () => {
+    const output = buildEscPosDocument({
+      kind: 'kitchen',
+      ticket: { ...sampleTicket, orderNote: '不要花生 😀' },
+    }, { ...baseSettings, qzEncoding: 'GBK' })
+
+    expect(output).toContain('不要花生')
+    expect(output).toContain(unsupportedPrinterTextMarker)
+    expect(output).not.toContain('😀')
+  })
+
+  it('keeps CP1252 text when that printer code page is selected', () => {
+    const output = buildEscPosDocument({
+      kind: 'kitchen',
+      ticket: { ...sampleTicket, restaurantName: 'Café €' },
+    }, { ...baseSettings, qzEncoding: 'CP1252' })
+
+    expect(output).toContain('Café €')
+    expect(output).not.toContain(unsupportedPrinterTextMarker)
+  })
+})
+
 describe('enqueueNetworkPrint', () => {
   // Regression coverage for a real incident: firing several network prints back
   // to back (or auto-print draining a backlog) opened overlapping TCP
@@ -317,5 +386,106 @@ describe('enqueueNetworkPrint', () => {
 
     expect(startedAt).toHaveLength(2)
     expect(startedAt[1] - startedAt[0]).toBeGreaterThanOrEqual(30)
+  })
+})
+
+describe('buildEscPosReceipt', () => {
+  const baseSettings = { paperWidth: '80mm' as const, cutPaper: true, beepOnPrint: false }
+  const sampleReceipt: ReceiptDocument = {
+    documentTitle: 'TAX INVOICE',
+    scopeLabel: 'Counter receipt',
+    code: 'P2-007',
+    supplier: {
+      restaurantName: 'The DineFlow Kitchen',
+      legalBusinessName: 'DineFlow Hospitality Pty Ltd',
+      abn: '51824753556',
+      address: '10 King William Street, Adelaide SA 5000',
+      phone: '(08) 5555 0100',
+    },
+    issuedAt: new Date('2026-08-09T02:00:00Z'),
+    currency: 'AUD',
+    meta: [{ label: 'Order', value: 'T-001' }, { label: 'Payment', value: 'Paid' }],
+    items: [{
+      id: 'item-1',
+      quantity: 2,
+      name: 'Butter Chicken',
+      baseAmount: 38,
+      modifiers: [{ label: 'Naan', amount: 6 }],
+      optionGroups: [{ groupName: 'Side', options: ['Rice'] }],
+      totalPrice: 44,
+      note: 'No coriander',
+    }],
+    totalAmount: 44,
+    gstAmount: 4,
+    amountDue: 0,
+    surchargeNotice: 'A surcharge of 10% applies on public holidays.',
+    refundContactEmail: 'refunds@example.com',
+  }
+
+  it('prints the supplier identity a proof of transaction requires', () => {
+    const receipt = buildEscPosReceipt(sampleReceipt, baseSettings)
+    expect(receipt).toContain('TAX INVOICE')
+    expect(receipt).toContain('The DineFlow Kitchen')
+    expect(receipt).toContain('DineFlow Hospitality Pty Ltd')
+    expect(receipt).toContain('ABN 51824753556')
+    expect(receipt).not.toContain('KITCHEN TICKET')
+  })
+
+  it('prints per-line prices, the total, the GST included in it, and what is still owed', () => {
+    const receipt = buildEscPosReceipt(sampleReceipt, baseSettings)
+    expect(receipt).toContain('2X  Butter Chicken')
+    expect(receipt).toContain('$44.00')
+    expect(receipt).toContain('TOTAL')
+    expect(receipt).toContain('GST INCLUDED')
+    expect(receipt).toContain('$4.00')
+    expect(receipt).toContain('AMOUNT DUE')
+  })
+
+  it('prints the surcharge disclosure and refund contact', () => {
+    const receipt = buildEscPosReceipt(sampleReceipt, baseSettings)
+    expect(receipt).toContain('surcharge of 10%')
+    expect(receipt).toContain('refunds@example.com')
+  })
+
+  it('omits the GST lines entirely for a supplier that is not GST registered', () => {
+    const receipt = buildEscPosReceipt(
+      { ...sampleReceipt, documentTitle: 'RECEIPT', gstAmount: null },
+      baseSettings,
+    )
+    expect(receipt).toContain('RECEIPT')
+    expect(receipt).not.toContain('GST INCLUDED')
+    expect(receipt).not.toContain('includes GST')
+  })
+
+  it('leaves out supplier details the restaurant has not configured', () => {
+    const receipt = buildEscPosReceipt(
+      {
+        ...sampleReceipt,
+        supplier: { ...sampleReceipt.supplier, abn: null, address: null, phone: null },
+        surchargeNotice: null,
+        refundContactEmail: null,
+      },
+      baseSettings,
+    )
+    expect(receipt).not.toContain('ABN')
+    expect(receipt).not.toContain('null')
+    expect(receipt).toContain('Thank you')
+  })
+
+  it('keeps the amount on the same line as the item on 58mm paper', () => {
+    const narrow = buildEscPosReceipt(
+      { ...sampleReceipt, items: [{ ...sampleReceipt.items[0], name: 'Slow braised beef brisket with red wine jus' }] },
+      { ...baseSettings, paperWidth: '58mm' },
+    )
+    const priceLine = narrow.split('\n').find((line) => line.includes('$44.00'))
+    expect(priceLine).toBeDefined()
+    // eslint-disable-next-line no-control-regex
+    const visible = priceLine!.replace(/\x1b@|[\x1b\x1d][EaB!][\x00-\x20]/g, '')
+    expect(visible.length).toBeLessThanOrEqual(32)
+  })
+
+  it('emits the cut command only when cutPaper is enabled', () => {
+    expect(buildEscPosReceipt(sampleReceipt, baseSettings)).toContain('\x1dV\x41\x00')
+    expect(buildEscPosReceipt(sampleReceipt, { ...baseSettings, cutPaper: false })).not.toContain('\x1dV\x41\x00')
   })
 })

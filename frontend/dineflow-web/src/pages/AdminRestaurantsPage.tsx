@@ -13,6 +13,7 @@ import {
   ChevronsUpDown,
   Copy,
   CreditCard,
+  Download,
   Eye,
   ExternalLink,
   Globe2,
@@ -52,6 +53,7 @@ import {
   getRestaurantPaymentSettings,
   getRestaurantPage,
   getRestaurants,
+  previewStripeBusinessProfileImport,
   refreshRestaurantStripeStatus,
   runRestaurantStripeDiagnostics,
   updateRestaurant,
@@ -60,6 +62,8 @@ import {
   type StripeConnectDiagnostic,
   type RestaurantPaymentSettings,
   type RestaurantRequest,
+  type StripeBusinessProfileImport,
+  type StripeBusinessProfileImportField,
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
 import { RestaurantTablesPanel } from '../components/admin/RestaurantTablesPanel'
@@ -76,6 +80,8 @@ import {
   type TimezoneOption,
 } from '../lib/localeOptions'
 import { buildFeePreview } from '../lib/platformFee'
+import { abnDigitCount, isValidAbn, normalizeAbn } from '../lib/abn'
+import { publishOperationalStatusInvalidated } from '../lib/operationalNotifications'
 import { buildTakeawayPublicUrl } from '../lib/publicUrls'
 import { resolvePublicAssetUrl } from '../api/publicMenu'
 import {
@@ -129,6 +135,9 @@ import {
   RestaurantSpecialCalendarPanel,
   getStatusHeadline,
 } from '../components/restaurant/openingHours'
+// Loaded with this page rather than in App: one screen renders country flags, and a global
+// import put the sprite sheet and every flag SVG in front of a customer opening a menu.
+import 'flag-icons/css/flag-icons.min.css'
 
 
 const restaurantSchema = z.object({
@@ -141,6 +150,26 @@ const restaurantSchema = z.object({
     .min(6, 'Enter a valid phone number.')
     .max(24)
     .regex(/^[()\-\s\d]+$/, 'Use digits and standard phone symbols only.'),
+  legalBusinessName: z.string().trim().min(2, 'Enter the registered legal business name.').max(160),
+  abn: z.string().trim().superRefine((value, context) => {
+    // Length alone let 12345678901 through, and it reached a live restaurant record.
+    if (normalizeAbn(value).length !== abnDigitCount) {
+      context.addIssue({ code: 'custom', message: 'ABN must contain 11 digits.' })
+      return
+    }
+
+    if (!isValidAbn(value)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'That ABN is not valid — its check digits do not match. Confirm it on the Australian Business Register.',
+      })
+    }
+  }),
+  gstRegistered: z.boolean(),
+  pricesIncludeGst: z.boolean(),
+  businessContactEmail: z.email('Enter a valid business email.'),
+  refundContactEmail: z.email('Enter a valid refund contact email.'),
+  customerSurchargeNotice: z.string().trim().max(300).optional(),
   countryCode: z.string().length(2, 'Select a country.'),
   timezone: z.string().min(1, 'Select a timezone.'),
   currency: z.string().length(3, 'Select a currency.'),
@@ -213,6 +242,13 @@ function createEmptyRestaurant(): RestaurantFormValues {
     address: '',
     phoneCountryCode: 'AU',
     phoneNationalNumber: '',
+    legalBusinessName: '',
+    abn: '',
+    gstRegistered: false,
+    pricesIncludeGst: true,
+    businessContactEmail: '',
+    refundContactEmail: '',
+    customerSurchargeNotice: '',
     countryCode: 'AU',
     timezone: 'Australia/Adelaide',
     currency: 'AUD',
@@ -232,6 +268,13 @@ function toPayload(values: RestaurantFormValues): RestaurantRequest {
     name: values.name.trim(),
     address: values.address.trim(),
     phone: formatPhoneForPayload(values.phoneCountryCode, values.phoneNationalNumber),
+    legalBusinessName: values.legalBusinessName.trim(),
+    abn: normalizeAbn(values.abn),
+    gstRegistered: values.gstRegistered,
+    pricesIncludeGst: values.pricesIncludeGst,
+    businessContactEmail: values.businessContactEmail.trim(),
+    refundContactEmail: values.refundContactEmail.trim(),
+    customerSurchargeNotice: values.customerSurchargeNotice?.trim() || null,
     countryCode: normalizeCountryCode(values.countryCode),
     timezone: values.timezone,
     currency: values.currency,
@@ -330,12 +373,15 @@ function RestaurantPaymentsDialog({
   restaurant,
   isPlatformOwner,
   onUpdated,
+  open,
+  onOpenChange,
 }: {
   restaurant: Restaurant
   isPlatformOwner: boolean
   onUpdated: () => Promise<void> | void
+  open: boolean
+  onOpenChange: (open: boolean) => void
 }) {
-  const [open, setOpen] = useState(false)
   const [settings, setSettings] = useState<RestaurantPaymentSettings | null>(null)
   const [orderFeePercent, setOrderFeePercent] = useState('0')
   const [setupFeeAmount, setSetupFeeAmount] = useState('0')
@@ -487,7 +533,7 @@ function RestaurantPaymentsDialog({
       : 'outline' as const
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogTrigger asChild>
         <Button
           type="button"
@@ -980,6 +1026,11 @@ function InternationalPhoneInput({
 function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps) {
   const [open, setOpen] = useState(false)
   const [discardDialogOpen, setDiscardDialogOpen] = useState(false)
+  const [stripeImportOpen, setStripeImportOpen] = useState(false)
+  const [stripeImportLoading, setStripeImportLoading] = useState(false)
+  const [stripeImportError, setStripeImportError] = useState<string | null>(null)
+  const [stripeImportPreview, setStripeImportPreview] = useState<StripeBusinessProfileImport | null>(null)
+  const [selectedStripeFields, setSelectedStripeFields] = useState<Set<StripeBusinessProfileImportField>>(new Set())
   const [failedImagePreviewUrl, setFailedImagePreviewUrl] = useState('')
   const [formTab, setFormTab] = useState<RestaurantFormTab>('basic')
   const editing = Boolean(restaurant)
@@ -1008,6 +1059,13 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
             address: restaurant.address,
             phoneCountryCode: restaurantPhone.phoneCountryCode,
             phoneNationalNumber: restaurantPhone.phoneNationalNumber,
+            legalBusinessName: restaurant.legalBusinessName,
+            abn: restaurant.abn ?? '',
+            gstRegistered: restaurant.gstRegistered,
+            pricesIncludeGst: restaurant.pricesIncludeGst,
+            businessContactEmail: restaurant.businessContactEmail,
+            refundContactEmail: restaurant.refundContactEmail,
+            customerSurchargeNotice: restaurant.customerSurchargeNotice ?? '',
             countryCode: restaurantCountryCode,
             timezone: restaurant.timezone,
             currency: restaurant.currency,
@@ -1111,6 +1169,104 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
     }
   }
 
+  const stripeAbnImported = stripeImportPreview?.taxIdStatus === 'Imported'
+
+  const getStripeImportCurrentValue = (field: StripeBusinessProfileImportField) => {
+    switch (field) {
+      case 'name':
+      case 'legalBusinessName':
+      case 'abn':
+      case 'address':
+      case 'businessContactEmail':
+      case 'refundContactEmail':
+      case 'countryCode':
+      case 'currency':
+        return form.getValues(field)?.trim() ?? ''
+      case 'phone': {
+        const nationalNumber = form.getValues('phoneNationalNumber').trim()
+        if (!nationalNumber) return ''
+
+        try {
+          return formatPhoneForPayload(form.getValues('phoneCountryCode'), nationalNumber)
+        } catch {
+          return nationalNumber
+        }
+      }
+    }
+  }
+
+  const handleOpenStripeImport = async () => {
+    if (!restaurant) return
+
+    setStripeImportOpen(true)
+    setStripeImportLoading(true)
+    setStripeImportError(null)
+    setStripeImportPreview(null)
+    setSelectedStripeFields(new Set())
+
+    try {
+      const preview = await previewStripeBusinessProfileImport(restaurant.id)
+      setStripeImportPreview(preview)
+      setSelectedStripeFields(new Set(
+        preview.suggestions
+          .filter((suggestion) => !getStripeImportCurrentValue(suggestion.field))
+          .map((suggestion) => suggestion.field),
+      ))
+    } catch (error) {
+      setStripeImportError(error instanceof Error ? error.message : 'Stripe business details could not be loaded.')
+    } finally {
+      setStripeImportLoading(false)
+    }
+  }
+
+  const toggleStripeImportField = (field: StripeBusinessProfileImportField, checked: boolean) => {
+    setSelectedStripeFields((current) => {
+      const next = new Set(current)
+      if (checked) next.add(field)
+      else next.delete(field)
+      return next
+    })
+  }
+
+  const applyStripeImport = () => {
+    if (!stripeImportPreview) return
+
+    for (const suggestion of stripeImportPreview.suggestions) {
+      if (!selectedStripeFields.has(suggestion.field)) continue
+
+      switch (suggestion.field) {
+        case 'phone': {
+          const suggestedCountry = stripeImportPreview.suggestions
+            .find((item) => item.field === 'countryCode')?.value
+          const phone = splitPhoneForForm(
+            suggestion.value,
+            suggestedCountry || form.getValues('countryCode'),
+          )
+          form.setValue('phoneCountryCode', phone.phoneCountryCode, { shouldDirty: true, shouldValidate: true })
+          form.setValue('phoneNationalNumber', phone.phoneNationalNumber, { shouldDirty: true, shouldValidate: true })
+          break
+        }
+        case 'abn':
+          form.setValue('abn', suggestion.value.replace(/\D/g, ''), { shouldDirty: true, shouldValidate: true })
+          break
+        case 'countryCode':
+          form.setValue('countryCode', normalizeCountryCode(suggestion.value), { shouldDirty: true, shouldValidate: true })
+          break
+        case 'currency':
+          form.setValue('currency', suggestion.value.toUpperCase(), { shouldDirty: true, shouldValidate: true })
+          break
+        default:
+          form.setValue(suggestion.field, suggestion.value, { shouldDirty: true, shouldValidate: true })
+      }
+    }
+
+    setFormTab('basic')
+    setStripeImportOpen(false)
+    toast.success('Stripe suggestions applied', {
+      description: 'Review the imported values, then select Save changes to update the restaurant.',
+    })
+  }
+
   const handleSubmit = async (values: RestaurantFormValues) => {
     try {
       if (restaurant) {
@@ -1182,6 +1338,18 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
         <Form {...form}>
           <form className="restaurant-form" onSubmit={form.handleSubmit(handleSubmit, handleInvalidSubmit)}>
             <div className="restaurant-form-scroll">
+              {restaurant?.stripeConnectStatus && restaurant.stripeConnectStatus !== 'NotConnected' ? (
+                <div className="restaurant-stripe-import-banner">
+                  <div>
+                    <p>Connected Stripe business details</p>
+                    <span>Pull the legal name, ABN, address, phone, and contacts from Stripe. Nothing is saved until you select Save changes.</span>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" onClick={() => void handleOpenStripeImport()}>
+                    <Download size={15} />
+                    Import from Stripe
+                  </Button>
+                </div>
+              ) : null}
               <Tabs value={formTab} onValueChange={(value) => setFormTab(value as RestaurantFormTab)} className="restaurant-form-tabs">
                 <TabsList className="restaurant-form-tabs-list" aria-label="Restaurant form sections">
                   <TabsTrigger value="basic">
@@ -1306,6 +1474,27 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
                         </FormItem>
                       )}
                     />
+                    <FormField control={form.control} name="legalBusinessName" render={({ field }) => (
+                      <FormItem className="restaurant-form-wide"><FormLabel>Legal business name</FormLabel><FormControl><Input placeholder="Example Hospitality Pty Ltd" {...field} /></FormControl><FormMessage /></FormItem>
+                    )} />
+                    <FormField control={form.control} name="abn" render={({ field }) => (
+                      <FormItem><FormLabel>ABN</FormLabel><FormControl><Input inputMode="numeric" placeholder="11 digits" {...field} /></FormControl><FormMessage /></FormItem>
+                    )} />
+                    <FormField control={form.control} name="businessContactEmail" render={({ field }) => (
+                      <FormItem><FormLabel>Business contact email</FormLabel><FormControl><Input type="email" {...field} /></FormControl><FormMessage /></FormItem>
+                    )} />
+                    <FormField control={form.control} name="refundContactEmail" render={({ field }) => (
+                      <FormItem><FormLabel>Refund contact email</FormLabel><FormControl><Input type="email" {...field} /></FormControl><FormMessage /></FormItem>
+                    )} />
+                    <FormField control={form.control} name="gstRegistered" render={({ field }) => (
+                      <FormItem><div className="flex items-center justify-between rounded-lg border p-3"><FormLabel>GST registered</FormLabel><FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl></div><FormMessage /></FormItem>
+                    )} />
+                    <FormField control={form.control} name="pricesIncludeGst" render={({ field }) => (
+                      <FormItem><div className="flex items-center justify-between rounded-lg border p-3"><FormLabel>Displayed prices include GST</FormLabel><FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl></div><FormMessage /></FormItem>
+                    )} />
+                    <FormField control={form.control} name="customerSurchargeNotice" render={({ field }) => (
+                      <FormItem className="restaurant-form-wide"><FormLabel>Surcharge notice (disclosure only)</FormLabel><FormControl><Textarea placeholder="A surcharge of 10% applies on Sundays." {...field} /></FormControl><FormMessage /></FormItem>
+                    )} />
                   </div>
                 </TabsContent>
                 <TabsContent value="advanced" className="restaurant-form-tab-panel">
@@ -1432,6 +1621,120 @@ function RestaurantFormDialog({ restaurant, onSaved }: RestaurantFormDialogProps
         </Form>
         </DialogContent>
       </Dialog>
+      <Dialog open={stripeImportOpen} onOpenChange={setStripeImportOpen}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Import business details from Stripe</DialogTitle>
+            <DialogDescription>
+              Select the Stripe values to copy into the restaurant form. This preview never updates the restaurant by itself.
+            </DialogDescription>
+          </DialogHeader>
+
+          {stripeImportLoading ? (
+            <div className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground">
+              <RefreshCw className="animate-spin" size={17} />
+              Retrieving connected account details
+            </div>
+          ) : stripeImportError ? (
+            <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
+              <p className="font-medium text-destructive">Could not load Stripe business details</p>
+              <p className="mt-1 text-sm text-muted-foreground">{stripeImportError}</p>
+              <Button type="button" variant="outline" size="sm" className="mt-3" onClick={() => void handleOpenStripeImport()}>
+                <RefreshCw size={15} />
+                Try again
+              </Button>
+            </div>
+          ) : stripeImportPreview ? (
+            <div className="space-y-4">
+              <div
+                className={`rounded-xl border p-3 text-sm ${
+                  stripeAbnImported ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-amber-500/30 bg-amber-500/5'
+                }`}
+              >
+                <div className="flex items-start gap-2">
+                  {stripeAbnImported ? (
+                    <CircleCheck className="mt-0.5 shrink-0 text-emerald-600" size={17} />
+                  ) : (
+                    <TriangleAlert className="mt-0.5 shrink-0 text-amber-600" size={17} />
+                  )}
+                  <div>
+                    <p className="font-medium">
+                      {stripeAbnImported
+                        ? 'ABN came from Stripe — tax settings still need confirmation'
+                        : 'Manual confirmation is still required'}
+                    </p>
+                    <p className="mt-1 text-muted-foreground">
+                      {stripeAbnImported
+                        ? 'Stripe returned the ABN registered on this connected account. Check that it matches the trading entity.'
+                        : stripeImportPreview.taxIdProvided
+                          ? 'Stripe confirms that a business tax ID was supplied, but it does not expose the complete ABN to DineFlow. Add the ABN to the connected account’s Stripe tax details so a future import can fill it in, or enter it here.'
+                          : 'Stripe did not expose a complete ABN for this connected account, so enter it here.'}
+                      {' '}GST registration, whether displayed prices include GST, surcharge disclosure, and refund policy are never inferred from Stripe — confirm them yourself.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {stripeImportPreview.suggestions.length > 0 ? (
+                <div className="space-y-2">
+                  {stripeImportPreview.suggestions.map((suggestion) => {
+                    const currentValue = getStripeImportCurrentValue(suggestion.field)
+                    const alreadyMatches = currentValue.trim().toLocaleLowerCase()
+                      === suggestion.value.trim().toLocaleLowerCase()
+
+                    return (
+                      <label
+                        key={suggestion.field}
+                        className={`grid gap-3 rounded-xl border p-3 sm:grid-cols-[auto_1fr_1fr] ${
+                          alreadyMatches ? 'bg-muted/30' : 'cursor-pointer'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          className="mt-1 size-4"
+                          checked={selectedStripeFields.has(suggestion.field)}
+                          disabled={alreadyMatches}
+                          onChange={(event) => toggleStripeImportField(suggestion.field, event.target.checked)}
+                          aria-label={`Import ${suggestion.label}`}
+                        />
+                        <div className="min-w-0">
+                          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Current · {suggestion.label}</span>
+                          <p className="mt-1 break-words text-sm font-medium">{currentValue || 'Blank'}</p>
+                        </div>
+                        <div className="min-w-0 rounded-lg bg-primary/5 p-2">
+                          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Stripe suggestion</span>
+                          <p className="mt-1 break-words text-sm font-medium">{suggestion.value}</p>
+                          <p className="mt-1 text-xs text-muted-foreground">Source: {suggestion.source}</p>
+                          {alreadyMatches ? <p className="mt-1 text-xs text-emerald-700">Already matches</p> : null}
+                        </div>
+                      </label>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-xl border p-4 text-sm text-muted-foreground">
+                  Stripe did not return any business profile fields that can be imported.
+                </div>
+              )}
+
+              <p className="text-xs text-muted-foreground">
+                Retrieved {formatDate(stripeImportPreview.retrievedAt)}. Applying values only changes this unsaved form.
+              </p>
+            </div>
+          ) : null}
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setStripeImportOpen(false)}>Cancel</Button>
+            <Button
+              type="button"
+              disabled={!stripeImportPreview || selectedStripeFields.size === 0 || stripeImportLoading}
+              onClick={applyStripeImport}
+            >
+              Apply {selectedStripeFields.size || ''} selected {selectedStripeFields.size === 1 ? 'field' : 'fields'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <AlertDialog open={discardDialogOpen} onOpenChange={setDiscardDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -1476,47 +1779,49 @@ function RestaurantDetailsDialog({ restaurant }: { restaurant: Restaurant }) {
           <Eye size={16} />
         </Button>
       </DialogTrigger>
-      <DialogContent className="restaurant-details-dialog">
+      <DialogContent className="restaurant-details-dialog restaurant-profile-details-dialog">
         <DialogHeader>
           <DialogTitle>{restaurant.name}</DialogTitle>
           <DialogDescription>Restaurant profile and operating configuration.</DialogDescription>
         </DialogHeader>
-        <div className="restaurant-details-grid">
-          {restaurantImageUrl ? (
-            <div className="restaurant-detail-wide overflow-hidden rounded-2xl border bg-muted">
-              <img
-                src={restaurantImageUrl}
-                alt={`${restaurant.name} restaurant image`}
-                className="h-44 w-full object-cover"
-              />
+        <div className="restaurant-details-scroll" role="region" aria-label={`${restaurant.name} details`} tabIndex={0}>
+          <div className="restaurant-details-grid">
+            {restaurantImageUrl ? (
+              <div className="restaurant-detail-wide overflow-hidden rounded-2xl border bg-muted">
+                <img
+                  src={restaurantImageUrl}
+                  alt={`${restaurant.name} restaurant image`}
+                  className="h-44 w-full object-cover"
+                />
+              </div>
+            ) : null}
+            <div><span>Status</span><Badge variant={restaurant.isActive ? 'secondary' : 'destructive'}>{restaurant.isActive ? 'Active' : 'Inactive'}</Badge></div>
+            <div><span>Image</span><strong>{restaurant.imageUrl ? 'Configured' : 'Default hero'}</strong></div>
+            <div>
+              <span>Country</span>
+              <strong className="restaurant-locale-inline">
+                <CountryFlag countryCode={restaurant.countryCode} />
+                {country ? `${country.name} (${country.code})` : restaurant.countryCode}
+              </strong>
             </div>
-          ) : null}
-          <div><span>Status</span><Badge variant={restaurant.isActive ? 'secondary' : 'destructive'}>{restaurant.isActive ? 'Active' : 'Inactive'}</Badge></div>
-          <div><span>Image</span><strong>{restaurant.imageUrl ? 'Configured' : 'Default hero'}</strong></div>
-          <div>
-            <span>Country</span>
-            <strong className="restaurant-locale-inline">
-              <CountryFlag countryCode={restaurant.countryCode} />
-              {country ? `${country.name} (${country.code})` : restaurant.countryCode}
-            </strong>
+            <div><span>Currency</span><strong>{restaurant.currency}</strong></div>
+            <div><span>Payment</span><strong>{restaurant.paymentPolicy === 'PrepayRequired' ? 'Online payment required' : 'Online or counter'}</strong></div>
+            <div className="restaurant-detail-wide"><span>Address</span><strong>{restaurant.address}</strong></div>
+            <div><span>Phone</span><strong>{restaurant.phone}</strong></div>
+            <div><span>Timezone</span><strong>{restaurant.timezone}</strong></div>
+            <div><span>Created</span><strong>{formatDate(restaurant.createdAt)}</strong></div>
+            <div><span>Last updated</span><strong>{restaurant.updatedAt ? formatDate(restaurant.updatedAt) : 'Not updated'}</strong></div>
+            <div className="restaurant-detail-wide"><span>Restaurant ID</span><code>{restaurant.id}</code></div>
           </div>
-          <div><span>Currency</span><strong>{restaurant.currency}</strong></div>
-          <div><span>Payment</span><strong>{restaurant.paymentPolicy === 'PrepayRequired' ? 'Online payment required' : 'Online or counter'}</strong></div>
-          <div className="restaurant-detail-wide"><span>Address</span><strong>{restaurant.address}</strong></div>
-          <div><span>Phone</span><strong>{restaurant.phone}</strong></div>
-          <div><span>Timezone</span><strong>{restaurant.timezone}</strong></div>
-          <div><span>Created</span><strong>{formatDate(restaurant.createdAt)}</strong></div>
-          <div><span>Last updated</span><strong>{restaurant.updatedAt ? formatDate(restaurant.updatedAt) : 'Not updated'}</strong></div>
-          <div className="restaurant-detail-wide"><span>Restaurant ID</span><code>{restaurant.id}</code></div>
-        </div>
-        <div className="restaurant-public-section">
-          <h3>Public takeaway access</h3>
-          <p>Share this public menu link for takeaway or general restaurant ordering.</p>
-          <PublicAccessCard
-            title="Takeaway menu"
-            description={`${restaurant.name} public ordering entry`}
-            url={takeawayUrl}
-          />
+          <div className="restaurant-public-section">
+            <h3>Public takeaway access</h3>
+            <p>Share this public menu link for takeaway or general restaurant ordering.</p>
+            <PublicAccessCard
+              title="Takeaway menu"
+              description={`${restaurant.name} public ordering entry`}
+              url={takeawayUrl}
+            />
+          </div>
         </div>
       </DialogContent>
     </Dialog>
@@ -1803,6 +2108,7 @@ export function AdminRestaurantsPage() {
         try {
           await refreshRestaurantStripeStatus(restaurantId)
           await refreshRestaurantData()
+          publishOperationalStatusInvalidated(restaurantId)
           toast.success('Stripe account status updated')
         } catch (returnError) {
           toast.error('Stripe setup returned, but status refresh failed', {
@@ -1846,14 +2152,19 @@ export function AdminRestaurantsPage() {
       })
     }
   }
-  const renderRestaurantActions = (restaurant: Restaurant) => (
+  const renderRestaurantActions = (restaurant: Restaurant, handlesPaymentDeepLink = false) => (
     <div className="row-actions">
       <RestaurantDetailsDialog restaurant={restaurant} />
       <RestaurantPublicAccessDialog restaurant={restaurant} />
       <RestaurantPaymentsDialog
         restaurant={restaurant}
         isPlatformOwner={isPlatformOwner}
-        onUpdated={() => refreshRestaurantData()}
+        onUpdated={async () => {
+          await refreshRestaurantData()
+          publishOperationalStatusInvalidated(restaurant.id)
+        }}
+        open={handlesPaymentDeepLink && searchParams.get('payments') === restaurant.id}
+        onOpenChange={(open) => updateUrlState({ payments: open ? restaurant.id : null }, false)}
       />
       <RestaurantFormDialog restaurant={restaurant} onSaved={() => refreshRestaurantData()} />
       {isPlatformOwner && <RestaurantDeleteAction restaurant={restaurant} onDelete={handleDelete} />}
@@ -2076,7 +2387,7 @@ export function AdminRestaurantsPage() {
                         </td>
                         <td>{formatDate(restaurant.createdAt)}</td>
                         <td>
-                          {renderRestaurantActions(restaurant)}
+                          {renderRestaurantActions(restaurant, true)}
                         </td>
                       </tr>
                     ))}

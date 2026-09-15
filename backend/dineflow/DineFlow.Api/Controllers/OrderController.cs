@@ -18,12 +18,22 @@ namespace DineFlow.Api.Controllers;
 [Route("api/[controller]")]
 public class OrderController : ControllerBase
 {
+    /// <summary>
+    /// Trims a declaration and treats whitespace as nothing declared, so a snapshot never records
+    /// a blank that reads as a declaration nobody made.
+    /// </summary>
+    private static string? NormalizeDisclosureSnapshot(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
     private const int MaximumGuestOrderLookupCount = 50;
     private readonly AppDbContext _dbContext;
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
     private readonly OrderPickupNumberService _orderPickupNumberService;
     private readonly MenuItemStockService _menuItemStockService;
+    private readonly OrderStockLedger _orderStockLedger;
     private readonly OrderAutoAcceptanceService _orderAutoAcceptanceService;
+    private readonly OrderRefundProcessor _orderRefundProcessor;
+    private readonly StripeCheckoutSessionExpiry _checkoutSessionExpiry;
     private readonly ReportLogWriter _reportLogWriter;
     private readonly TableSessionService _tableSessionService;
     private readonly ILogger<OrderController> _logger;
@@ -33,7 +43,10 @@ public class OrderController : ControllerBase
         OrderRealtimeNotifier orderRealtimeNotifier,
         OrderPickupNumberService orderPickupNumberService,
         MenuItemStockService menuItemStockService,
+        OrderStockLedger orderStockLedger,
         OrderAutoAcceptanceService orderAutoAcceptanceService,
+        OrderRefundProcessor orderRefundProcessor,
+        StripeCheckoutSessionExpiry checkoutSessionExpiry,
         ReportLogWriter reportLogWriter,
         TableSessionService tableSessionService,
         ILogger<OrderController> logger)
@@ -42,7 +55,10 @@ public class OrderController : ControllerBase
         _orderRealtimeNotifier = orderRealtimeNotifier;
         _orderPickupNumberService = orderPickupNumberService;
         _menuItemStockService = menuItemStockService;
+        _orderStockLedger = orderStockLedger;
         _orderAutoAcceptanceService = orderAutoAcceptanceService;
+        _orderRefundProcessor = orderRefundProcessor;
+        _checkoutSessionExpiry = checkoutSessionExpiry;
         _reportLogWriter = reportLogWriter;
         _tableSessionService = tableSessionService;
         _logger = logger;
@@ -62,6 +78,8 @@ public class OrderController : ControllerBase
                 .ThenInclude(request => request.PaymentRefund)
             .Include(order => order.Payments)
                 .ThenInclude(payment => payment.Refunds)
+                    .ThenInclude(refund => refund.Items)
+            .Include(order => order.StatusHistory)
             .Include(order => order.Restaurant)
             .Include(order => order.Table)
             .ToListAsync(cancellationToken);
@@ -90,6 +108,8 @@ public class OrderController : ControllerBase
                 .ThenInclude(request => request.PaymentRefund)
             .Include(order => order.Payments)
                 .ThenInclude(payment => payment.Refunds)
+                    .ThenInclude(refund => refund.Items)
+            .Include(order => order.StatusHistory)
             .Include(order => order.Restaurant)
             .Include(order => order.Table)
             .Where(order => order.CustomerId == currentUserId)
@@ -142,6 +162,8 @@ public class OrderController : ControllerBase
                 .ThenInclude(request => request.PaymentRefund)
             .Include(order => order.Payments)
                 .ThenInclude(payment => payment.Refunds)
+                    .ThenInclude(refund => refund.Items)
+            .Include(order => order.StatusHistory)
             .Include(order => order.Restaurant)
             .Include(order => order.Table)
             // An order belonging to a signed-in customer must never be readable through the guest
@@ -174,6 +196,7 @@ public class OrderController : ControllerBase
                 .ThenInclude(request => request.Items)
             .Include(item => item.RefundRequests)
                 .ThenInclude(request => request.PaymentRefund)
+            .Include(item => item.StatusHistory)
             .Include(item => item.Restaurant)
             .Include(item => item.Table)
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
@@ -182,6 +205,77 @@ public class OrderController : ControllerBase
         {
             return NotFound(new { message = "Order not found." });
         }
+
+        return Ok(MapToResponse(order));
+    }
+
+    /// <summary>
+    /// Changes how an unpaid order will be settled, addressed by order rather than by cart.
+    /// </summary>
+    /// <remarks>
+    /// The cart that produced the order is submitted and its participant token is usually gone, so
+    /// the cart route could not be reached from My Orders or from a returning customer's menu. That
+    /// left anyone whose restaurant had switched Stripe off with an order that could not be paid
+    /// and could only be abandoned.
+    /// </remarks>
+    [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.GuestOrderAccess)]
+    [HttpPut("{id:guid}/payment-method")]
+    public async Task<ActionResult<OrderResponse>> SelectOrderPaymentMethod(
+        Guid id,
+        [FromBody] ChangeOrderPaymentMethodRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (!Enum.TryParse<PaymentMethod>(request?.PaymentMethod, ignoreCase: true, out var paymentMethod)
+            || !Enum.IsDefined(paymentMethod))
+        {
+            return BadRequest(new
+            {
+                message = $"PaymentMethod must be one of: {string.Join(", ", Enum.GetNames<PaymentMethod>())}."
+            });
+        }
+
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        var order = await _dbContext.Orders
+            .Include(item => item.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
+            .Include(item => item.Payments)
+            .Include(item => item.Restaurant)
+            .Include(item => item.Table)
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+
+        if (order is null)
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
+        if (!string.IsNullOrWhiteSpace(order.CustomerId))
+        {
+            if (!string.Equals(order.CustomerId, currentUserId, StringComparison.Ordinal))
+            {
+                return Forbid();
+            }
+        }
+        else if (!GuestAccessTokenService.IsAuthorized(order.GuestAccessTokenHash, request?.GuestAccessToken))
+        {
+            return Forbid();
+        }
+
+        var refusal = OrderPaymentMethodPolicy.Refuse(order, paymentMethod);
+
+        if (refusal is not null)
+        {
+            return Conflict(new { message = refusal });
+        }
+
+        if (!OrderPaymentMethodPolicy.Apply(order, paymentMethod, DateTime.UtcNow))
+        {
+            return Ok(MapToResponse(order));
+        }
+
+        await _orderAutoAcceptanceService.TryAcceptAsync(order, cancellationToken);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+        await _orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 
         return Ok(MapToResponse(order));
     }
@@ -207,6 +301,7 @@ public class OrderController : ControllerBase
                 .ThenInclude(item => item.SelectedOptions)
             .Include(item => item.Payments)
                 .ThenInclude(payment => payment.Refunds)
+                    .ThenInclude(refund => refund.Items)
             .Include(item => item.RefundRequests)
                 .ThenInclude(refundRequest => refundRequest.Items)
             .Include(item => item.RefundRequests)
@@ -232,15 +327,41 @@ public class OrderController : ControllerBase
             return Forbid();
         }
 
-        if (!CustomerOrderCancellationPolicy.CanCancel(order.Status, order.PaymentStatus))
+        var paidAt = ResolvePaidAt(order);
+        var cancellableWhileUnpaid = CustomerOrderCancellationPolicy.CanCancel(
+            order.Status,
+            order.PaymentStatus);
+        // FS-017: a paid order the restaurant never accepted leaves the customer with neither food
+        // nor money. Past the threshold they can take the decision back rather than wait on a
+        // kitchen that may not be looking at the screen.
+        var cancellableForRefund = OrderAcceptancePolicy.CanCustomerCancelForRefund(
+            order.Status,
+            order.PaymentStatus,
+            order.PaymentMethod,
+            paidAt,
+            order.CreatedAt,
+            DateTime.UtcNow);
+
+        if (!cancellableWhileUnpaid && !cancellableForRefund)
         {
+            var awaitingAcceptance = OrderAcceptancePolicy.IsAwaitingAcceptance(
+                order.Status,
+                order.PaymentStatus);
+            var availableAt = awaitingAcceptance
+                ? (paidAt ?? order.CreatedAt) + OrderAcceptancePolicy.CustomerCancellationAfter
+                : (DateTime?)null;
+
             return Conflict(new
             {
                 message = order.Status != OrderStatus.Pending
                     ? "Only pending orders can be cancelled by the customer."
-                    : "This order has an active or completed payment. Use the refund request instead.",
+                    : awaitingAcceptance
+                        ? "The restaurant still has time to accept this order. You can cancel it for a refund "
+                            + $"after {OrderAcceptancePolicy.CustomerCancellationAfter.TotalMinutes:0} minutes."
+                        : "This order has an active or completed payment. Use the refund request instead.",
                 orderStatus = order.Status.ToString(),
-                paymentStatus = order.PaymentStatus.ToString()
+                paymentStatus = order.PaymentStatus.ToString(),
+                cancellableForRefundAt = availableAt
             });
         }
 
@@ -256,24 +377,59 @@ public class OrderController : ControllerBase
         var cancellationReason = reason ?? "Cancelled by customer.";
         var previousStatus = order.Status;
         var previousPaymentStatus = order.PaymentStatus;
-        order.Status = OrderStatus.Cancelled;
-        order.PaymentStatus = PaymentStatus.Cancelled;
-        order.UpdatedAt = now;
 
-        foreach (var payment in order.Payments.Where(payment =>
-                     payment.Status is PaymentStatus.Unpaid
-                         or PaymentStatus.Failed
-                         or PaymentStatus.Expired
-                         or PaymentStatus.Cancelled
-                         or PaymentStatus.NotRequired))
+        if (cancellableForRefund)
         {
-            payment.Status = PaymentStatus.Cancelled;
-            payment.UpdatedAt = now;
+            // Refund before cancelling: if Stripe rejects it the order stays exactly as it was,
+            // rather than becoming a cancelled order whose money never came back.
+            var refundResult = await _orderRefundProcessor.RefundAsync(
+                order,
+                requestedByUserId: currentUserId,
+                reason: cancellationReason,
+                source: "customer-unaccepted-timeout",
+                cancellationToken: cancellationToken,
+                customerExplanation: "You cancelled this order because the restaurant had not "
+                    + "accepted it. Your payment has been refunded in full.");
+
+            if (!refundResult.IsSuccess)
+            {
+                return StatusCode(refundResult.StatusCode, new
+                {
+                    message = refundResult.Message,
+                    detail = refundResult.Detail
+                });
+            }
+
+            order.Status = OrderStatus.Cancelled;
+            order.UpdatedAt = now;
+        }
+        else
+        {
+            order.Status = OrderStatus.Cancelled;
+            order.PaymentStatus = PaymentStatus.Cancelled;
+            order.UpdatedAt = now;
         }
 
-        await _menuItemStockService.ReleaseAsync(
-            BuildRequestedQuantities(order.OrderItems),
-            cancellationToken);
+        if (!cancellableForRefund)
+        {
+            foreach (var payment in order.Payments.Where(payment =>
+                         payment.Status is PaymentStatus.Unpaid
+                             or PaymentStatus.Failed
+                             or PaymentStatus.Expired
+                             or PaymentStatus.Cancelled
+                             or PaymentStatus.NotRequired))
+            {
+                payment.Status = PaymentStatus.Cancelled;
+                payment.UpdatedAt = now;
+            }
+        }
+
+        // Before the stock goes back, not after: for the hour between cancelling and Stripe's own
+        // timeout the hosted page stayed chargeable, so a customer could pay for portions the
+        // kitchen had already given away.
+        await _checkoutSessionExpiry.ExpireOpenSessionsAsync(order, "customer-cancel", cancellationToken);
+
+        await _orderStockLedger.ReleaseAsync(order, now, cancellationToken);
 
         _dbContext.OrderStatusHistories.Add(new OrderStatusHistory
         {
@@ -352,12 +508,16 @@ public class OrderController : ControllerBase
         var order = await _dbContext.Orders
             .Include(item => item.Payments)
                 .ThenInclude(payment => payment.Refunds)
+                    .ThenInclude(refund => refund.Items)
             .Include(item => item.RefundRequests)
                 .ThenInclude(refundRequest => refundRequest.Items)
             .Include(item => item.RefundRequests)
                 .ThenInclude(refundRequest => refundRequest.PaymentRefund)
             .Include(item => item.Customer)
             .Include(item => item.OrderItems)
+                // The extras have to come with the lines: refunding one reads its price and its
+                // adjustment type, and without them every extra reads as not belonging to its line.
+                .ThenInclude(orderItem => orderItem.SelectedOptions)
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
 
         if (order is null)
@@ -385,18 +545,65 @@ public class OrderController : ControllerBase
             return BadRequest(new { message = "Select at least one item to refund." });
         }
 
-        if (selectedItems.Select(item => item.OrderItemId).Distinct().Count() != selectedItems.Count)
+        // Keyed by both, so an extra and its own dish are two different selections rather than a
+        // duplicate of one.
+        if (selectedItems
+                .Select(item => (item.OrderItemId, item.OrderItemOptionId))
+                .Distinct()
+                .Count() != selectedItems.Count)
         {
             return BadRequest(new { message = "Each order item can only be selected once." });
         }
 
+        // One request may ask for a line itself or for its extras, never both. The settled-grain
+        // check below reads refunds that already succeeded and so cannot see this request's own
+        // contents; granted together, the two would return the line's full value plus an extra's
+        // share of that same value.
+        foreach (var group in selectedItems.GroupBy(item => item.OrderItemId))
+        {
+            if (LineRefundGranularityPolicy.AsksForALineBothWays(
+                    group.Select(item => item.OrderItemOptionId is not null)))
+            {
+                var name = order.OrderItems
+                    .FirstOrDefault(item => item.Id == group.Key)?.MenuItemNameSnapshot
+                    ?? "That item";
+
+                return BadRequest(new { message = LineRefundGranularityPolicy.ExplainAskedBothWays(name) });
+            }
+        }
+
         var orderItemsById = order.OrderItems.ToDictionary(item => item.Id);
         var alreadyRefundedAmounts = BuildAttributedRefundAmounts(order);
+        var alreadyRefundedModifiers = RefundRequestItemPolicy.BuildAttributedModifierAmounts(order);
+        var settledGranularity = RefundRequestItemPolicy.BuildSettledGranularity(order);
         foreach (var selectedItem in selectedItems)
         {
             if (!orderItemsById.TryGetValue(selectedItem.OrderItemId, out var orderItem))
             {
                 return BadRequest(new { message = "One of the selected items does not belong to this order." });
+            }
+
+            var settled = settledGranularity.GetValueOrDefault(orderItem.Id, LineRefundGranularity.Untouched);
+
+            if (selectedItem.OrderItemOptionId is { } selectedOptionId)
+            {
+                var refusal = ValidateModifierSelection(orderItem, selectedOptionId, settled,
+                    selectedItem, alreadyRefundedModifiers);
+
+                if (refusal is not null)
+                {
+                    return BadRequest(new { message = refusal });
+                }
+
+                continue;
+            }
+
+            if (!LineRefundGranularityPolicy.AllowsWholeLineRefund(settled))
+            {
+                return BadRequest(new
+                {
+                    message = LineRefundGranularityPolicy.ExplainWholeLineRefused(orderItem.MenuItemNameSnapshot)
+                });
             }
 
             var lineAmountCents = PricingCalculator.ToMinorCurrencyUnits(orderItem.UnitPrice * orderItem.Quantity);
@@ -492,14 +699,29 @@ public class OrderController : ControllerBase
             .Select(selectedItem =>
             {
                 var orderItem = orderItemsById[selectedItem.OrderItemId];
+                var option = selectedItem.OrderItemOptionId is { } optionId
+                    ? orderItem.SelectedOptions.FirstOrDefault(candidate =>
+                        candidate.MenuItemOptionId == optionId || candidate.Id == optionId)
+                    : null;
+
+                // The extra's own contribution, not the line's price: asking for the truffle back
+                // must never default to the amount of the bread it was on.
+                var defaultAmountCents = option is null
+                    ? PricingCalculator.ToMinorCurrencyUnits(orderItem.UnitPrice * selectedItem.Quantity)
+                    : OrderItemOptionRefund.ContributionCents(option, orderItem.Quantity);
+
                 return new PaymentRefundRequestItem
                 {
                     Id = Guid.NewGuid(),
                     OrderItemId = orderItem.Id,
+                    // Stored as the order's own option row rather than the menu's, because the menu
+                    // row can be archived and this has to keep resolving for as long as the refund
+                    // record does.
+                    OrderItemOptionId = option?.Id,
+                    OptionNameSnapshot = option?.OptionNameSnapshot,
                     MenuItemNameSnapshot = orderItem.MenuItemNameSnapshot,
                     Quantity = selectedItem.Quantity,
-                    AmountCents = selectedItem.AmountCents
-                        ?? PricingCalculator.ToMinorCurrencyUnits(orderItem.UnitPrice * selectedItem.Quantity)
+                    AmountCents = selectedItem.AmountCents ?? defaultAmountCents
                 };
             })
             .ToList();
@@ -672,6 +894,22 @@ public class OrderController : ControllerBase
             });
         }
 
+        // In the same transaction as the dish: an order that takes the last portion of a dish and
+        // finds its tracked extra gone must take neither, or the kitchen owes a plate it cannot make.
+        var unavailableOptionIds = await _menuItemStockService.TryReserveOptionsAsync(
+            OrderOptionStock.RequestedQuantities(buildResult.OrderItems),
+            cancellationToken);
+
+        if (unavailableOptionIds.Count > 0)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Conflict(new
+            {
+                message = "Some options sold out while the order was being placed.",
+                options = DescribeUnavailableOptions(unavailableOptionIds, buildResult.OrderItems)
+            });
+        }
+
         await _orderPickupNumberService.AssignPickupNumberAsync(order, restaurant, now, cancellationToken);
 
         foreach (var orderItem in buildResult.OrderItems)
@@ -734,28 +972,91 @@ public class OrderController : ControllerBase
     /// menu item has since been deleted carry no id and cannot be stock-tracked, so they are
     /// skipped.
     /// </summary>
-    internal static Dictionary<Guid, int> BuildRequestedQuantities(IEnumerable<OrderItem> orderItems)
+    /// <summary>
+    /// Whether one extra on a line may be refunded for the amount asked, or why not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Three questions in order, because a later one is meaningless if an earlier one fails. Is
+    /// this extra on this line at all; can an extra of this kind be refunded on its own — a
+    /// <c>Replace</c> became the price rather than adding to it, a <c>Remove</c> was a discount, a
+    /// free extra cost nothing, and an order that predates the type snapshot cannot be split; and
+    /// is the amount within what this extra actually contributed, less whatever has already gone
+    /// back for it.
+    /// </para>
+    /// <para>
+    /// The line's own balance is not checked here and does not need to be. A line refunded by its
+    /// parts is never also refunded whole, so the parts can never add up to more than the line.
+    /// </para>
+    /// </remarks>
+    /// <returns>The message to refuse with, or null when the selection is good.</returns>
+    private static string? ValidateModifierSelection(
+        OrderItem orderItem,
+        Guid selectedOptionId,
+        LineRefundGranularity settled,
+        CreateRefundRequestItemInput selectedItem,
+        IReadOnlyDictionary<Guid, long> alreadyRefundedModifiers)
     {
-        var quantities = new Dictionary<Guid, int>();
+        var option = orderItem.SelectedOptions
+            .FirstOrDefault(candidate => candidate.MenuItemOptionId == selectedOptionId
+                || candidate.Id == selectedOptionId);
 
-        foreach (var orderItem in orderItems)
+        if (option is null)
         {
-            if (orderItem.MenuItemId is not { } menuItemId)
-            {
-                continue;
-            }
-
-            quantities[menuItemId] = quantities.GetValueOrDefault(menuItemId) + orderItem.Quantity;
+            return "One of the selected extras does not belong to that item.";
         }
 
-        return quantities;
+        if (!LineRefundGranularityPolicy.AllowsModifierRefund(settled))
+        {
+            return LineRefundGranularityPolicy.ExplainModifierRefused(orderItem.MenuItemNameSnapshot);
+        }
+
+        if (OrderItemOptionRefund.WhyNotRefundable(orderItem, option) is { } reason)
+        {
+            return OrderItemOptionRefund.Explain(reason, option.OptionNameSnapshot);
+        }
+
+        var contributionCents = OrderItemOptionRefund.ContributionCents(option, orderItem.Quantity);
+        var alreadyCents = Math.Min(
+            contributionCents,
+            alreadyRefundedModifiers.GetValueOrDefault(option.Id));
+        var remainingCents = contributionCents - alreadyCents;
+
+        if (remainingCents <= 0)
+        {
+            return $"\"{option.OptionNameSnapshot}\" has already been refunded.";
+        }
+
+        var requestedCents = selectedItem.AmountCents ?? remainingCents;
+
+        if (requestedCents <= 0 || requestedCents > remainingCents)
+        {
+            return $"Refund amount for \"{option.OptionNameSnapshot}\" must be between 1 and "
+                + $"{remainingCents} cents.";
+        }
+
+        return null;
     }
+
+    internal static Dictionary<Guid, int> BuildRequestedQuantities(IEnumerable<OrderItem> orderItems) =>
+        OrderItemStock.RequestedQuantities(orderItems);
 
     internal static IReadOnlyList<string> DescribeUnavailableItems(
         IReadOnlyList<Guid> menuItemIds,
         IEnumerable<OrderItem> orderItems) =>
         menuItemIds
             .Select(id => orderItems.FirstOrDefault(item => item.MenuItemId == id)?.MenuItemNameSnapshot ?? "Unknown item")
+            .Distinct()
+            .ToList();
+
+    /// <summary>Names the modifiers that ran out, so the customer is told what to change.</summary>
+    internal static IReadOnlyList<string> DescribeUnavailableOptions(
+        IReadOnlyList<Guid> optionIds,
+        IEnumerable<OrderItem> orderItems) =>
+        optionIds
+            .Select(id => orderItems
+                .SelectMany(item => item.SelectedOptions)
+                .FirstOrDefault(option => option.MenuItemOptionId == id)?.OptionNameSnapshot ?? "Unknown option")
             .Distinct()
             .ToList();
 
@@ -983,17 +1284,16 @@ public class OrderController : ControllerBase
             foreach (var group in menuItem.OptionGroups)
             {
                 var selectedInGroup = selectedOptions
-                    .Where(selection => selection.Option.GroupId == group.Id)
-                    .Sum(selection => selection.Quantity);
+                    .Count(selection => selection.Option.GroupId == group.Id);
 
                 if (group.IsRequired && selectedInGroup < group.MinSelections)
                 {
-                    validationErrors.Add($"'{group.Name}' requires at least {group.MinSelections} selection(s) for '{menuItem.Name}'.");
+                    validationErrors.Add($"'{group.Name}' requires at least {group.MinSelections} choice(s) for '{menuItem.Name}'.");
                 }
 
                 if (selectedInGroup > group.MaxSelections)
                 {
-                    validationErrors.Add($"'{group.Name}' allows at most {group.MaxSelections} selection(s) for '{menuItem.Name}'.");
+                    validationErrors.Add($"'{group.Name}' allows at most {group.MaxSelections} choice(s) for '{menuItem.Name}'.");
                 }
             }
 
@@ -1011,6 +1311,11 @@ public class OrderController : ControllerBase
                 Id = Guid.NewGuid(),
                 MenuItemId = menuItem.Id,
                 MenuItemNameSnapshot = menuItem.Name,
+                // Frozen with the name and the price. A correction to the menu must not rewrite
+                // what a past customer was shown.
+                AllergensSnapshot = NormalizeDisclosureSnapshot(menuItem.Allergens),
+                MayContainAllergensSnapshot = NormalizeDisclosureSnapshot(menuItem.MayContainAllergens),
+                CrossContactStatementSnapshot = NormalizeDisclosureSnapshot(menuItem.CrossContactStatement),
                 BasePriceSnapshot = menuItem.Price,
                 Quantity = itemRequest.Quantity,
                 UnitPrice = unitPrice,
@@ -1032,6 +1337,15 @@ public class OrderController : ControllerBase
                     GroupNameSnapshot = groupName,
                     OptionNameSnapshot = option.Name,
                     PriceAdjustmentSnapshot = option.PriceAdjustment,
+                    // Without this the adjustment above is a number with no unit: the same 3.00 is
+                    // a surcharge, a discount or the whole price depending on a type that lived
+                    // only on the menu row, which can be archived or edited afterwards.
+                    AdjustmentTypeSnapshot = option.AdjustmentType,
+                    // Frozen with the name and the price: a receipt has to say what the customer
+                    // was told, not what the menu says today.
+                    AllergensSnapshot = option.Allergens,
+                    MayContainAllergensSnapshot = option.MayContainAllergens,
+                    CrossContactStatementSnapshot = option.CrossContactStatement,
                     Quantity = selection.Quantity,
                     CreatedAt = DateTime.UtcNow
                 });
@@ -1043,6 +1357,42 @@ public class OrderController : ControllerBase
         return new OrderItemBuildResult(orderItems, validationErrors);
     }
 
+    /// <summary>
+    /// When the money actually landed. Taken from the settled payment rather than the order row,
+    /// which has no dedicated timestamp for it.
+    /// </summary>
+    private static DateTime? ResolvePaidAt(Order order) =>
+        order.Payments
+            .Where(payment => payment.PaidAt.HasValue)
+            .OrderByDescending(payment => payment.PaidAt)
+            .Select(payment => payment.PaidAt)
+            .FirstOrDefault();
+
+    /// <summary>
+    /// Why the order ended, for the customer's own view of it.
+    /// </summary>
+    /// <remarks>
+    /// Null while the order is open, and null when the closing transition was never loaded — the
+    /// reason is absent either way, and a response that invented one would be worse than silence.
+    /// </remarks>
+    private static OrderClosureReason? BuildClosureReason(Order order)
+    {
+        var closure = OrderClosureExplanation.Find(order);
+
+        if (closure is null)
+        {
+            return null;
+        }
+
+        return new OrderClosureReason
+        {
+            Action = closure.Action,
+            Reason = TrimOrNull(closure.Reason),
+            EndedByCustomer = OrderClosureExplanation.EndedByCustomer(order, closure),
+            At = closure.CreatedAt,
+        };
+    }
+
     private static OrderResponse MapToResponse(Order order) => MapToResponse(order, null);
 
     private static OrderResponse MapToResponse(
@@ -1050,15 +1400,30 @@ public class OrderController : ControllerBase
         IReadOnlyDictionary<Guid, string?>? menuImageUrls) => MapToResponse(
             order,
             menuImageUrls,
-            BuildAttributedRefundAmounts(order));
+            BuildAttributedRefundAmounts(order),
+            RefundRequestItemPolicy.BuildAttributedModifierAmounts(order),
+            RefundRequestItemPolicy.BuildSettledGranularity(order));
 
     private static OrderResponse MapToResponse(
         Order order,
         IReadOnlyDictionary<Guid, string?>? menuImageUrls,
-        IReadOnlyDictionary<Guid, long> refundedAmounts) => new()
+        IReadOnlyDictionary<Guid, long> refundedAmounts,
+        IReadOnlyDictionary<Guid, long> refundedModifierAmounts,
+        IReadOnlyDictionary<Guid, LineRefundGranularity> settledGranularity) => new()
     {
         Id = order.Id,
         RestaurantId = order.RestaurantId,
+        RestaurantName = order.Restaurant?.Name,
+        RestaurantLegalBusinessName = order.Restaurant?.LegalBusinessName,
+        RestaurantAbn = order.Restaurant?.Abn,
+        RestaurantGstRegistered = order.Restaurant?.GstRegistered ?? false,
+        RestaurantPricesIncludeGst = order.Restaurant?.PricesIncludeGst ?? false,
+        RestaurantPaymentPolicy = (order.Restaurant?.PaymentPolicy ?? RestaurantPaymentPolicy.PrepayRequired).ToString(),
+        RestaurantOnlinePaymentsEnabled = OrderPaymentMethodPolicy.AllowsOnlinePayment(order.Restaurant),
+        RestaurantAddress = order.Restaurant?.Address,
+        RestaurantPhone = order.Restaurant?.Phone,
+        RestaurantRefundContactEmail = order.Restaurant?.RefundContactEmail,
+        RestaurantCustomerSurchargeNotice = order.Restaurant?.CustomerSurchargeNotice,
         TableId = order.TableId,
         TableNumber = order.Table?.TableNumber,
         CustomerId = order.CustomerId,
@@ -1076,12 +1441,34 @@ public class OrderController : ControllerBase
         ScheduledTime = order.ScheduledTime,
         CreatedAt = order.CreatedAt,
         UpdatedAt = order.UpdatedAt,
+        PaidAt = ResolvePaidAt(order),
+        CanCancelForRefund = OrderAcceptancePolicy.CanCustomerCancelForRefund(
+            order.Status,
+            order.PaymentStatus,
+            order.PaymentMethod,
+            ResolvePaidAt(order),
+            order.CreatedAt,
+            DateTime.UtcNow),
+        CancellableForRefundAt = OrderAcceptancePolicy.IsAwaitingAcceptance(order.Status, order.PaymentStatus)
+            && order.PaymentMethod == PaymentMethod.Online
+                ? (ResolvePaidAt(order) ?? order.CreatedAt) + OrderAcceptancePolicy.CustomerCancellationAfter
+                : null,
+        // Sent rather than recomputed in the browser: the deadline the customer is shown has to be
+        // the same one the sweep acts on, and two copies of "20 minutes" would drift.
+        // Null for counter orders: they hold their stock by arrangement, not by neglect, so there
+        // is no deadline to count down and nothing to chase the customer about.
+        UnpaidExpiresAt = order.Status == OrderStatus.Pending
+            && AbandonedOrderPolicy.IsGovernedBy(order.PaymentMethod)
+            && AbandonedOrderPolicy.HasNoPaymentInFlight(order.PaymentStatus)
+                ? AbandonedOrderPolicy.ExpiresAt(order.CreatedAt)
+                : null,
         RefundBalance = BuildRefundBalance(order),
-        LatestRefundRequest = order.RefundRequests
+        ClosureReason = BuildClosureReason(order),
+        RefundRequests = order.RefundRequests
             .OrderByDescending(item => item.CreatedAt)
             .ThenByDescending(item => item.Id)
             .Select(MapToCustomerRefundRequestResponse)
-            .FirstOrDefault(),
+            .ToList(),
         OrderItems = order.OrderItems
             .OrderBy(item => item.CreatedAt)
             .ThenBy(item => item.Id)
@@ -1091,6 +1478,9 @@ public class OrderController : ControllerBase
                 OrderId = item.OrderId,
                 MenuItemId = item.MenuItemId,
                 MenuItemNameSnapshot = item.MenuItemNameSnapshot,
+                AllergensSnapshot = item.AllergensSnapshot,
+                MayContainAllergensSnapshot = item.MayContainAllergensSnapshot,
+                CrossContactStatementSnapshot = item.CrossContactStatementSnapshot,
                 ItemNameSnapshot = item.MenuItemNameSnapshot,
                 BasePriceSnapshot = item.BasePriceSnapshot,
                 ImageUrl = item.MenuItemId is Guid menuItemId
@@ -1110,6 +1500,9 @@ public class OrderController : ControllerBase
                     0,
                     PricingCalculator.ToMinorCurrencyUnits(item.UnitPrice * item.Quantity)
                         - refundedAmounts.GetValueOrDefault(item.Id)),
+                RefundGranularity = settledGranularity
+                    .GetValueOrDefault(item.Id, LineRefundGranularity.Untouched)
+                    .ToString(),
                 UnitPrice = item.UnitPrice,
                 ItemInstructions = item.ItemInstructions,
                 Note = item.ItemInstructions,
@@ -1125,6 +1518,21 @@ public class OrderController : ControllerBase
                         MenuItemOptionId = option.MenuItemOptionId,
                         GroupNameSnapshot = option.GroupNameSnapshot,
                         OptionNameSnapshot = option.OptionNameSnapshot,
+                        ContributionCents = OrderItemOptionRefund.ContributionCents(option, item.Quantity),
+                        RefundedAmountCents = Math.Min(
+                            OrderItemOptionRefund.ContributionCents(option, item.Quantity),
+                            refundedModifierAmounts.GetValueOrDefault(option.Id)),
+                        RefundableAmountCents = Math.Max(
+                            0,
+                            OrderItemOptionRefund.ContributionCents(option, item.Quantity)
+                                - refundedModifierAmounts.GetValueOrDefault(option.Id)),
+                        RefundIneligibilityReason =
+                            OrderItemOptionRefund.WhyNotRefundable(item, option) is { } reason
+                                ? OrderItemOptionRefund.Explain(reason, option.OptionNameSnapshot)
+                                : null,
+                        AllergensSnapshot = option.AllergensSnapshot,
+                        MayContainAllergensSnapshot = option.MayContainAllergensSnapshot,
+                        CrossContactStatementSnapshot = option.CrossContactStatementSnapshot,
                         PriceAdjustmentSnapshot = option.PriceAdjustmentSnapshot,
                         Quantity = option.Quantity
                     })
@@ -1151,6 +1559,7 @@ public class OrderController : ControllerBase
             Items = request.Items
                 .Select(item => new CustomerRefundRequestItemResponse
                 {
+                    OptionNameSnapshot = item.OptionNameSnapshot,
                     MenuItemNameSnapshot = item.MenuItemNameSnapshot,
                     Quantity = item.Quantity,
                     AmountCents = item.AmountCents
@@ -1202,41 +1611,13 @@ public class OrderController : ControllerBase
     {
         var amounts = new Dictionary<Guid, long>();
 
-        foreach (var allocation in EnumerateAttributedRefundAllocations(order))
+        foreach (var allocation in RefundRequestItemPolicy.EnumerateAttributedRefundAllocations(order))
         {
             amounts[allocation.OrderItemId] = amounts.GetValueOrDefault(allocation.OrderItemId)
                 + allocation.AmountCents;
         }
 
         return amounts;
-    }
-
-    private static IEnumerable<(Guid OrderItemId, long AmountCents)> EnumerateAttributedRefundAllocations(
-        Order order)
-    {
-        var seenRefundIds = new HashSet<Guid>();
-
-        foreach (var request in order.RefundRequests)
-        {
-            var refund = request.PaymentRefund;
-            if (refund is null
-                || refund.Status != PaymentRefundStatus.Succeeded
-                || request.Items.Count == 0
-                || !seenRefundIds.Add(refund.Id))
-            {
-                continue;
-            }
-
-            var allocations = RefundRequestItemPolicy.AttributeSucceededRefund(
-                refund.AmountCents,
-                request.Items
-                    .Select(item => (item.OrderItemId, item.AmountCents))
-                    .ToList());
-            foreach (var allocation in allocations)
-            {
-                yield return allocation;
-            }
-        }
     }
 
     private static OrderRefundBalance BuildRefundBalance(Order order)
@@ -1248,7 +1629,7 @@ public class OrderController : ControllerBase
         }
 
         var refunded = GetSucceededRefundedAmount(payment);
-        var attributed = EnumerateAttributedRefundAllocations(order)
+        var attributed = RefundRequestItemPolicy.EnumerateAttributedRefundAllocations(order)
             .Sum(allocation => allocation.AmountCents);
 
         return new OrderRefundBalance

@@ -1,9 +1,10 @@
+import { buildOrderClosureNotice } from '@/lib/orderClosureNotice'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { ChevronDown, CircleX, Clock3, ClipboardList, CreditCard, Loader2, ReceiptText, RefreshCw, RotateCcw, ShoppingBag, Undo2, Utensils } from 'lucide-react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import {
+  ArrowLeft, Ban, CircleX, Clock3, ClipboardList, CreditCard, Loader2, ReceiptText, RefreshCw, RotateCcw, ShoppingBag, Undo2, Utensils } from 'lucide-react'
 import { toast } from 'sonner'
 import {
-  createOrderCheckoutSession,
   cancelCustomerOrder,
   getGuestOrders,
   getMyOrders,
@@ -15,18 +16,30 @@ import { resolvePublicAssetUrl } from '../api/publicMenu'
 import { useAuth } from '../auth/AuthContext'
 import { OrderItemOptionBadges } from '../components/orders/OrderItemOptionBadges'
 import { OrderProgressStepper } from '../components/orders/OrderProgressStepper'
+import { OrderRefundHistory } from '../components/orders/OrderRefundHistory'
 import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { PaymentStatusBadge } from '../components/orders/PaymentStatusBadge'
-import { canCustomerCancelOrder } from '../components/orders/customerOrderCancellation'
+import { canCustomerCancelForRefund, canCustomerCancelOrder } from '../components/orders/customerOrderCancellation'
 import {
   computeSelectedAmountCents,
   isValidRefundSelection,
+  canSelectExtras,
+  canSelectWholeLine,
+  parseRefundSelectionKey,
+  refundSelectionKey,
   setItemAmountCents,
-  toggleItemSelection,
+  toggleExtraSelection,
+  toggleLineSelection,
   type RefundItemSelection,
 } from '../components/orders/refundItemSelection'
-import { buildRestaurantMenuPath } from '../lib/customerMenuNavigation'
-import { reorderIntoCart } from '../lib/reorder'
+import {
+  buildRestaurantMenuPath,
+  getSafeMenuReturnPath,
+  normalizeCustomerMenuOrderType,
+  type CustomerMenuOrderType,
+} from '../lib/customerMenuNavigation'
+import { findOpenCart, reorderIntoCart, type ReorderStrategy } from '../lib/reorder'
+import { cartIdentityOf } from '../lib/cartSessionIdentity'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import {
@@ -51,10 +64,23 @@ import {
 } from '../components/ui/dialog'
 import { Input } from '../components/ui/input'
 import { Textarea } from '../components/ui/textarea'
-import { getStoredGuestOrders, rememberGuestOrder } from '../lib/guestOrders'
+import { getStoredGuestOrders } from '../lib/guestOrders'
+import { ReceiptDocumentView } from '../components/orders/ReceiptDocumentView'
+import { getOrderStatusLabel } from '../components/orders/OrderStatusBadge'
+import {
+  buildReceiptLinePricing,
+  buildReceiptPaymentSummary,
+  formatReceiptDateTime,
+  formatReceiptMoney,
+  gstIncludedInTotal,
+  resolveReceiptTitle,
+  type ReceiptDocument,
+} from '../lib/receipt'
 
 const orderTypeLabels = ['Dine in', 'Takeaway', 'Scheduled']
-const payablePaymentStatuses = new Set(['Unpaid', 'Pending', 'Failed', 'Expired'])
+// Matches the server's payable set. Cancelling the Stripe page leaves the order Cancelled, which
+// is still owed and still payable — omitting it hid the button on exactly the orders that need it.
+const payablePaymentStatuses = new Set(['Unpaid', 'Pending', 'Failed', 'Cancelled', 'Expired'])
 const refundablePaymentStatuses = new Set(['Paid', 'PartiallyRefunded'])
 const closedOrderStatuses = new Set([5, 6])
 
@@ -77,6 +103,104 @@ function formatDate(value: string) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
 }
 
+/**
+ * The customer's own copy of the transaction. Australian consumer law requires a proof of
+ * transaction for supplies of $75 or more and on request below that, so this has to be
+ * available for every order rather than only the ones paid through Stripe.
+ *
+ * <p>
+ * Built from the same refund projection My Orders shows in the list. It used to keep its own idea of
+ * "paid" — every settled status flattened to the word <i>Paid</i>, refunds unmentioned — so the row
+ * said Refunded and the document it opened said Paid, for the same money.
+ * </p>
+ */
+function buildCustomerReceipt(
+  order: CustomerOrder,
+  renderedAt: Date,
+  wasPrinted: boolean,
+): ReceiptDocument {
+  const payment = buildReceiptPaymentSummary({
+    paymentStatus: order.paymentStatus,
+    paymentMethod: order.paymentMethod,
+    totalAmount: order.totalAmount,
+    refundedAmountCents: order.refundBalance?.alreadyRefundedAmountCents ?? 0,
+  })
+  const gstRegistered = order.restaurantGstRegistered
+  const currency = order.currency
+
+  return {
+    documentTitle: resolveReceiptTitle(gstRegistered, payment.isPaid),
+    scopeLabel: getOrderScope(order),
+    code: order.pickupCode || order.orderNumber,
+    supplier: {
+      restaurantName: order.restaurantName ?? 'Restaurant',
+      legalBusinessName: order.restaurantLegalBusinessName,
+      abn: order.restaurantAbn,
+      address: order.restaurantAddress,
+      phone: order.restaurantPhone,
+    },
+    issuedAt: new Date(order.createdAt),
+    currency,
+    gstAmount: gstIncludedInTotal(order.totalAmount, gstRegistered),
+    items: order.orderItems.map((item) => ({
+      id: item.id,
+      quantity: item.quantity,
+      name: item.itemNameSnapshot?.trim() || 'Menu item',
+      totalPrice: item.totalPrice,
+      note: item.note,
+      ...buildReceiptLinePricing({
+        quantity: item.quantity,
+        basePrice: item.basePriceSnapshot,
+        unitPrice: item.unitPrice,
+        options: item.selectedOptions,
+        currency,
+      }),
+    })),
+    totalAmount: order.totalAmount,
+    amountDue: payment.amountDue,
+    surchargeNotice: order.restaurantCustomerSurchargeNotice,
+    refundContactEmail: order.restaurantRefundContactEmail,
+    meta: [
+      { label: 'Order', value: order.orderNumber },
+      { label: 'Status', value: getOrderStatusLabel(order.status) },
+      { label: 'Payment', value: payment.statusLabel },
+      { label: 'Method', value: payment.methodLabel },
+      // Only when there is one. A "Refunded: A$0.00" line on every receipt teaches people to skip
+      // the row, which is the row that matters on the few where it is not zero.
+      ...(payment.hasRefund
+        ? [
+            { label: 'Refunded', value: formatReceiptMoney(payment.refundedAmount, currency) },
+            { label: 'Net paid', value: formatReceiptMoney(payment.netPaidAmount, currency) },
+          ]
+        : []),
+      { label: 'Date', value: formatReceiptDateTime(order.createdAt) },
+      // "Printed" was stamped when the dialog opened, so a receipt that was only ever looked at
+      // claimed to have been printed. The word now follows what actually happened.
+      {
+        label: wasPrinted ? 'Printed' : 'Generated',
+        value: formatReceiptDateTime(renderedAt),
+      },
+    ],
+  }
+}
+
+/**
+ * The menu price for one unit, so option badges read as additions. Falls back to the charged
+ * unit price whenever the recorded adjustments do not reconcile to it — see
+ * buildReceiptLinePricing for why they sometimes cannot.
+ */
+function getDisplayedUnitPrice(item: CustomerOrderItem) {
+  const pricing = buildReceiptLinePricing({
+    quantity: item.quantity,
+    basePrice: item.basePriceSnapshot,
+    unitPrice: item.unitPrice,
+    options: item.selectedOptions,
+    currency: 'AUD',
+  })
+
+  return pricing.baseAmount === null ? item.unitPrice : item.basePriceSnapshot
+}
+
 function getItemCount(order: CustomerOrder) {
   return order.orderItems.reduce((count, item) => count + item.quantity, 0)
 }
@@ -95,8 +219,11 @@ function getRefundRequestQuantity(item: CustomerOrderItem, amountCents: number) 
 
 function buildFullRefundSelection(order: CustomerOrder): RefundItemSelection {
   const selection = order.orderItems.reduce<RefundItemSelection>((current, item) => {
-    if (item.refundableAmountCents > 0) {
-      current[item.id] = item.refundableAmountCents
+    // A line already refunded extra by extra cannot be refunded whole, so preselecting it opens
+    // the dialog on a request the server is bound to refuse — and counts its balance into a total
+    // the customer never chose.
+    if (item.refundableAmountCents > 0 && canSelectWholeLine(item.refundGranularity)) {
+      current[refundSelectionKey(item.id)] = item.refundableAmountCents
     }
     return current
   }, {})
@@ -120,7 +247,9 @@ function canContinuePayment(order: CustomerOrder) {
 function canRequestRefund(order: CustomerOrder) {
   return order.paymentMethod === 'Online'
     && refundablePaymentStatuses.has(order.paymentStatus)
-    && order.latestRefundRequest?.status !== 'Pending'
+    // One request at a time, which the server enforces. Asked of the list rather than of its
+    // newest entry, so the answer does not depend on which one happens to sort first.
+    && !order.refundRequests.some((request) => request.status === 'Pending')
 }
 
 function getContinuePaymentLabel(order: CustomerOrder) {
@@ -138,21 +267,54 @@ function getContinuePaymentLabel(order: CustomerOrder) {
 const ORDER_POLL_INTERVAL_MS = 20_000
 
 export function MyOrdersPage() {
-  const { token, loading: authLoading } = useAuth()
+  const { user, token, loading: authLoading } = useAuth()
   const navigate = useNavigate()
   const [orders, setOrders] = useState<CustomerOrder[]>([])
   const [loading, setLoading] = useState(true)
   const [guestOrderCount, setGuestOrderCount] = useState(0)
-  const [payingOrderId, setPayingOrderId] = useState<string | null>(null)
   const [reorderingOrderId, setReorderingOrderId] = useState<string | null>(null)
+  const [searchParams] = useSearchParams()
+  // Validated, because it arrives in a URL anybody can edit: an unchecked one turns this page into
+  // an open redirect.
+  const menuReturnPath = getSafeMenuReturnPath(searchParams.get('returnTo'))
+  /** Set when the customer already has a cart with items and has to say what to do with it. */
+  const [pendingReorder, setPendingReorder] = useState<
+    { order: CustomerOrder; orderType: CustomerMenuOrderType; existingItemCount: number } | null
+  >(null)
+  /** Set when a past table order has to be told which way it is being repeated. */
+  const [pendingOrderType, setPendingOrderType] = useState<CustomerOrder | null>(null)
   const [cancelOrder, setCancelOrder] = useState<CustomerOrder | null>(null)
   const [cancelReason, setCancelReason] = useState('')
   const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null)
+  const [receiptOrder, setReceiptOrder] = useState<CustomerOrder | null>(null)
+  const [receiptRenderedAt, setReceiptRenderedAt] = useState<Date | null>(null)
+  // Whether Print was actually used. Opening the dialog is not printing, and the receipt used to
+  // say it was.
+  const [receiptPrinted, setReceiptPrinted] = useState(false)
   const [refundOrder, setRefundOrder] = useState<CustomerOrder | null>(null)
   const [refundReason, setRefundReason] = useState('')
+
   const [refundSelection, setRefundSelection] = useState<RefundItemSelection>({})
   const [requestingRefundOrderId, setRequestingRefundOrderId] = useState<string | null>(null)
   const isGuestView = !token
+
+  /** Hands the page over to the shared receipt stylesheet for one window.print(). */
+  const printReceipt = useCallback(() => {
+    // Stamped here, not when the dialog opened: the document may now honestly say it was printed.
+    setReceiptRenderedAt(new Date())
+    setReceiptPrinted(true)
+    document.body.classList.add('printing-receipt')
+
+    const restore = () => document.body.classList.remove('printing-receipt')
+    window.addEventListener('afterprint', restore, { once: true })
+
+    try {
+      window.print()
+    } catch {
+      window.removeEventListener('afterprint', restore)
+      restore()
+    }
+  }, [])
 
   const sourceDescription = useMemo(() => {
     if (token) {
@@ -192,6 +354,8 @@ export function MyOrdersPage() {
   }, [authLoading, token])
 
   useEffect(() => {
+    // Fetch on mount: `loadOrders` flips its loading flag synchronously. One extra render on mount, not a stale value.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadOrders()
   }, [loadOrders])
 
@@ -261,20 +425,45 @@ export function MyOrdersPage() {
     }
   }, [authLoading, refreshSilently])
 
-  const handleReorder = async (order: CustomerOrder) => {
+  const runReorder = async (
+    order: CustomerOrder,
+    strategy: ReorderStrategy,
+    orderType: CustomerMenuOrderType,
+  ) => {
     setReorderingOrderId(order.id)
 
     try {
-      const result = await reorderIntoCart(order)
-      toast.success(
-        `Added ${result.addedCount} item${result.addedCount === 1 ? '' : 's'} to a new cart`,
+      const result = await reorderIntoCart(order, { strategy, orderType, identity: cartIdentityOf(user) })
+      const added = `${result.addedCount} item${result.addedCount === 1 ? '' : 's'}`
+      const notes = [
         result.skippedCount > 0
-          ? {
-              description: `${result.skippedCount} unavailable item${result.skippedCount === 1 ? '' : 's'} skipped.`,
-            }
-          : undefined,
-      )
-      navigate(buildRestaurantMenuPath(result.restaurantId, result.orderType))
+          ? `${result.skippedCount} unavailable item${result.skippedCount === 1 ? '' : 's'} skipped.`
+          : null,
+        result.needsChoices.length > 0
+          ? `${result.needsChoices.map((item) => item.name).join(', ')} now need${result.needsChoices.length === 1 ? 's' : ''} a choice — we have opened ${result.needsChoices.length === 1 ? 'it' : 'the first one'} for you.`
+          : null,
+      ].filter(Boolean).join(' ')
+
+      // Opening the first one is the point: these dishes are on the menu, they just need an answer
+      // the old order never had. Landing on the menu with nothing open would leave the customer to
+      // work out for themselves what was missing.
+      const menuPath = buildRestaurantMenuPath(result.restaurantId, result.orderType)
+      const destination = result.needsChoices.length > 0
+        ? `${menuPath}&item=${encodeURIComponent(result.needsChoices[0].menuItemId)}`
+        : menuPath
+
+      if (result.addedCount > 0) {
+        toast.success(
+          result.mergedIntoExistingCart
+            ? `Added ${added} to your existing cart`
+            : `Added ${added} to your cart`,
+          notes ? { description: notes } : undefined,
+        )
+      } else {
+        toast.info('Some choices are needed', notes ? { description: notes } : undefined)
+      }
+
+      navigate(destination)
     } catch (error) {
       toast.error('Could not reorder', {
         description: error instanceof Error ? error.message : 'The reorder could not be completed.',
@@ -284,24 +473,61 @@ export function MyOrdersPage() {
     }
   }
 
-  const handleContinuePayment = async (order: CustomerOrder) => {
-    setPayingOrderId(order.id)
+  const handleReorder = async (order: CustomerOrder) => {
+    if (!order.restaurantId) {
+      toast.error('Could not reorder', { description: 'This order is not linked to a restaurant menu.' })
+      return
+    }
+
+    // A past order at a table cannot simply be repeated: rejoining that table's cart needs its QR
+    // token, and an order records only the table's id. So rather than quietly turning it into a
+    // different kind of order, ask which one they want now.
+    if (order.tableId) {
+      setPendingOrderType(order)
+      return
+    }
+
+    await continueReorder(order, normalizeCustomerMenuOrderType(order.orderType))
+  }
+
+  const continueReorder = async (order: CustomerOrder, orderType: CustomerMenuOrderType) => {
+    const restaurantId = order.restaurantId
+
+    if (!restaurantId) {
+      return
+    }
+
+    // Asked before anything is added, because both answers are reasonable and the wrong one is
+    // only visible after the fact — either items nobody meant to order, or a cart quietly emptied.
+    setReorderingOrderId(order.id)
 
     try {
-      const returnTo = getOrderMenuPath(order)
-      const result = await createOrderCheckoutSession({
-        orderId: order.id,
-        ...(returnTo ? { returnTo } : {}),
-      })
-      rememberGuestOrder(result.orderId)
-      window.location.assign(result.checkoutUrl)
-    } catch (error) {
-      toast.error('Could not continue payment', {
-        description: error instanceof Error ? error.message : 'The payment session could not be created.',
-      })
+      const existing = await findOpenCart(restaurantId, orderType)
+
+      if (existing && existing.cart.items.length > 0) {
+        setPendingReorder({ order, orderType, existingItemCount: existing.cart.itemCount })
+        return
+      }
+    } catch {
+      // Deciding failed; fall through and let the reorder itself report anything real.
     } finally {
-      setPayingOrderId(null)
+      setReorderingOrderId(null)
     }
+
+    await runReorder(order, 'merge', orderType)
+  }
+
+  /**
+   * Sends the customer to checkout rather than starting a card payment here.
+   *
+   * <p>
+   * This used to create a Stripe session directly, which a restaurant with Stripe switched off
+   * refuses outright — leaving the customer holding an order they could not pay for and could only
+   * cancel. Checkout is the one screen that shows whichever methods the restaurant actually offers.
+   * </p>
+   */
+  const handleContinuePayment = (order: CustomerOrder) => {
+    navigate(`/checkout?order=${encodeURIComponent(order.id)}`)
   }
 
   const submitOrderCancellation = async () => {
@@ -344,12 +570,17 @@ export function MyOrdersPage() {
     try {
       const refundRequest = await requestCustomerRefund(refundOrder.id, {
         reason: refundReason.trim() || undefined,
-        items: Object.entries(refundSelection).map(([orderItemId, amountCents]) => {
+        items: Object.entries(refundSelection).map(([key, amountCents]) => {
+          const { orderItemId, orderItemOptionId } = parseRefundSelectionKey(key)
           const item = refundOrder.orderItems.find((candidate) => candidate.id === orderItemId)!
+
           return {
             orderItemId,
+            orderItemOptionId: orderItemOptionId ?? undefined,
             amountCents,
-            quantity: getRefundRequestQuantity(item, amountCents),
+            // An extra is one of a line rather than a count of plates, so the quantity a
+            // whole-line refund derives from its amount does not describe it.
+            quantity: orderItemOptionId ? 1 : getRefundRequestQuantity(item, amountCents),
           }
         }),
         // Guest orders have no session behind them, so the stored token is the credential.
@@ -358,7 +589,7 @@ export function MyOrdersPage() {
       })
       setOrders((current) => current.map((order) => (
         order.id === refundOrder.id
-          ? { ...order, latestRefundRequest: refundRequest }
+          ? { ...order, refundRequests: [refundRequest, ...order.refundRequests] }
           : order
       )))
       toast.success('Refund request sent', {
@@ -392,9 +623,25 @@ export function MyOrdersPage() {
       <Card>
         <CardHeader className="my-orders-header">
           <div className="admin-page-title">
-            <ClipboardList size={22} />
+            {/* Only when the customer arrived from a menu. Reaching this page from the account menu
+                and finding a "back to menu" button that guesses at a restaurant would be worse than
+                no button at all. */}
+            {menuReturnPath ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="shrink-0"
+                aria-label="Back to menu"
+                asChild
+              >
+                <Link to={menuReturnPath}><ArrowLeft size={18} /></Link>
+              </Button>
+            ) : (
+              <ClipboardList size={22} />
+            )}
             <div>
-              <CardTitle>My Orders</CardTitle>
+              <CardTitle asChild><h1>My Orders</h1></CardTitle>
               <CardDescription>{sourceDescription}</CardDescription>
             </div>
           </div>
@@ -452,20 +699,18 @@ export function MyOrdersPage() {
                 const showContinuePayment = canContinuePayment(order)
                 const showRequestRefund = canRequestRefund(order)
                 const showCancelOrder = canCustomerCancelOrder(order)
+                // A paid order the restaurant never accepted: the customer can take their money
+                // back rather than keep waiting on a kitchen that may not be watching.
+                const showCancelForRefund = canCustomerCancelForRefund(order)
+                const awaitingAcceptance = order.status === 0
+                  && (order.paymentStatus === 'Paid' || order.paymentStatus === 'PartiallyRefunded')
                 const canReorder = getOrderMenuPath(order) !== null && order.orderItems.length > 0
-                const isPaying = payingOrderId === order.id
+                // Navigating to checkout is instant, so there is no in-flight state to show.
+                const isPaying = false
                 const isRequestingRefund = requestingRefundOrderId === order.id
                 const isReordering = reorderingOrderId === order.id
                 const isCancelling = cancellingOrderId === order.id
-                const refundRequest = order.latestRefundRequest
-                // Staff can approve for less than was asked, so the settled amount is the one
-                // that actually left the account — never imply the requested figure was refunded.
-                const settledRefundCents = refundRequest?.refundStatus === 'Succeeded'
-                  ? refundRequest.refundedAmountCents
-                  : null
-                const isPartialRefund = settledRefundCents !== null
-                  && refundRequest !== null
-                  && settledRefundCents < refundRequest.requestedAmountCents
+                const closureNotice = buildOrderClosureNotice(order.closureReason)
 
                 return (
                   <article key={order.id} className="my-order-card">
@@ -491,7 +736,7 @@ export function MyOrdersPage() {
 
                     <div className="my-order-status-row">
                       <div className="my-order-status">
-                        <OrderStatusBadge status={order.status} className="my-order-status-badge" />
+                        <OrderStatusBadge status={order.status} paymentStatus={order.paymentStatus} className="my-order-status-badge" />
                         <PaymentStatusBadge status={order.paymentStatus} className="my-order-status-badge" />
                       </div>
                       <div className="my-order-payment-actions">
@@ -504,98 +749,36 @@ export function MyOrdersPage() {
 
                     <OrderProgressStepper status={order.status} className="my-order-progress" />
 
-                    {order.latestRefundRequest ? (
-                      <div className={`my-order-refund-state my-order-refund-state-${order.latestRefundRequest.status.toLowerCase()}`}>
-                        <details className="refund-state-details">
-                          <summary>
-                            <div className="refund-state-heading">
-                              <strong>Refund request {order.latestRefundRequest.status.toLowerCase()}</strong>
-                              <span>
-                                {settledRefundCents !== null ? (
-                                  <>
-                                    <b className="refund-state-settled">
-                                      {formatMoney(settledRefundCents / 100, order.latestRefundRequest.currency)}
-                                    </b>
-                                    {isPartialRefund
-                                      ? ` refunded of ${formatMoney(order.latestRefundRequest.requestedAmountCents / 100, order.latestRefundRequest.currency)} requested`
-                                      : ' refunded'}
-                                  </>
-                                ) : (
-                                  <>
-                                    {formatMoney(order.latestRefundRequest.requestedAmountCents / 100, order.latestRefundRequest.currency)}
-                                    {' requested on '}
-                                    {formatDate(order.latestRefundRequest.createdAt)}
-                                  </>
-                                )}
-                              </span>
-                            </div>
-                            <ChevronDown className="refund-state-chevron" size={18} aria-hidden="true" />
-                          </summary>
-                          <div className="refund-state-body">
-                            {isPartialRefund ? (
-                              <p className="refund-state-partial">
-                                The restaurant approved a partial refund:{' '}
-                                <strong>{formatMoney(settledRefundCents! / 100, order.latestRefundRequest.currency)}</strong>
-                                {' of the '}
-                                {formatMoney(order.latestRefundRequest.requestedAmountCents / 100, order.latestRefundRequest.currency)}
-                                {' you asked for.'}
-                              </p>
-                            ) : null}
-
-                            {order.latestRefundRequest.items.length > 0 ? (
-                              <div className="refund-state-section">
-                                <h4>Items you asked to refund</h4>
-                                <ul className="refund-state-items">
-                                  {order.latestRefundRequest.items.map((item, index) => (
-                                    <li key={`${item.menuItemNameSnapshot}-${index}`}>
-                                      <span>
-                                        {item.menuItemNameSnapshot}
-                                        {item.quantity > 1 ? ` × ${item.quantity}` : null}
-                                      </span>
-                                      <strong>
-                                        {formatMoney(item.amountCents / 100, order.latestRefundRequest!.currency)}
-                                      </strong>
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            ) : (
-                              <div className="refund-state-section">
-                                <h4>Items you asked to refund</h4>
-                                <p className="refund-state-empty">
-                                  This request was submitted for the whole order.
-                                </p>
-                              </div>
-                            )}
-
-                            <div className="refund-state-section">
-                              <h4>Your message</h4>
-                              {order.latestRefundRequest.reason ? (
-                                <p className="refund-state-note">{order.latestRefundRequest.reason}</p>
-                              ) : (
-                                <p className="refund-state-empty">You did not leave a message.</p>
-                              )}
-                            </div>
-                          </div>
-                        </details>
-                        {order.latestRefundRequest.adminNote ? (
-                          <div className="refund-state-reply">
-                            <h4>Restaurant reply</h4>
-                            <p>{order.latestRefundRequest.adminNote}</p>
-                          </div>
-                        ) : null}
+                    {/* The reason staff chose when they turned this order away. It was recorded in
+                        the order's history and shown to nobody, so the customer saw only that it had
+                        been rejected — with no way to tell whether reordering would work. */}
+                    {closureNotice ? (
+                      <div className="my-order-closure">
+                        <Ban size={16} className="my-order-closure-icon" />
+                        <div>
+                          <strong>{closureNotice.heading}</strong>
+                          <p>{closureNotice.reason ?? closureNotice.fallback}</p>
+                        </div>
                       </div>
                     ) : null}
+
+                    <OrderRefundHistory
+                      requests={order.refundRequests}
+                      refundedTotalCents={order.refundBalance?.alreadyRefundedAmountCents ?? 0}
+                      currency={order.currency}
+                    />
 
                     <div className="my-order-item-list">
                       {order.orderItems.map((item) => (
                         <div key={item.id} className="my-order-item">
                           <div className="order-item-line-copy">
                             <strong>{item.itemNameSnapshot || 'Menu item'}</strong>
+                            {/* The dish's own price, so the badges below read as what each extra
+                                added rather than as already-counted decoration. */}
                             <span className="my-order-item-meta">
-                              {item.quantity} x {formatMoney(item.unitPrice, order.currency)}
+                              {item.quantity} x {formatMoney(getDisplayedUnitPrice(item), order.currency)}
                             </span>
-                            <OrderItemOptionBadges options={item.selectedOptions} currency={order.currency} />
+                            <OrderItemOptionBadges item={item} options={item.selectedOptions} currency={order.currency} />
                             {item.note ? <small className="my-order-item-note">Item note: {item.note}</small> : null}
                           </div>
                           <strong>{formatMoney(item.totalPrice, order.currency)}</strong>
@@ -610,6 +793,14 @@ export function MyOrdersPage() {
                       </div>
                     ) : null}
 
+                    {awaitingAcceptance ? (
+                      <p className="rounded-md border border-amber-300/60 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-500/25 dark:bg-amber-400/10 dark:text-amber-100">
+                        {showCancelForRefund
+                          ? 'Your payment went through, but the restaurant has not accepted this order yet. You can cancel it now and be refunded in full.'
+                          : 'Your payment went through. The restaurant has not accepted the order yet — if it stays this way you will be able to cancel it for a full refund.'}
+                      </p>
+                    ) : null}
+
                     <div className="my-order-total">
                       <span>
                         <ReceiptText size={14} />
@@ -618,8 +809,19 @@ export function MyOrdersPage() {
                       <strong>{formatMoney(order.totalAmount, order.currency)}</strong>
                     </div>
 
-                    {showContinuePayment || showRequestRefund || showCancelOrder || canReorder ? (
-                      <div className="my-order-action-bar">
+                    <div className="my-order-action-bar">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => {
+                            setReceiptRenderedAt(new Date())
+                            setReceiptPrinted(false)
+                            setReceiptOrder(order)
+                          }}
+                        >
+                          <ReceiptText />
+                          Receipt
+                        </Button>
                         {showContinuePayment ? (
                           <Button
                             type="button"
@@ -647,7 +849,7 @@ export function MyOrdersPage() {
                             Request refund
                           </Button>
                         ) : null}
-                        {showCancelOrder ? (
+                        {showCancelOrder || showCancelForRefund ? (
                           <Button
                             type="button"
                             variant="outline"
@@ -659,7 +861,9 @@ export function MyOrdersPage() {
                             }}
                           >
                             {isCancelling ? <Loader2 className="animate-spin" /> : <CircleX />}
-                            {isCancelling ? 'Cancelling...' : 'Cancel order'}
+                            {isCancelling
+                              ? 'Cancelling...'
+                              : showCancelForRefund ? 'Cancel and refund' : 'Cancel order'}
                           </Button>
                         ) : null}
                         {canReorder ? (
@@ -674,8 +878,7 @@ export function MyOrdersPage() {
                             Order again
                           </Button>
                         ) : null}
-                      </div>
-                    ) : null}
+                    </div>
                   </article>
                 )
               })}
@@ -683,6 +886,45 @@ export function MyOrdersPage() {
           )}
         </CardContent>
       </Card>
+
+      <Dialog
+        open={receiptOrder !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setReceiptOrder(null)
+            setReceiptRenderedAt(null)
+            setReceiptPrinted(false)
+          }
+        }}
+      >
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Receipt</DialogTitle>
+            <DialogDescription>
+              Your copy of this transaction. Print or save it for your records.
+            </DialogDescription>
+          </DialogHeader>
+
+          {receiptOrder ? (
+            <ReceiptDocumentView
+              receipt={buildCustomerReceipt(
+                receiptOrder,
+                receiptRenderedAt ?? new Date(),
+                receiptPrinted,
+              )}
+              visible
+            />
+          ) : null}
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setReceiptOrder(null)}>Close</Button>
+            <Button type="button" onClick={printReceipt}>
+              <ReceiptText />
+              Print
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog
         open={cancelOrder !== null}
@@ -731,6 +973,95 @@ export function MyOrdersPage() {
         </AlertDialogContent>
       </AlertDialog>
 
+      {/*
+        * Reordering into a cart that already has something in it has two reasonable answers, and
+        * the wrong one is only visible afterwards — either items nobody meant to order, or a cart
+        * quietly emptied. Previously neither was chosen: a whole new cart was created and the old
+        * one was left active in the database, invisible and unreachable.
+        */}
+      {/* Repeating a table order. The table itself cannot be rejoined without its QR code, so the
+          honest options are the two the menu already offers — and the wording says which one puts
+          the food in front of them. */}
+      <AlertDialog
+        open={pendingOrderType !== null}
+        onOpenChange={(open) => { if (!open) setPendingOrderType(null) }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>How would you like to order this time?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingOrderType?.tableNumber
+                ? `You ordered this at table ${pendingOrderType.tableNumber}. To have it brought to a table again, scan the table's QR code — otherwise choose one of these.`
+                : "You ordered this at a table. To have it brought to a table again, scan the table's QR code — otherwise choose one of these."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Not now</AlertDialogCancel>
+            <AlertDialogAction
+              variant="outline"
+              onClick={(event) => {
+                event.preventDefault()
+                const pending = pendingOrderType
+                setPendingOrderType(null)
+                if (pending) void continueReorder(pending, 'Takeaway')
+              }}
+            >
+              Collect it myself
+            </AlertDialogAction>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault()
+                const pending = pendingOrderType
+                setPendingOrderType(null)
+                if (pending) void continueReorder(pending, 'DineIn')
+              }}
+            >
+              Eat in
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={pendingReorder !== null}
+        onOpenChange={(open) => { if (!open) setPendingReorder(null) }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>You already have a cart here</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingReorder
+                ? `Your cart for this restaurant already has ${pendingReorder.existingItemCount} item${pendingReorder.existingItemCount === 1 ? '' : 's'} in it. Add this order on top, or start again with just this order?`
+                : ''}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep browsing</AlertDialogCancel>
+            <AlertDialogAction
+              variant="outline"
+              onClick={(event) => {
+                event.preventDefault()
+                const pending = pendingReorder
+                setPendingReorder(null)
+                if (pending) void runReorder(pending.order, 'replace', pending.orderType)
+              }}
+            >
+              Replace my cart
+            </AlertDialogAction>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault()
+                const pending = pendingReorder
+                setPendingReorder(null)
+                if (pending) void runReorder(pending.order, 'merge', pending.orderType)
+              }}
+            >
+              Add to my cart
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <Dialog
         open={refundOrder !== null}
         onOpenChange={(open) => {
@@ -767,9 +1098,20 @@ export function MyOrdersPage() {
               <ul className="refund-picker-list">
                 {refundOrder.orderItems.map((item) => {
                   const refundableAmountCents = item.refundableAmountCents
+                  const wholeLineOpen = canSelectWholeLine(item.refundGranularity)
+                  // Two different facts that used to share one flag: nothing left to give back, and
+                  // this line's extras were refunded so only they can be from here. Conflated, a
+                  // line with most of its value intact announced itself as already refunded.
                   const isFullyRefunded = refundableAmountCents === 0
-                  const isSelected = item.id in refundSelection
-                  const selectedAmountCents = refundSelection[item.id] ?? refundableAmountCents
+                  const canPickWholeLine = wholeLineOpen && !isFullyRefunded
+                  const lineKey = refundSelectionKey(item.id)
+                  const isSelected = lineKey in refundSelection
+                  const selectedAmountCents = refundSelection[lineKey] ?? refundableAmountCents
+                  // Only extras with a share of their own, and only while this line has not
+                  // already been refunded whole.
+                  const refundableExtras = canSelectExtras(item.refundGranularity)
+                    ? item.selectedOptions.filter((option) => option.refundIneligibilityReason === null)
+                    : []
                   const imageUrl = resolvePublicAssetUrl(item.imageUrl)
                   const name = item.itemNameSnapshot || 'Menu item'
                   return (
@@ -782,8 +1124,13 @@ export function MyOrdersPage() {
                           type="checkbox"
                           className="refund-picker-check"
                           checked={isSelected}
-                          disabled={isFullyRefunded}
-                          onChange={() => setRefundSelection((current) => toggleItemSelection(current, item.id, refundableAmountCents))}
+                          disabled={!canPickWholeLine}
+                          onChange={() => setRefundSelection((current) => toggleLineSelection(
+                            current,
+                            item.id,
+                            refundableAmountCents,
+                            refundableExtras.map((option) => option.id),
+                          ))}
                         />
                         <span className="refund-picker-thumb" aria-hidden="true">
                           {imageUrl ? (
@@ -795,7 +1142,7 @@ export function MyOrdersPage() {
                         <span className="refund-picker-copy">
                           <strong>{name}</strong>
                           {item.selectedOptions.length > 0 ? (
-                            <OrderItemOptionBadges options={item.selectedOptions} currency={refundOrder.currency} />
+                            <OrderItemOptionBadges item={item} options={item.selectedOptions} currency={refundOrder.currency} />
                           ) : null}
                           <small>
                             {formatMoney(item.unitPrice, refundOrder.currency)} each
@@ -813,8 +1160,10 @@ export function MyOrdersPage() {
                             ) : null}
                           </small>
                         </span>
-                        {isFullyRefunded ? (
-                          <span className="refund-picker-refunded-badge">Refunded</span>
+                        {!canPickWholeLine ? (
+                          <span className="refund-picker-refunded-badge">
+                            {isFullyRefunded ? 'Refunded' : 'Extras refunded'}
+                          </span>
                         ) : (
                           <span className="refund-picker-amount">
                             {formatMoney((isSelected ? selectedAmountCents : refundableAmountCents) / 100, refundOrder.currency)}
@@ -827,7 +1176,7 @@ export function MyOrdersPage() {
                           <div className="refund-picker-item-amount-control">
                             <span>{refundOrder.currency.toUpperCase()}</span>
                             <Input
-                              id={`refund-item-amount-${item.id}`}
+                              id={`refund-item-amount-${lineKey}`}
                               type="number"
                               min={0.01}
                               max={refundableAmountCents / 100}
@@ -838,7 +1187,7 @@ export function MyOrdersPage() {
                               onChange={(event) => setRefundSelection((current) => (
                                 setItemAmountCents(
                                   current,
-                                  item.id,
+                                  lineKey,
                                   Math.round(Number(event.target.value) * 100) || 0,
                                   refundableAmountCents,
                                 )
@@ -849,6 +1198,80 @@ export function MyOrdersPage() {
                             </span>
                           </div>
                         </div>
+                      ) : null}
+                      {refundableExtras.length > 0 ? (
+                        <ul className="refund-picker-extras">
+                          <li className="refund-picker-extras-hint">
+                            Refund the whole item, or just one of its extras.
+                          </li>
+                          {refundableExtras.map((option) => {
+                            const extraKey = refundSelectionKey(item.id, option.id)
+                            const extraSelected = extraKey in refundSelection
+                            const extraAvailableCents = option.refundableAmountCents
+                            const extraAmountCents = refundSelection[extraKey] ?? extraAvailableCents
+                            const extraSpent = extraAvailableCents === 0
+
+                            return (
+                              <li key={option.id}>
+                                <label
+                                  className="refund-picker-extra"
+                                  data-selected={extraSelected ? 'true' : 'false'}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    className="refund-picker-check"
+                                    checked={extraSelected}
+                                    disabled={extraSpent}
+                                    onChange={() => setRefundSelection((current) => (
+                                      toggleExtraSelection(current, item.id, option.id, extraAvailableCents)
+                                    ))}
+                                  />
+                                  <span className="refund-picker-extra-copy">
+                                    <strong>{option.optionNameSnapshot}</strong>
+                                    <small>{option.groupNameSnapshot}</small>
+                                  </span>
+                                  <span className="refund-picker-extra-amount">
+                                    {extraSpent
+                                      ? 'Refunded'
+                                      : formatMoney(
+                                        (extraSelected ? extraAmountCents : extraAvailableCents) / 100,
+                                        refundOrder.currency,
+                                      )}
+                                  </span>
+                                </label>
+                                {extraSelected ? (
+                                  <div className="refund-picker-item-amount-editor">
+                                    <label htmlFor={`refund-item-amount-${extraKey}`}>Refund amount</label>
+                                    <div className="refund-picker-item-amount-control">
+                                      <span>{refundOrder.currency.toUpperCase()}</span>
+                                      <Input
+                                        id={`refund-item-amount-${extraKey}`}
+                                        type="number"
+                                        min={0.01}
+                                        max={extraAvailableCents / 100}
+                                        step={0.01}
+                                        inputMode="decimal"
+                                        aria-label={`Refund amount for ${option.optionNameSnapshot}`}
+                                        value={extraAmountCents > 0 ? extraAmountCents / 100 : ''}
+                                        onChange={(event) => setRefundSelection((current) => (
+                                          setItemAmountCents(
+                                            current,
+                                            extraKey,
+                                            Math.round(Number(event.target.value) * 100) || 0,
+                                            extraAvailableCents,
+                                          )
+                                        ))}
+                                      />
+                                      <span className="refund-picker-item-amount-max">
+                                        of {formatMoney(extraAvailableCents / 100, refundOrder.currency)} available
+                                      </span>
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </li>
+                            )
+                          })}
+                        </ul>
                       ) : null}
                     </li>
                   )

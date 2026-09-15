@@ -30,6 +30,13 @@ public sealed class RestaurantPaymentSettingsResponse
 
     public DateTime? StripeAccountUpdatedAt { get; set; }
 
+    /// <summary>
+    /// What the connected Stripe account calls itself — the name customers read on the card page and
+    /// on their statement. Surfaced so a restaurant can see it rather than discovering it from a
+    /// customer who did not recognise the charge.
+    /// </summary>
+    public string? StripeBusinessProfileName { get; set; }
+
     public decimal OrderPlatformFeePercent { get; set; }
 
     public long OneTimePlatformFeeCents { get; set; }

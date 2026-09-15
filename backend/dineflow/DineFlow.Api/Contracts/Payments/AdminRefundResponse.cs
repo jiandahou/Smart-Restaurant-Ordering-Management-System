@@ -36,6 +36,10 @@ public sealed class AdminRefundResponse
 
     public string? RequestedByUserId { get; set; }
 
+    public long UnattributedAmountCents { get; set; }
+
+    public List<AdminPaymentRefundItemResponse> Items { get; set; } = [];
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime? UpdatedAt { get; set; }

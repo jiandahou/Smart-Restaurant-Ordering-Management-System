@@ -56,14 +56,29 @@ public class GuestAccessTokenServiceTests
         Assert.False(GuestAccessTokenService.IsAuthorized(hash, providedToken));
     }
 
+    /// <summary>
+    /// An order with no stored hash was never issued a credential, so nothing can prove it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// These were let through on the order id alone while the guest orders placed before tokens
+    /// existed were still live, so customers mid-order did not lose access. That transition is
+    /// over — the last such order was placed on 8 August 2026 — and the id alone authorised reading
+    /// an order and filing a refund request against it. An order id turns up in browser histories,
+    /// screenshots and shared links; it is not a secret.
+    /// </para>
+    /// <para>
+    /// Signed-in customers do not come through here. Their orders carry no hash either, and every
+    /// caller checks the account first, reaching this only when no account is behind the order.
+    /// </para>
+    /// </remarks>
     [Theory]
     [InlineData(null)]
     [InlineData("")]
-    public void OrdersPredatingTokensStayReachable(string? storedHash)
+    [InlineData("   ")]
+    public void AnOrderWithNoStoredSecretCannotBeProven(string? storedHash)
     {
-        // Deliberate transition behaviour: existing guest orders have no hash and must not become
-        // unreachable mid-order. Tighten this once they have aged out.
-        Assert.True(GuestAccessTokenService.IsAuthorized(storedHash, providedToken: null));
-        Assert.True(GuestAccessTokenService.IsAuthorized(storedHash, providedToken: "anything"));
+        Assert.False(GuestAccessTokenService.IsAuthorized(storedHash, providedToken: null));
+        Assert.False(GuestAccessTokenService.IsAuthorized(storedHash, providedToken: "anything"));
     }
 }

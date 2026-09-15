@@ -18,6 +18,16 @@ public sealed class CreateRefundRequestItemInput
 {
     public Guid OrderItemId { get; set; }
 
+    /// <summary>
+    /// One extra on that line, when the refund is for the extra rather than the dish.
+    /// </summary>
+    /// <remarks>
+    /// Null asks for the line as a whole, which is what every request meant before extras could be
+    /// named. A line is refunded one way or the other and never both, so a request naming an extra
+    /// on a line already refunded whole — or the reverse — is refused rather than merged.
+    /// </remarks>
+    public Guid? OrderItemOptionId { get; set; }
+
     public int Quantity { get; set; }
 
     /// Exact amount requested against this order line. Null keeps older clients working by
@@ -60,6 +70,9 @@ public sealed class CustomerRefundRequestResponse
 public sealed class CustomerRefundRequestItemResponse
 {
     public string MenuItemNameSnapshot { get; set; } = string.Empty;
+
+    /// <summary>The extra this line of the request is for, when it is for one.</summary>
+    public string? OptionNameSnapshot { get; set; }
 
     public int Quantity { get; set; }
 

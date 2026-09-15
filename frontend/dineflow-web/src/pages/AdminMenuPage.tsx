@@ -29,6 +29,8 @@ import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
 import { z } from 'zod'
 import {
+  describeError,
+  errorCodeOf,
   archiveMenuOption,
   archiveMenuOptionGroup,
   createMenuCategory,
@@ -64,9 +66,11 @@ import {
   getMenuMetrics,
   menuItemMatchesSearch,
   menuItemMatchesStatus,
+  hasNoAllergenDeclaration,
   menuItemStatusLabel,
   type MenuItemStatusFilter,
 } from '../lib/adminMenuManagement'
+import { isWholeCents } from '../lib/money'
 import { useSearchParams } from 'react-router-dom'
 import {
   AlertDialog,
@@ -98,6 +102,8 @@ import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popove
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Switch } from '../components/ui/switch'
 import { Textarea } from '../components/ui/textarea'
+import { describeOptionAdjustment } from '../lib/menuOptionPricing'
+import { describeMenuItemChanges, type MenuItemChange } from '../lib/menuItemConflict'
 
 const categorySchema = z.object({
   name: z.string().trim().min(1, 'Category name is required.').max(100),
@@ -109,7 +115,11 @@ const categorySchema = z.object({
 const itemSchema = z.object({
   name: z.string().trim().min(1, 'Item name is required.').max(150),
   description: z.string().trim().max(1_000).optional(),
-  price: z.number().min(0.01, 'Price must be at least 0.01.').max(1_000_000),
+  // The server refuses a price finer than a cent, because no column or payment can carry the
+  // remainder. Repeated here so the answer arrives while the field is still in front of the person
+  // typing it, rather than as a failed save.
+  price: z.number().min(0.01, 'Price must be at least 0.01.').max(1_000_000)
+    .refine(isWholeCents, 'Price cannot be finer than a cent.'),
   imageUrl: z.string().trim().max(2_048).refine(
     (value) => !value || value.startsWith('/') || URL.canParse(value),
     'Enter a valid image URL.',
@@ -122,6 +132,8 @@ const itemSchema = z.object({
   isGlutenFree: z.boolean(),
   isHalal: z.boolean(),
   allergens: z.string().trim().max(500).optional(),
+  mayContainAllergens: z.string().trim().max(500).optional(),
+  crossContactStatement: z.string().trim().max(1_000).optional(),
   spiceLevel: z.number().int().min(0).max(3),
   servingSize: z.string().trim().max(80).optional(),
   calories: z.number().int().min(0).max(10_000).nullable(),
@@ -161,6 +173,11 @@ const optionSchema = z.object({
   maxQuantity: z.number().int().min(1).max(100),
   displayOrder: z.number().int().min(0).max(10_000),
   isAvailable: z.boolean(),
+  // Held to the same limits as the dish's own fields, so a declaration cannot be truncated on one
+  // and not the other.
+  allergens: z.string().trim().max(500).optional(),
+  mayContainAllergens: z.string().trim().max(500).optional(),
+  crossContactStatement: z.string().trim().max(1_000).optional(),
 }).superRefine((value, context) => {
   if (value.adjustmentType === 1 && value.priceAdjustment > 0) {
     context.addIssue({
@@ -215,6 +232,8 @@ const emptyItem: ItemFormValues = {
   isGlutenFree: false,
   isHalal: false,
   allergens: '',
+  mayContainAllergens: '',
+  crossContactStatement: '',
   spiceLevel: 0,
   servingSize: '',
   calories: null,
@@ -410,19 +429,8 @@ function getSelectionRule(group: MenuOptionGroup) {
 }
 
 function getAdjustmentLabel(option: MenuOption, money: Intl.NumberFormat) {
-  if (option.adjustmentType === 2) {
-    return `Set ${money.format(option.priceAdjustment)}`
-  }
-
-  if (option.priceAdjustment === 0) {
-    return 'Included'
-  }
-
-  if (option.adjustmentType === 1 || option.priceAdjustment < 0) {
-    return money.format(option.priceAdjustment)
-  }
-
-  return `+${money.format(option.priceAdjustment)}`
+  // Named so staff see the same thing customers do, from the same rules.
+  return describeOptionAdjustment(option, money) ?? 'No pricing rule'
 }
 
 function getNextDisplayOrder(items: Array<{ displayOrder: number }>) {
@@ -504,7 +512,7 @@ function OptionGroupFormDialog({
           <DialogDescription>Group related customer choices such as spice level, sides, toppings, or size.</DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form className="restaurant-form" onSubmit={form.handleSubmit(handleSubmit)}>
+          <form className="restaurant-form" onSubmit={form.handleSubmit((values) => handleSubmit(values))}>
             <div className="restaurant-form-grid">
               <FormField control={form.control} name="name" render={({ field }) => (
                 <FormItem className="restaurant-form-wide">
@@ -515,15 +523,16 @@ function OptionGroupFormDialog({
               )} />
               <FormField control={form.control} name="minSelections" render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Minimum</FormLabel>
+                  <FormLabel>Minimum choices</FormLabel>
                   <FormControl><Input type="number" min={0} max={100} {...field} onChange={(event) => field.onChange(event.target.valueAsNumber)} /></FormControl>
                   <FormMessage />
                 </FormItem>
               )} />
               <FormField control={form.control} name="maxSelections" render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Maximum</FormLabel>
+                  <FormLabel>Maximum choices</FormLabel>
                   <FormControl><Input type="number" min={1} max={100} {...field} onChange={(event) => field.onChange(event.target.valueAsNumber)} /></FormControl>
+                  <p className="text-xs text-muted-foreground">Number of different options customers may select. Each option's quantity limit is configured separately.</p>
                   <FormMessage />
                 </FormItem>
               )} />
@@ -581,6 +590,9 @@ function MenuOptionFormDialog({
         maxQuantity: option.maxQuantity,
         displayOrder: option.displayOrder,
         isAvailable: option.isAvailable,
+        allergens: option.allergens ?? '',
+        mayContainAllergens: option.mayContainAllergens ?? '',
+        crossContactStatement: option.crossContactStatement ?? '',
       } : {
         ...emptyOption,
         displayOrder: getNextDisplayOrder(group.options ?? []),
@@ -598,6 +610,9 @@ function MenuOptionFormDialog({
         adjustmentType: values.adjustmentType,
         maxQuantity: values.maxQuantity,
         displayOrder: values.displayOrder,
+        allergens: values.allergens?.trim() || null,
+        mayContainAllergens: values.mayContainAllergens?.trim() || null,
+        crossContactStatement: values.crossContactStatement?.trim() || null,
       }
 
       if (option) {
@@ -635,7 +650,7 @@ function MenuOptionFormDialog({
           <DialogDescription>Set the label, price behavior, order, and whether customers can select it.</DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form className="restaurant-form" onSubmit={form.handleSubmit(handleSubmit)}>
+          <form className="restaurant-form" onSubmit={form.handleSubmit((values) => handleSubmit(values))}>
             <div className="restaurant-form-grid">
               <FormField control={form.control} name="name" render={({ field }) => (
                 <FormItem className="restaurant-form-wide">
@@ -662,6 +677,32 @@ function MenuOptionFormDialog({
                 <FormItem>
                   <FormLabel>Price adjustment</FormLabel>
                   <FormControl><Input type="number" step={0.01} {...field} onChange={(event) => field.onChange(event.target.valueAsNumber)} /></FormControl>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              {/* A dish's declaration describes the dish as listed. Adding satay sauce changes the
+                  plate, and only the option knows what it brings with it. */}
+              <FormField control={form.control} name="allergens" render={({ field }) => (
+                <FormItem className="restaurant-form-wide">
+                  <FormLabel>Allergens in this option</FormLabel>
+                  <FormControl><Input placeholder="Peanut, soy" {...field} value={field.value ?? ''} /></FormControl>
+                  <p className="text-xs text-muted-foreground">
+                    What this modifier itself contains. Shown to the customer when they select it, and added to the dish's own declaration.
+                  </p>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={form.control} name="mayContainAllergens" render={({ field }) => (
+                <FormItem className="restaurant-form-wide">
+                  <FormLabel>May contain</FormLabel>
+                  <FormControl><Input placeholder="Tree nuts" {...field} value={field.value ?? ''} /></FormControl>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <FormField control={form.control} name="crossContactStatement" render={({ field }) => (
+                <FormItem className="restaurant-form-wide">
+                  <FormLabel>Cross-contact</FormLabel>
+                  <FormControl><Input placeholder="Prepared on shared equipment" {...field} value={field.value ?? ''} /></FormControl>
                   <FormMessage />
                 </FormItem>
               )} />
@@ -976,6 +1017,11 @@ function MenuItemOptionSummary({
         maxQuantity: option.maxQuantity,
         displayOrder: option.displayOrder,
         isAvailable: true,
+        // This send carries every field, so leaving these out would blank the option's allergen
+        // declaration as a side effect of restoring it.
+        allergens: option.allergens ?? null,
+        mayContainAllergens: option.mayContainAllergens ?? null,
+        crossContactStatement: option.crossContactStatement ?? null,
       })
       toast.success('Option restored')
       await onChanged()
@@ -1368,7 +1414,7 @@ function CategoryFormDialog({
           <DialogDescription>Categories organize the menu and control the order shown to customers.</DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form className="restaurant-form" onSubmit={form.handleSubmit(handleSubmit)}>
+          <form className="restaurant-form" onSubmit={form.handleSubmit((values) => handleSubmit(values))}>
             <div className="restaurant-form-grid">
               <FormField control={form.control} name="name" render={({ field }) => (
                 <FormItem className="restaurant-form-wide">
@@ -1424,32 +1470,29 @@ function ItemFormDialog({
   const [imageFile, setImageFile] = useState<File | null>(null)
   const [localPreviewUrl, setLocalPreviewUrl] = useState<string | null>(null)
   const [removeImage, setRemoveImage] = useState(false)
+  const [dietaryConflicts, setDietaryConflicts] = useState<
+    { values: ItemFormValues; conflicts: string[] } | null
+  >(null)
+  const [saveConflict, setSaveConflict] = useState<
+    { values: ItemFormValues; current: MenuItem; changes: MenuItemChange[] } | null
+  >(null)
+  /**
+   * The version the next save should claim to be based on. Null until a conflict has been shown and
+   * dismissed one way or the other; from then on it is the version the person actually looked at.
+   */
+  const [latestKnownVersion, setLatestKnownVersion] = useState<string | null>(null)
   const [imageError, setImageError] = useState<string | null>(null)
   const [imageInputKey, setImageInputKey] = useState(0)
   const form = useForm<ItemFormValues>({ resolver: zodResolver(itemSchema), defaultValues: emptyItem })
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (nextOpen) {
-      form.reset(item ? {
-        name: item.name,
-        description: item.description ?? '',
-        price: item.price,
-        imageUrl: item.imageUrl ?? '',
-        displayOrder: item.displayOrder,
-        isAvailable: item.isAvailable,
-        isSoldOut: item.isSoldOut,
-        isVegetarian: item.isVegetarian,
-        isVegan: item.isVegan,
-        isGlutenFree: item.isGlutenFree,
-        isHalal: item.isHalal,
-        allergens: item.allergens ?? '',
-        spiceLevel: item.spiceLevel,
-        servingSize: item.servingSize ?? '',
-        calories: item.calories,
-        isPopular: item.isPopular,
-        isRecommended: item.isRecommended,
-      } : emptyItem)
+      form.reset(item ? formValuesFrom(item) : emptyItem)
       setRemoveImage(false)
+      // Reopening starts from the item as it is now, so a version carried over from a conflict in a
+      // previous editing session must not silently authorise an overwrite here.
+      setLatestKnownVersion(null)
+      setSaveConflict(null)
       setImageInputKey((current) => current + 1)
     }
 
@@ -1501,7 +1544,11 @@ function ItemFormDialog({
     setImageInputKey((current) => current + 1)
   }
 
-  const handleSubmit = async (values: ItemFormValues) => {
+  const handleSubmit = async (
+    values: ItemFormValues,
+    acknowledgeDietaryConflicts = false,
+    overwriteConflict = false,
+  ) => {
     try {
       let imageUrl = removeImage ? null : values.imageUrl.trim() || null
 
@@ -1523,27 +1570,148 @@ function ItemFormDialog({
         isGlutenFree: values.isGlutenFree,
         isHalal: values.isHalal,
         allergens: values.allergens?.trim() || null,
+        mayContainAllergens: values.mayContainAllergens?.trim() || null,
+        crossContactStatement: values.crossContactStatement?.trim() || null,
         spiceLevel: values.spiceLevel,
         servingSize: values.servingSize?.trim() || null,
         calories: values.calories,
         isPopular: values.isPopular,
         isRecommended: values.isRecommended,
         displayOrder: values.displayOrder,
+        acknowledgeDietaryConflicts,
       }
       const response = item
-        ? await updateMenuItem(item.id, payload)
+        ? await updateMenuItem(item.id, {
+            ...payload,
+            // The version this form was opened with — or, once someone has chosen to save over a
+            // conflict, the version they were shown.
+            expectedUpdatedAt: latestKnownVersion ?? item.updatedAt ?? item.createdAt,
+            overwriteConflict,
+          })
         : await createMenuItem({ restaurantId, ...payload })
       toast.success(item ? 'Menu item updated' : 'Menu item created', { description: response.message })
       handleOpenChange(false)
       await onSaved()
     } catch (error) {
+      // The labels contradict the allergen text. Refusing outright would block legitimate wording,
+      // so the person is shown exactly which words clash and has to say the item is correct.
+      if (errorCodeOf(error) === 'dietary_conflict') {
+        setDietaryConflicts({ values, conflicts: conflictsFromError(error) })
+        return
+      }
+
+      // Someone else saved while this form was open. Their version comes back with the conflict, so
+      // the choice can be made against what actually changed rather than in the dark.
+      const current = errorCodeOf(error) === 'menu_item_conflict' ? conflictingItemFromError(error) : null
+
+      if (current && item) {
+        setSaveConflict({ values, current, changes: describeMenuItemChanges(item, current) })
+        return
+      }
+
       toast.error(item ? 'Could not update menu item' : 'Could not create menu item', {
-        description: error instanceof Error ? error.message : 'The request failed.',
+        description: describeError(error, 'The request failed.').message,
       })
     }
   }
 
   return (
+    <>
+    {/*
+      * Someone else saved this item while this form was open. The update carries every field, so
+      * saving now would put their fields back as they were — which is what used to happen with no
+      * warning at all. Their changes are listed so the choice is an informed one, and both ways out
+      * are offered: take their version, or keep this one knowing what it replaces.
+      */}
+    <AlertDialog
+      open={saveConflict !== null}
+      onOpenChange={(next) => { if (!next) setSaveConflict(null) }}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Someone else saved this item while you were editing</AlertDialogTitle>
+          <AlertDialogDescription>
+            {/* Radix keeps this mounted while it animates out, so the message is tied to the
+                conflict still being there — otherwise it flips to its opposite as the box closes. */}
+            {saveConflict === null
+              ? ''
+              : saveConflict.changes.length > 0
+                ? 'Saving your version now would put these back as they were:'
+                : 'Their save did not change any field this form covers, so saving is safe.'}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {saveConflict !== null && saveConflict.changes.length > 0 && (
+          <ul className="menu-conflict-list">
+            {saveConflict.changes.map((change) => (
+              <li key={change.label}>
+                <strong>{change.label}</strong>
+                <span className="menu-conflict-from">{change.from}</span>
+                <span aria-hidden="true">→</span>
+                <span className="menu-conflict-to">{change.to}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <AlertDialogFooter>
+          <AlertDialogCancel
+            onClick={() => {
+              const pending = saveConflict
+              setSaveConflict(null)
+              if (!pending) return
+              // Discards this editor's changes in favour of the saved version, and records the
+              // version now on screen so the next save is measured against what was read.
+              form.reset(formValuesFrom(pending.current))
+              setLatestKnownVersion(pending.current.updatedAt ?? pending.current.createdAt)
+              toast.info('Loaded their version', {
+                description: 'Your unsaved changes to this item were discarded.',
+              })
+            }}
+          >
+            Load their version
+          </AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => {
+              const pending = saveConflict
+              setSaveConflict(null)
+              if (!pending) return
+              setLatestKnownVersion(pending.current.updatedAt ?? pending.current.createdAt)
+              void handleSubmit(pending.values, false, true)
+            }}
+          >
+            Keep mine and overwrite
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    <AlertDialog
+      open={dietaryConflicts !== null}
+      onOpenChange={(next) => { if (!next) setDietaryConflicts(null) }}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>These labels contradict the allergen information</AlertDialogTitle>
+          <AlertDialogDescription>
+            Saving this as it stands tells customers something the item's own allergen list denies.
+            Someone relying on the label to stay safe would be misled.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <ul className="dietary-conflict-list">
+          {dietaryConflicts?.conflicts.map((conflict) => <li key={conflict}>{conflict}</li>)}
+        </ul>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Go back and fix it</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => {
+              const pending = dietaryConflicts
+              setDietaryConflicts(null)
+              if (pending) void handleSubmit(pending.values, true)
+            }}
+          >
+            The labels are correct, save anyway
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
         {item ? (
@@ -1558,7 +1726,8 @@ function ItemFormDialog({
           <DialogDescription>Set customer-facing details, price, visibility, and stock state.</DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form className="restaurant-form" onSubmit={form.handleSubmit(handleSubmit)}>
+          <form className="restaurant-form" onSubmit={form.handleSubmit((values) => handleSubmit(values))}>
+            <div className="restaurant-form-scroll">
             <div className="restaurant-form-grid">
               <FormField control={form.control} name="name" render={({ field }) => (
                 <FormItem className="restaurant-form-wide"><FormLabel>Name</FormLabel><FormControl><Input placeholder="Grilled salmon" {...field} /></FormControl><FormMessage /></FormItem>
@@ -1613,6 +1782,12 @@ function ItemFormDialog({
                   <p className="text-xs text-muted-foreground">Customer-facing warning. Separate entries with commas.</p>
                   <FormMessage />
                 </FormItem>
+              )} />
+              <FormField control={form.control} name="mayContainAllergens" render={({ field }) => (
+                <FormItem className="restaurant-form-wide"><FormLabel>May contain / cross-contact allergens</FormLabel><FormControl><Input placeholder="Peanut, tree nuts" {...field} /></FormControl><p className="text-xs text-muted-foreground">Use FSANZ required plain-English allergen names.</p><FormMessage /></FormItem>
+              )} />
+              <FormField control={form.control} name="crossContactStatement" render={({ field }) => (
+                <FormItem className="restaurant-form-wide"><FormLabel>Preparation and cross-contact statement</FormLabel><FormControl><Textarea placeholder="Prepared in a shared kitchen and fryer." {...field} /></FormControl><FormMessage /></FormItem>
               )} />
               <FormField control={form.control} name="isVegetarian" render={({ field }) => (
                 <FormItem className="menu-switch-field"><div><FormLabel>Vegetarian</FormLabel><p>Show a vegetarian dietary label.</p></div><FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl></FormItem>
@@ -1680,6 +1855,7 @@ function ItemFormDialog({
                 }} /></FormControl></FormItem>
               )} />
             </div>
+            </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>Cancel</Button>
               <Button type="submit" disabled={form.formState.isSubmitting || Boolean(imageError)}>{form.formState.isSubmitting ? (imageFile ? 'Uploading image' : 'Saving') : item ? 'Save changes' : 'Create item'}</Button>
@@ -1688,6 +1864,7 @@ function ItemFormDialog({
         </Form>
       </DialogContent>
     </Dialog>
+    </>
   )
 }
 
@@ -2159,6 +2336,15 @@ function CategoryMenuSection({
                     <Badge variant={item.isAvailable && !item.isSoldOut ? 'secondary' : item.isSoldOut ? 'destructive' : 'outline'}>
                       {menuItemStatusLabel(item)}
                     </Badge>
+                    {hasNoAllergenDeclaration(item) ? (
+                      <Badge
+                        variant="outline"
+                        className="border-amber-400/60 text-amber-800 dark:text-amber-200"
+                        title="Customers are shown that no allergen information has been declared for this item."
+                      >
+                        No allergen info
+                      </Badge>
+                    ) : null}
                   </header>
 
                   <div className="restaurant-mobile-meta-grid menu-item-mobile-meta-grid">
@@ -2371,9 +2557,53 @@ const itemStatusLabels: Record<MenuItemStatusFilter, string> = {
   'sold-out': 'Sold out',
   'low-stock': 'Low stock',
   watched: 'Watched',
+  'allergens-undeclared': 'Allergens not declared',
 }
 
 const validItemStatusFilters = new Set<MenuItemStatusFilter>(Object.keys(itemStatusLabels) as MenuItemStatusFilter[])
+
+/** The conflicts the server listed, or a single generic line if the shape was unexpected. */
+/** The form's view of an item, used both when opening it and when loading someone else's version. */
+function formValuesFrom(item: MenuItem): ItemFormValues {
+  return {
+    name: item.name,
+    description: item.description ?? '',
+    price: item.price,
+    imageUrl: item.imageUrl ?? '',
+    displayOrder: item.displayOrder,
+    isAvailable: item.isAvailable,
+    isSoldOut: item.isSoldOut,
+    isVegetarian: item.isVegetarian,
+    isVegan: item.isVegan,
+    isGlutenFree: item.isGlutenFree,
+    isHalal: item.isHalal,
+    allergens: item.allergens ?? '',
+    mayContainAllergens: item.mayContainAllergens ?? '',
+    crossContactStatement: item.crossContactStatement ?? '',
+    spiceLevel: item.spiceLevel,
+    servingSize: item.servingSize ?? '',
+    calories: item.calories,
+    isPopular: item.isPopular,
+    isRecommended: item.isRecommended,
+  }
+}
+
+/** The server's current copy of the item, sent back with a conflict so it can be compared. */
+function conflictingItemFromError(error: unknown): MenuItem | null {
+  const details = (error as { details?: unknown })?.details
+  const item = (details as { item?: unknown })?.item
+
+  return item && typeof item === 'object' && 'id' in item ? item as MenuItem : null
+}
+
+function conflictsFromError(error: unknown): string[] {
+  const details = (error as { details?: unknown })?.details
+  const conflicts = (details as { conflicts?: unknown })?.conflicts
+
+  return Array.isArray(conflicts) && conflicts.every((entry) => typeof entry === 'string')
+    ? conflicts
+    : [describeError(error, 'The dietary labels contradict the allergen information.').message]
+}
 
 export function AdminMenuPage() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -2384,7 +2614,9 @@ export function AdminMenuPage() {
   const [categories, setCategories] = useState<MenuCategory[]>([])
   const [items, setItems] = useState<MenuItem[]>([])
   const [restaurantsLoading, setRestaurantsLoading] = useState(true)
-  const [menuLoading, setMenuLoading] = useState(false)
+  /** Which restaurant the categories and items on screen belong to, once a request has finished. */
+  const [loadedRestaurantId, setLoadedRestaurantId] = useState<string | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
   const [restaurantsError, setRestaurantsError] = useState<string | null>(null)
   const [categoriesError, setCategoriesError] = useState<string | null>(null)
   const [itemsError, setItemsError] = useState<string | null>(null)
@@ -2445,7 +2677,10 @@ export function AdminMenuPage() {
       .then((result) => {
         if (!active) return
         setRestaurants(result)
-        setMenuLoading(result.length > 0)
+        // Deliberately not touching menuLoading: the effect below owns it. Setting it here raced
+        // with that effect, and when the URL already carried a valid restaurant the id never
+        // changed, so nothing re-ran to switch it off — the item list loaded but never stopped
+        // saying so, and Refresh stayed disabled.
         setRestaurantId((current) => result.some((restaurant) => restaurant.id === current)
           ? current
           : result[0]?.id ?? '')
@@ -2462,19 +2697,27 @@ export function AdminMenuPage() {
     return () => { active = false }
   }, [])
 
-  const loadMenu = async (showToast = false) => {
-    if (!restaurantId) return
-    setMenuLoading(true)
-    setCategoriesError(null)
-    setItemsError(null)
-
+  /**
+   * The one place the menu is fetched. Both the automatic load and the Refresh button go through
+   * it, so there is a single owner of the loading state and no second copy of this logic to drift.
+   *
+   * <p>Nothing is set before the first await on purpose: the effect below calls this, and state
+   * written synchronously from an effect is what produced the stuck spinner in the first place.</p>
+   */
+  const fetchMenu = async (
+    targetRestaurantId: string,
+    { showToast = false, isActive = () => true }: { showToast?: boolean; isActive?: () => boolean } = {},
+  ) => {
     const [categoryResult, itemResult] = await Promise.allSettled([
-      getAdminMenuCategories(restaurantId),
-      getAdminMenuItems(restaurantId),
+      getAdminMenuCategories(targetRestaurantId),
+      getAdminMenuItems(targetRestaurantId),
     ])
+
+    if (!isActive()) return
 
     if (categoryResult.status === 'fulfilled') {
       setCategories(categoryResult.value)
+      setCategoriesError(null)
     } else {
       const message = categoryResult.reason instanceof Error ? categoryResult.reason.message : 'The request failed.'
       setCategoriesError(message)
@@ -2483,6 +2726,7 @@ export function AdminMenuPage() {
 
     if (itemResult.status === 'fulfilled') {
       setItems(itemResult.value)
+      setItemsError(null)
       const existingIds = new Set(itemResult.value.map((item) => item.id))
       setSelectedItemIds((current) => new Set([...current].filter((itemId) => existingIds.has(itemId))))
       setMenuRevision((current) => current + 1)
@@ -2495,40 +2739,41 @@ export function AdminMenuPage() {
     if (showToast && categoryResult.status === 'fulfilled' && itemResult.status === 'fulfilled') {
       toast.success('Full menu refreshed')
     }
-    setMenuLoading(false)
+
+    // Recorded even when a request failed: the attempt is over, the error is on screen, and Refresh
+    // has to be usable again — a spinner nobody can clear leaves no way back.
+    setLoadedRestaurantId(targetRestaurantId)
+  }
+
+  const loadMenu = async (showToast = false) => {
+    if (!restaurantId) return
+
+    setRefreshing(true)
+    try {
+      await fetchMenu(restaurantId, { showToast })
+    } finally {
+      setRefreshing(false)
+    }
   }
 
   useEffect(() => {
     if (!restaurantId) return
-    let active = true
-    Promise.allSettled([
-      getAdminMenuCategories(restaurantId),
-      getAdminMenuItems(restaurantId),
-    ]).then(([categoryResult, itemResult]) => {
-      if (!active) return
-      if (categoryResult.status === 'fulfilled') {
-        setCategories(categoryResult.value)
-        setCategoriesError(null)
-      } else {
-        const message = categoryResult.reason instanceof Error ? categoryResult.reason.message : 'The request failed.'
-        setCategoriesError(message)
-        toast.error('Could not load menu categories', { description: message })
-      }
 
-      if (itemResult.status === 'fulfilled') {
-        setItems(itemResult.value)
-        setItemsError(null)
-        setMenuRevision((current) => current + 1)
-      } else {
-        const message = itemResult.reason instanceof Error ? itemResult.reason.message : 'The request failed.'
-        setItemsError(message)
-        toast.error('Could not load menu items', { description: message })
-      }
-    }).finally(() => {
-      if (active) setMenuLoading(false)
-    })
+    let active = true
+    // Deferred a microtask, as elsewhere in the admin pages: the fetch must not run as part of the
+    // render that scheduled it.
+    void Promise.resolve().then(() => fetchMenu(restaurantId, { isActive: () => active }))
+
     return () => { active = false }
   }, [restaurantId])
+
+  /**
+   * Loading means "what is on screen is not this restaurant's menu yet", not a flag someone has to
+   * remember to switch off. Two code paths used to race over that flag, and when the URL already
+   * carried a valid restaurant the id never changed, so nothing re-ran to clear it: the items kept
+   * saying Loading after they had arrived, and Refresh stayed disabled with no way out.
+   */
+  const menuLoading = Boolean(restaurantId) && (loadedRestaurantId !== restaurantId || refreshing)
 
   const orderedCategories = useMemo(() => sortMenuCategories(categories), [categories])
   const metrics = useMemo(() => getMenuMetrics(categories, items), [categories, items])
@@ -2808,6 +3053,9 @@ export function AdminMenuPage() {
               <button type="button" className="menu-metric" onClick={() => setItemStatusFilter('hidden')} aria-pressed={itemStatusFilter === 'hidden'}><span>Hidden</span><strong>{metrics.hidden}</strong></button>
               <button type="button" className="menu-metric" onClick={() => setItemStatusFilter('sold-out')} aria-pressed={itemStatusFilter === 'sold-out'}><span>Sold out</span><strong>{metrics.soldOut}</strong></button>
               <button type="button" className="menu-metric" onClick={() => setItemStatusFilter('low-stock')} aria-pressed={itemStatusFilter === 'low-stock'}><span>Low stock</span><strong>{metrics.lowStock}</strong></button>
+              {/* Not a blocker — customers are told the declaration is missing, so the kitchen
+                  should be able to see the same count and decide what to do about it. */}
+              <button type="button" className="menu-metric" onClick={() => setItemStatusFilter('allergens-undeclared')} aria-pressed={itemStatusFilter === 'allergens-undeclared'}><span>Allergens not declared</span><strong>{metrics.allergensUndeclared}</strong></button>
             </div>
           )}
 

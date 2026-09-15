@@ -1,5 +1,4 @@
 using System.Security.Claims;
-using System.Text.Encodings.Web;
 using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Common;
 using DineFlow.Api.Contracts.Users;
@@ -33,19 +32,22 @@ public class UsersController : ControllerBase
     private readonly ReportLogWriter _reportLogWriter;
     private readonly IEmailSender _emailSender;
     private readonly EmailOptions _emailOptions;
+    private readonly TransactionalEmailLayout _emailLayout;
 
     public UsersController(
         UserManager<ApplicationUser> userManager,
         AppDbContext dbContext,
         ReportLogWriter reportLogWriter,
         IEmailSender emailSender,
-        IOptions<EmailOptions> emailOptions)
+        IOptions<EmailOptions> emailOptions,
+        TransactionalEmailLayout emailLayout)
     {
         _userManager = userManager;
         _dbContext = dbContext;
         _reportLogWriter = reportLogWriter;
         _emailSender = emailSender;
         _emailOptions = emailOptions.Value;
+        _emailLayout = emailLayout;
     }
 
     [Authorize(Policy = AuthorizationPolicies.PlatformOwnerOnly)]
@@ -258,7 +260,16 @@ public class UsersController : ControllerBase
 
         if (!string.IsNullOrWhiteSpace(request.FullName))
         {
-            targetUser.FullName = request.FullName.Trim();
+            // A blank name here means "leave it alone", so only the maximum applies.
+            if (AccountFieldLimits.NormalizeFullName(request.FullName).Length > AccountFieldLimits.FullNameMaxLength)
+            {
+                return BadRequest(new
+                {
+                    message = $"Full name must be {AccountFieldLimits.FullNameMaxLength} characters or fewer."
+                });
+            }
+
+            targetUser.FullName = AccountFieldLimits.NormalizeFullName(request.FullName);
         }
 
         targetUser.RestaurantId = nextRestaurantId;
@@ -568,15 +579,30 @@ public class UsersController : ControllerBase
         var token = await _userManager.GeneratePasswordResetTokenAsync(targetUser);
         var resetUrl = BuildPasswordResetUrl(targetUser.Id, token);
 
+        // An unexpected reset link is exactly what a phishing attempt looks like, so this one says
+        // plainly that an administrator asked for it and carries the same sender identity as the
+        // rest of our mail.
+        var email = new TransactionalEmail(
+            Heading: "Reset your password",
+            Paragraphs:
+            [
+                "An administrator asked us to help you reset your DineFlow password.",
+                "Use the secure link below to choose a new one."
+            ],
+            ActionLabel: "Reset password",
+            ActionUrl: resetUrl,
+            Footnotes:
+            [
+                "This link expires in one hour.",
+                "If you were not expecting this, you can ignore this email — your current password "
+                    + "still works."
+            ]);
+
         await _emailSender.SendAsync(
             targetUser.Email,
             "Reset your DineFlow password",
-            $"""
-            <p>An administrator asked us to help you reset your DineFlow password.</p>
-            <p>This link expires in one hour.</p>
-            <p><a href="{HtmlEncoder.Default.Encode(resetUrl)}">Reset password</a></p>
-            """,
-            $"Reset your DineFlow password: {resetUrl}");
+            _emailLayout.RenderHtml(email),
+            _emailLayout.RenderText(email));
 
         _reportLogWriter.AddAudit(
             "Admin.PasswordResetSent",
@@ -732,16 +758,16 @@ public class UsersController : ControllerBase
         var search = request.Search?.Trim();
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var pattern = $"%{search}%";
+            var pattern = SearchPattern.Contains(search);
             query = query.Where(user =>
-                (user.FullName != null && EF.Functions.ILike(user.FullName, pattern)) ||
-                (user.Email != null && EF.Functions.ILike(user.Email, pattern)) ||
+                (user.FullName != null && EF.Functions.ILike(user.FullName, pattern, SearchPattern.EscapeCharacter)) ||
+                (user.Email != null && EF.Functions.ILike(user.Email, pattern, SearchPattern.EscapeCharacter)) ||
                 _dbContext.UserRoles.Any(userRole =>
                     userRole.UserId == user.Id &&
                     _dbContext.Roles.Any(identityRole =>
                         identityRole.Id == userRole.RoleId &&
                         identityRole.Name != null &&
-                        EF.Functions.ILike(identityRole.Name, pattern))));
+                        EF.Functions.ILike(identityRole.Name, pattern, SearchPattern.EscapeCharacter))));
         }
 
         var now = DateTimeOffset.UtcNow;

@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import {
   getWatchedMenuItems,
   updateMenuItemAvailability,
+  adjustMenuItemStock,
   updateMenuItemStock,
   updateMenuItemWatch,
   type WatchedMenuItem,
@@ -22,9 +23,15 @@ import { Switch } from '../ui/switch'
  */
 export function WatchedMenuItemsWidget({
   restaurantId,
+  restaurantName,
   currency,
 }: {
   restaurantId: string | null
+  /**
+   * The one restaurant this widget edits. The schedule panels beside it have their own picker, so
+   * without a name a platform owner had no way to tell whose stock they were changing.
+   */
+  restaurantName: string | null
   currency: string
 }) {
   const [items, setItems] = useState<WatchedMenuItem[]>([])
@@ -46,6 +53,8 @@ export function WatchedMenuItemsWidget({
   }, [restaurantId])
 
   useEffect(() => {
+    // Fetch on mount: `load` flips its loading flag synchronously. One extra render on mount, not a stale value.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load()
   }, [load])
 
@@ -71,10 +80,22 @@ export function WatchedMenuItemsWidget({
   }
 
   const changeStock = async (item: WatchedMenuItem, stockQuantity: number | null) => {
+    await applyStock(item, () => updateMenuItemStock(item.id, stockQuantity))
+  }
+
+  /** The button steps the count; the database decides what it becomes. */
+  const stepStock = async (item: WatchedMenuItem, by: number) => {
+    await applyStock(item, () => adjustMenuItemStock(item.id, by))
+  }
+
+  const applyStock = async (
+    item: WatchedMenuItem,
+    send: () => Promise<{ stockQuantity: number | null; isSoldOut: boolean }>,
+  ) => {
     setBusyId(item.id)
 
     try {
-      const response = await updateMenuItemStock(item.id, stockQuantity)
+      const response = await send()
       patchItem(item.id, {
         stockQuantity: response.stockQuantity,
         isSoldOut: response.isSoldOut,
@@ -112,8 +133,12 @@ export function WatchedMenuItemsWidget({
         <div className="admin-page-title">
           <Star size={22} />
           <div>
-            <CardTitle>Watched menu items</CardTitle>
-            <CardDescription>Take items off the menu or top up stock without leaving the dashboard.</CardDescription>
+            <CardTitle>{restaurantName ? `Watched menu items — ${restaurantName}` : 'Watched menu items'}</CardTitle>
+            <CardDescription>
+              {restaurantName
+                ? `Take items off the menu or top up stock at ${restaurantName} without leaving the dashboard.`
+                : 'Take items off the menu or top up stock without leaving the dashboard.'}
+            </CardDescription>
           </div>
         </div>
       </CardHeader>
@@ -151,7 +176,7 @@ export function WatchedMenuItemsWidget({
                           size="icon"
                           aria-label={`Decrease ${item.name} stock`}
                           disabled={busy || item.stockQuantity === 0}
-                          onClick={() => void changeStock(item, Math.max(0, (item.stockQuantity ?? 0) - 1))}
+                          onClick={() => void stepStock(item, -1)}
                         >
                           <Minus size={14} />
                         </Button>
@@ -162,7 +187,7 @@ export function WatchedMenuItemsWidget({
                           size="icon"
                           aria-label={`Increase ${item.name} stock`}
                           disabled={busy}
-                          onClick={() => void changeStock(item, (item.stockQuantity ?? 0) + 1)}
+                          onClick={() => void stepStock(item, 1)}
                         >
                           <Plus size={14} />
                         </Button>

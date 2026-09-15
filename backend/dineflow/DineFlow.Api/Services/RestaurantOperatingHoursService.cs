@@ -1,11 +1,21 @@
 using System.Globalization;
+using DineFlow.Api.Options;
+using DineFlow.Infrastructure.Billing;
+using DineFlow.Infrastructure.Time;
 using System.Text.Json;
 using DineFlow.Infrastructure.Restaurant;
+using Microsoft.Extensions.Options;
 
 namespace DineFlow.Api.Services;
 
-public sealed class RestaurantOperatingHoursService
+/// <param name="billingOptions">
+/// Optional, and absent means enforcement off — the safe default, and the one the opening-hours
+/// tests want, since none of them are about money.
+/// </param>
+public sealed class RestaurantOperatingHoursService(IOptions<PlatformBillingOptions>? billingOptions = null)
 {
+    private readonly PlatformBillingOptions _billingOptions = billingOptions?.Value ?? new();
+
     /// <summary>How far ahead to look for the next open/close flip. Covers a week of closures.</summary>
     private const int TransitionLookaheadDays = 14;
 
@@ -41,7 +51,8 @@ public sealed class RestaurantOperatingHoursService
             restaurant.Timezone,
             restaurant.OpeningHoursJson,
             restaurant.SpecialOpeningDaysJson,
-            utcNow);
+            utcNow,
+            restaurant.ToBillingSnapshot());
 
     /// <summary>
     /// Field-based overload for call sites that only have a projection (for example the paged list
@@ -54,7 +65,8 @@ public sealed class RestaurantOperatingHoursService
         string timezone,
         string openingHoursJson,
         string specialOpeningDaysJson,
-        DateTime? utcNow = null)
+        DateTime? utcNow = null,
+        PlatformBillingSnapshot? billing = null)
     {
         var now = utcNow ?? DateTime.UtcNow;
         var acceptingOrders = acceptingOrdersFlag ||
@@ -68,6 +80,29 @@ public sealed class RestaurantOperatingHoursService
                 acceptingOrders,
                 "Inactive",
                 "Restaurant is not available for ordering.",
+                null,
+                null,
+                null);
+        }
+
+        // Every public path to placing an order comes through here, which is why the billing check
+        // lives here and nowhere else. A second gate elsewhere would be a second thing that can
+        // refuse an order, and only one of them would have tests.
+        //
+        // The message is deliberately the same one an ordinary temporary closure gets. Telling a
+        // diner that this restaurant has not paid its supplier damages the restaurant, is none of
+        // the diner's business, and is not something any restaurant would knowingly agree to see on
+        // its own menu page. The real reason goes to staff, on their own authenticated screens.
+        if (_billingOptions.EnforcementEnabled &&
+            billing is PlatformBillingSnapshot snapshot &&
+            PlatformBilling.BlocksPublicOrdering(PlatformBilling.Evaluate(snapshot, now)))
+        {
+            return new RestaurantOrderingAvailability(
+                false,
+                false,
+                acceptingOrders,
+                PlatformBilling.SuspendedReason,
+                PlatformBilling.ExplainToDiner(),
                 null,
                 null,
                 null);
@@ -217,20 +252,8 @@ public sealed class RestaurantOperatingHoursService
         return runEnd >= horizonEnd ? null : runEnd;
     }
 
-    private static DateTime ConvertToUtc(DateTime localDateTime, string timezone)
-    {
-        var timeZoneInfo = ResolveTimeZone(timezone);
-        var unspecified = DateTime.SpecifyKind(localDateTime, DateTimeKind.Unspecified);
-
-        // A DST spring-forward can make a wall-clock time not exist; nudging past the gap is
-        // better than throwing at the caller.
-        if (timeZoneInfo.IsInvalidTime(unspecified))
-        {
-            unspecified = unspecified.AddHours(1);
-        }
-
-        return TimeZoneInfo.ConvertTimeToUtc(unspecified, timeZoneInfo);
-    }
+    private static DateTime ConvertToUtc(DateTime localDateTime, string timezone) =>
+        RestaurantClock.ToUtc(localDateTime, timezone);
 
     private static (List<OpeningInterval> Intervals, DateTime HorizonEnd) BuildOpeningIntervals(
         IReadOnlyList<RestaurantOpeningHoursDay> openingHours,
@@ -269,6 +292,15 @@ public sealed class RestaurantOperatingHoursService
                 if (closesAt <= opensAt)
                 {
                     end = end.AddDays(1);
+
+                    // A special definition owns its whole calendar date, including the hours
+                    // after midnight. IsWithinOpeningHours applies that precedence already, so
+                    // the transition timeline must not let yesterday's regular overnight window
+                    // leak into the special date and advertise a later closure than reality.
+                    if (HasSpecialDate(date.AddDays(1), specialOpeningDays))
+                    {
+                        end = dayStart.AddDays(1);
+                    }
                 }
 
                 intervals.Add(new OpeningInterval(start, end));
@@ -473,42 +505,8 @@ public sealed class RestaurantOperatingHoursService
         return new RestaurantResolvedOpeningDay(regularDay.IsOpen, regularDay.Windows);
     }
 
-    private static DateTime ConvertToRestaurantTime(DateTime utcNow, string timezone)
-    {
-        var utcDateTime = DateTime.SpecifyKind(utcNow, DateTimeKind.Utc);
-        var timeZoneInfo = ResolveTimeZone(timezone);
-        return TimeZoneInfo.ConvertTimeFromUtc(utcDateTime, timeZoneInfo);
-    }
-
-    private static TimeZoneInfo ResolveTimeZone(string timezone)
-    {
-        if (TimeZoneInfo.TryConvertIanaIdToWindowsId(timezone, out var windowsTimeZone))
-        {
-            try
-            {
-                return TimeZoneInfo.FindSystemTimeZoneById(windowsTimeZone);
-            }
-            catch (TimeZoneNotFoundException)
-            {
-            }
-            catch (InvalidTimeZoneException)
-            {
-            }
-        }
-
-        try
-        {
-            return TimeZoneInfo.FindSystemTimeZoneById(timezone);
-        }
-        catch (TimeZoneNotFoundException)
-        {
-            return TimeZoneInfo.Utc;
-        }
-        catch (InvalidTimeZoneException)
-        {
-            return TimeZoneInfo.Utc;
-        }
-    }
+    private static DateTime ConvertToRestaurantTime(DateTime utcNow, string timezone) =>
+        RestaurantClock.ToLocal(utcNow, timezone);
 
     private static List<RestaurantOpeningHoursDay> CreateDefaultOpeningHours()
     {

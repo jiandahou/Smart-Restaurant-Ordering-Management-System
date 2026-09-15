@@ -1,26 +1,45 @@
 import { zodResolver } from '@hookform/resolvers/zod'
-import { Fingerprint, Link2, LogIn, Mail, ShieldCheck } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Fingerprint, Link2, LogIn, Mail, OctagonAlert, ShieldCheck } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { Link, Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { z } from 'zod'
 import facebookLogo from '../assets/facebook-f.svg'
 import googleLogo from '../assets/google-g.svg'
-import { requestMagicLink } from '../api/auth'
+import {
+  describeError,
+  describePasskeyFailure,
+  errorCodeOf,
+  isPasskeySupported,
+  requestMagicLink,
+  requestPasskeyLoginOptions,
+  startPasskeyAssertion,
+  type PasskeyAssertionAttempt,
+  type PublicKeyCredentialRequestOptionsJson,
+} from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
+import { demoLoginDefaults, isDemoLoginAutofilled } from '../auth/demoLogin'
+import { resolvePostLoginDestination } from '../auth/postLoginDestination'
+import { getSafeMenuReturnPath } from '../lib/customerMenuNavigation'
 import { passkeyLogin, verifyMfaLogin } from '../auth/authSlice'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '../components/ui/form'
 import { Input } from '../components/ui/input'
+import { PasswordInput } from '../components/auth/PasswordInput'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { useAppDispatch } from '../hooks'
+import { LEGAL_VERSIONS } from '../legal/legalConfig'
+import { describeOauthError } from '../lib/oauthErrors'
 
-const adminRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin']
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
-const googleLoginUrl = `${apiBaseUrl}/api/auth/google/login`
-const facebookLoginUrl = `${apiBaseUrl}/api/auth/facebook/login`
+/** Comfortably inside the five-minute server-side lifetime of a challenge. */
+const passkeyOptionsRefreshMs = 4 * 60 * 1000
+
+const oauthErrorToastId = 'oauth-error'
+
+const googleLoginUrl = '/api/auth/google/login'
+const facebookLoginUrl = '/api/auth/facebook/login'
 
 const passwordLoginSchema = z.object({
   email: z.email('Enter a valid email address.'),
@@ -45,20 +64,68 @@ type LoginMfaChallenge = {
   preferredMethod: string
 }
 
+type LoginLocationState = {
+  from?: { pathname?: string }
+  mfaChallenge?: LoginMfaChallenge
+}
+
 export function LoginPage() {
-  const { token, loginUser } = useAuth()
+  const { token, user, loginUser } = useAuth()
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const location = useLocation()
   const [searchParams] = useSearchParams()
+  const locationState = location.state as LoginLocationState | null
+  /**
+   * Where to go after signing in, when the visitor came from a customer menu.
+   *
+   * <p>
+   * A query parameter rather than router state, because state does not survive the round trip a
+   * social sign-in makes through the provider — and validated, because a query parameter is
+   * something anybody can write.
+   * </p>
+   */
+  const menuReturnPath = useMemo(
+    () => getSafeMenuReturnPath(searchParams.get('returnTo')),
+    [searchParams],
+  )
+  const forwardedMfaChallenge = locationState?.mfaChallenge ?? null
   const [signingInWithPasskey, setSigningInWithPasskey] = useState(false)
-  const [mfaChallenge, setMfaChallenge] = useState<LoginMfaChallenge | null>(null)
-  const [selectedMfaMethod, setSelectedMfaMethod] = useState('totp')
+  // Held ready so the click handler has nothing to await before opening the prompt. Server-side
+  // the challenge lives five minutes and is single use, so it is refreshed well inside that.
+  const passkeyOptionsRef = useRef<PublicKeyCredentialRequestOptionsJson | null>(null)
+
+  const prefetchPasskeyOptions = useCallback(async () => {
+    if (!isPasskeySupported()) {
+      return
+    }
+
+    try {
+      passkeyOptionsRef.current = await requestPasskeyLoginOptions()
+    } catch {
+      // Not worth surfacing: the click handler falls back to fetching a challenge itself.
+      passkeyOptionsRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    void prefetchPasskeyOptions()
+    const timer = window.setInterval(() => void prefetchPasskeyOptions(), passkeyOptionsRefreshMs)
+    return () => window.clearInterval(timer)
+  }, [prefetchPasskeyOptions])
+  const [socialLegalAccepted, setSocialLegalAccepted] = useState(false)
+  const [showSocialLegalError, setShowSocialLegalError] = useState(false)
+  const [mfaChallenge, setMfaChallenge] = useState<LoginMfaChallenge | null>(forwardedMfaChallenge)
+  const [selectedMfaMethod, setSelectedMfaMethod] = useState(
+    forwardedMfaChallenge?.methods.includes(forwardedMfaChallenge.preferredMethod)
+      ? forwardedMfaChallenge.preferredMethod
+      : forwardedMfaChallenge?.methods[0] ?? 'totp',
+  )
   const passwordForm = useForm<PasswordLoginFormValues>({
     resolver: zodResolver(passwordLoginSchema),
     defaultValues: {
-      email: 'owner@dineflow.com',
-      password: 'ChangeMe123!',
+      email: demoLoginDefaults.email,
+      password: demoLoginDefaults.password,
     },
   })
   const magicLinkForm = useForm<MagicLinkFormValues>({
@@ -74,26 +141,25 @@ export function LoginPage() {
     },
   })
 
+  // Read during render, not held in state: the provider redirects back here with the reason in the
+  // URL, and a toast alone disappears after a few seconds — long before someone who looked away
+  // during the redirect comes back to a login page that looks perfectly normal.
+  const oauthErrorMessage = describeOauthError(searchParams.get('oauthError'))
+
   useEffect(() => {
-    const oauthError = searchParams.get('oauthError')
-    if (!oauthError) return
-    const messages: Record<string, string> = {
-      google_failed: 'Google sign-in failed. Please try again.',
-      google_missing_profile: 'Google did not return your profile. Please try again.',
-      google_create_failed: 'Could not create your account via Google. Please try again.',
-      google_link_failed: 'Could not link your Google account. Please try again.',
-      facebook_failed: 'Facebook sign-in failed. Please try again.',
-      facebook_missing_profile: 'Facebook did not return your profile. Please try again.',
-      facebook_create_failed: 'Could not create your account via Facebook. Please try again.',
-      facebook_link_failed: 'Could not link your Facebook account. Please try again.',
-    }
-    toast.error('Sign-in failed', {
-      description: messages[oauthError] ?? 'OAuth sign-in failed. Please try again.',
-    })
-  }, [searchParams])
+    if (!oauthErrorMessage) return
+    // A fixed id: React mounts effects twice in development, and two identical toasts stacked up.
+    toast.error('Sign-in failed', { id: oauthErrorToastId, description: oauthErrorMessage })
+  }, [oauthErrorMessage])
 
   if (token) {
-    return <Navigate to="/me" replace />
+    // A stored token with no profile yet means the reload is still fetching it; redirecting now
+    // would send an owner to the customer profile purely because their roles had not arrived.
+    if (!user) {
+      return null
+    }
+
+    return <Navigate to={menuReturnPath ?? resolvePostLoginDestination(user.roles)} replace />
   }
 
   const handlePasswordSubmit = async (values: PasswordLoginFormValues) => {
@@ -120,13 +186,23 @@ export function LoginPage() {
         return
       }
 
-      const from = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname
-      const destination = from || (response.user.roles.some((role) => adminRoles.includes(role)) ? '/admin/users' : '/me')
+      const from = menuReturnPath ?? locationState?.from?.pathname
+      const destination = from || resolvePostLoginDestination(response.user.roles)
       toast.success('Signed in', {
         description: response.user.email ?? 'Welcome back.',
       })
       navigate(destination, { replace: true })
     } catch (loginError) {
+      // A correct password on an unconfirmed account is not a failed sign-in, and telling the
+      // person to "confirm your email" without giving them a way to get another one is a dead end.
+      if (errorCodeOf(loginError) === 'email_not_confirmed') {
+        navigate('/check-email', {
+          replace: true,
+          state: { email: values.email.trim(), reason: 'not-confirmed' },
+        })
+        return
+      }
+
       const message = loginError instanceof Error ? loginError.message : 'Login failed'
       toast.error('Sign in failed', {
         description: message,
@@ -146,16 +222,27 @@ export function LoginPage() {
         method: selectedMfaMethod,
         code: values.code,
       })).unwrap()
-      const from = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname
-      const destination = from || (response.user.roles.some((role) => adminRoles.includes(role)) ? '/admin/users' : '/me')
+      const from = menuReturnPath ?? locationState?.from?.pathname
+      const destination = from || resolvePostLoginDestination(response.user.roles)
 
       toast.success('Signed in', {
         description: response.user.email ?? 'MFA verification successful.',
       })
       navigate(destination, { replace: true })
     } catch (mfaError) {
-      const message = mfaError instanceof Error ? mfaError.message : 'MFA verification failed'
-      toast.error('Verification failed', {
+      // The thunk hands this back as a plain object, so `instanceof Error` is false and every
+      // failure used to collapse into the same generic line — an expired step, a wrong code and a
+      // locked account all looked identical, though only one of them means "try again".
+      const { message } = describeError(mfaError, 'Verification failed')
+      const code = errorCodeOf(mfaError)
+
+      if (code === 'mfa_challenge_expired') {
+        // Nothing here can be retyped into success; put them back where a new code comes from.
+        setMfaChallenge(null)
+        mfaLoginForm.reset({ code: '' })
+      }
+
+      toast.error(code === 'account_locked' ? 'Account locked' : 'Verification failed', {
         description: message,
       })
       mfaLoginForm.setError('root', { message })
@@ -187,31 +274,84 @@ export function LoginPage() {
     }
   }
 
+  /**
+   * The provider hand-off leaves the app entirely, so where to come back to has to travel with it.
+   * Password and passkey sign-in read `menuReturnPath` straight off this page; an external provider
+   * needs it round-tripped through the server, or the customer lands on the default page instead of
+   * the restaurant menu they were ordering from.
+   */
+  const buildSocialLoginUrl = (loginUrl: string) => {
+    const params = new URLSearchParams({
+      customerTermsVersion: LEGAL_VERSIONS.customerTerms,
+      privacyPolicyVersion: LEGAL_VERSIONS.privacyPolicy,
+      ...(menuReturnPath ? { returnTo: menuReturnPath } : {}),
+    })
+
+    return `${loginUrl}?${params.toString()}`
+  }
+
   const handleGoogleLogin = () => {
-    window.location.assign(googleLoginUrl)
+    if (!socialLegalAccepted) {
+      setShowSocialLegalError(true)
+      return
+    }
+    window.location.assign(buildSocialLoginUrl(googleLoginUrl))
   }
 
   const handleFacebookLogin = () => {
-    window.location.assign(facebookLoginUrl)
+    if (!socialLegalAccepted) {
+      setShowSocialLegalError(true)
+      return
+    }
+    window.location.assign(buildSocialLoginUrl(facebookLoginUrl))
   }
 
-  const handlePasskeyLogin = async () => {
+  const handlePasskeyLogin = () => {
+    // The prompt is opened first, synchronously, while the click still counts as user activation.
+    // Fetching the challenge here instead would put a network round-trip in front of it, and the
+    // browser then refuses to show the prompt at all — which is why it used to take two clicks.
+    const prefetched = passkeyOptionsRef.current
+    const attempt = prefetched && isPasskeySupported()
+      ? startPasskeyAssertion(prefetched)
+      : undefined
+
+    // A challenge is single use, so the prefetched one is now spent either way.
+    passkeyOptionsRef.current = null
+    void completePasskeyLogin(attempt)
+  }
+
+  const completePasskeyLogin = async (attempt?: PasskeyAssertionAttempt) => {
+    const startedAt = Date.now()
     setSigningInWithPasskey(true)
 
     try {
-      const response = await dispatch(passkeyLogin()).unwrap()
-      const destination = response.user.roles.some((role) => adminRoles.includes(role)) ? '/admin/users' : '/me'
+      const response = await dispatch(passkeyLogin(attempt)).unwrap()
+      const destination = menuReturnPath ?? resolvePostLoginDestination(response.user.roles)
 
       toast.success('Signed in with passkey', {
         description: response.user.email ?? 'Welcome back.',
       })
       navigate(destination, { replace: true })
     } catch (passkeyError) {
-      toast.error('Passkey sign-in failed', {
-        description: passkeyError instanceof Error ? passkeyError.message : 'Could not sign in with passkey',
+      // The browser's error name is what distinguishes the causes — NotAllowedError is the
+      // platform refusing or the person cancelling, InvalidStateError is a request already in
+      // flight, SecurityError is an rpId mismatch. A generic message hides all of that, and the
+      // thunk hands this back as a plain object rather than an Error.
+      const { name, message } = describeError(passkeyError, 'Could not sign in with passkey')
+      console.warn('[passkey] sign-in failed', {
+        name,
+        message,
+        elapsed: Date.now() - startedAt,
+        // Safari refuses an unfocused document. This says whether focus was the problem, and
+        // whether waiting for it helped — the failure looks identical either way.
+        // Settled by the time anything can fail: it is reported before the ceremony is invoked.
+        focus: await attempt?.diagnostics,
       })
+
+      toast.error('Passkey sign-in failed', { description: describePasskeyFailure(name, message) })
     } finally {
       setSigningInWithPasskey(false)
+      void prefetchPasskeyOptions()
     }
   }
 
@@ -220,7 +360,7 @@ export function LoginPage() {
       <Card className="login-card">
         <CardHeader>
           <p className="eyebrow">DineFlow</p>
-          <CardTitle>Sign in</CardTitle>
+          <CardTitle asChild><h1>Sign in</h1></CardTitle>
           <CardDescription>Use your account to access the restaurant console.</CardDescription>
         </CardHeader>
         <CardContent>
@@ -290,6 +430,12 @@ export function LoginPage() {
             </Form>
           ) : (
             <Tabs defaultValue="password" className="auth-tabs">
+            {oauthErrorMessage ? (
+              <div className="confirm-status error" role="alert">
+                <OctagonAlert size={22} />
+                <span>{oauthErrorMessage}</span>
+              </div>
+            ) : null}
             <TabsList className="grid w-full grid-cols-2">
               <TabsTrigger value="password">
                 <LogIn size={16} />
@@ -303,6 +449,14 @@ export function LoginPage() {
             <TabsContent value="password">
               <Form {...passwordForm}>
                 <form className="form-grid" onSubmit={passwordForm.handleSubmit(handlePasswordSubmit)}>
+                  {/* Only ever rendered in a development build — the branch is compiled out of
+                      production along with the credentials themselves. */}
+                  {isDemoLoginAutofilled ? (
+                    <p className="auth-note">
+                      Development build: prefilled with the seeded demo account. Set
+                      {' '}<code>VITE_DEMO_LOGIN=off</code> to start from empty fields.
+                    </p>
+                  ) : null}
                   <FormField
                     control={passwordForm.control}
                     name="email"
@@ -323,7 +477,7 @@ export function LoginPage() {
                       <FormItem>
                         <FormLabel>Password</FormLabel>
                         <FormControl>
-                          <Input type="password" autoComplete="current-password" {...field} />
+                          <PasswordInput autoComplete="current-password" {...field} />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -342,6 +496,10 @@ export function LoginPage() {
                     <span />
                     <strong>or</strong>
                     <span />
+                  </div>
+                  <div className={showSocialLegalError && !socialLegalAccepted ? 'rounded-lg border border-destructive bg-destructive/5 p-2' : ''}>
+                    <label className="flex items-start gap-2 text-xs leading-5 text-muted-foreground"><input type="checkbox" className="mt-1 size-4" checked={socialLegalAccepted} onChange={(event) => { setSocialLegalAccepted(event.target.checked); if (event.target.checked) setShowSocialLegalError(false) }} /><span>For first-time social registration, I accept the <Link className="underline" to="/terms/customer" target="_blank">Customer Terms</Link> and acknowledge the <Link className="underline" to="/privacy" target="_blank">Privacy Policy</Link>.</span></label>
+                    {showSocialLegalError && !socialLegalAccepted ? <p className="mt-1 text-xs font-medium text-destructive">Tick this box before continuing with Google or Facebook.</p> : null}
                   </div>
                   <Button type="button" variant="outline" className="google-login-button" onClick={handleGoogleLogin}>
                     <img aria-hidden="true" className="google-mark" src={googleLogo} alt="" />

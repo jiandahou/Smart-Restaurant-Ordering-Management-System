@@ -22,6 +22,7 @@ public sealed class OrderRefundProcessor
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
     private readonly PaymentNotificationService _paymentNotificationService;
     private readonly ReportLogWriter _reportLogWriter;
+    private readonly RefundedOrderCloser _refundedOrderCloser;
     private readonly ILogger<OrderRefundProcessor> _logger;
 
     private enum PendingRefundReconciliationOutcome
@@ -45,6 +46,7 @@ public sealed class OrderRefundProcessor
         OrderRealtimeNotifier orderRealtimeNotifier,
         PaymentNotificationService paymentNotificationService,
         ReportLogWriter reportLogWriter,
+        RefundedOrderCloser refundedOrderCloser,
         ILogger<OrderRefundProcessor> logger)
     {
         _dbContext = dbContext;
@@ -53,6 +55,7 @@ public sealed class OrderRefundProcessor
         _orderRealtimeNotifier = orderRealtimeNotifier;
         _paymentNotificationService = paymentNotificationService;
         _reportLogWriter = reportLogWriter;
+        _refundedOrderCloser = refundedOrderCloser;
         _logger = logger;
     }
 
@@ -64,7 +67,11 @@ public sealed class OrderRefundProcessor
         CancellationToken cancellationToken,
         string? idempotencyKeySeed = null,
         long? requestedAmountCents = null,
-        Guid? refundRequestId = null)
+        Guid? refundRequestId = null,
+        IReadOnlyList<RefundItemAllocation>? itemAllocations = null,
+        /// Customer-facing wording for why this refund happened. Only automated callers set it:
+        /// a staff-entered `reason` is an internal note and is never forwarded to the customer.
+        string? customerExplanation = null)
     {
         if (string.IsNullOrWhiteSpace(_stripeOptions.SecretKey))
         {
@@ -77,7 +84,16 @@ public sealed class OrderRefundProcessor
             .Collection(item => item.Payments)
             .Query()
             .Include(payment => payment.Refunds)
+                .ThenInclude(refund => refund.Items)
             .LoadAsync(cancellationToken);
+
+        if (itemAllocations is { Count: > 0 }
+            && !_dbContext.Entry(order).Collection(item => item.OrderItems).IsLoaded)
+        {
+            await _dbContext.Entry(order)
+                .Collection(item => item.OrderItems)
+                .LoadAsync(cancellationToken);
+        }
 
         if (order.PaymentMethod != PaymentMethod.Online)
         {
@@ -137,7 +153,8 @@ public sealed class OrderRefundProcessor
                     payment,
                     reconciliation.Refund,
                     ResolveRequesterEmail(order),
-                    cancellationToken);
+                    cancellationToken,
+                    customerExplanation);
                 return OrderRefundProcessResult.Success(reconciliation.Refund);
             }
 
@@ -222,6 +239,7 @@ public sealed class OrderRefundProcessor
                 reason,
                 requestedByUserId,
                 source,
+                itemAllocations,
                 cancellationToken);
 
             if (creationResult.Refund is null)
@@ -270,6 +288,11 @@ public sealed class OrderRefundProcessor
             }
 
             ApplyRefundAggregateStatus(order, payment, refund, completedAt);
+            await _refundedOrderCloser.CloseIfFullyRefundedAsync(
+                order,
+                requestedByUserId,
+                completedAt,
+                cancellationToken);
             await SynchronizeRefundRequestsAsync(refund, completedAt, cancellationToken);
 
             _reportLogWriter.AddAudit(
@@ -335,7 +358,8 @@ public sealed class OrderRefundProcessor
                     payment,
                     refund,
                     ResolveRequesterEmail(order),
-                    cancellationToken);
+                    cancellationToken,
+                    customerExplanation);
             }
             else if (refund.Status == PaymentRefundStatus.Failed)
             {
@@ -617,6 +641,11 @@ public sealed class OrderRefundProcessor
             }
 
             ApplyRefundAggregateStatus(order, payment, pendingRefund, reconciledAt);
+            await _refundedOrderCloser.CloseIfFullyRefundedAsync(
+                order,
+                actorUserId: null,
+                reconciledAt,
+                cancellationToken);
             await SynchronizeRefundRequestsAsync(pendingRefund, reconciledAt, cancellationToken);
             await _dbContext.SaveChangesAsync(cancellationToken);
             _logger.LogInformation(
@@ -708,15 +737,20 @@ public sealed class OrderRefundProcessor
         PaymentRefund refund,
         DateTime updatedAt)
     {
-        if (refund.Status != PaymentRefundStatus.Succeeded)
+        // Same rule as the webhook path, so the two cannot come to different conclusions about the
+        // same payment. Recomputed for a failed refund too: nothing changes when the money never
+        // moved, and if it did move and came back, the payment must say so.
+        var nextStatus = RefundAggregateStatus.Resolve(
+            payment.Status,
+            payment.AmountCents,
+            GetSucceededRefundedAmount(payment));
+
+        if (payment.Status == nextStatus)
         {
             return;
         }
 
-        var refundedAmountCents = GetSucceededRefundedAmount(payment);
-        payment.Status = refundedAmountCents >= payment.AmountCents
-            ? PaymentStatus.Refunded
-            : PaymentStatus.PartiallyRefunded;
+        payment.Status = nextStatus;
         payment.UpdatedAt = updatedAt;
         order.PaymentStatus = payment.Status;
         order.UpdatedAt = updatedAt;
@@ -757,6 +791,7 @@ public sealed class OrderRefundProcessor
         string? reason,
         string? requestedByUserId,
         string source,
+        IReadOnlyList<RefundItemAllocation>? itemAllocations,
         CancellationToken cancellationToken)
     {
         await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
@@ -765,6 +800,112 @@ public sealed class OrderRefundProcessor
             .FromSql($"SELECT * FROM \"Payments\" WHERE \"Id\" = {payment.Id} FOR UPDATE")
             .AsNoTracking()
             .ToListAsync(cancellationToken);
+
+        if (itemAllocations is { Count: > 0 })
+        {
+            if (itemAllocations.GroupBy(item => item.OrderItemId).Any(group => group.Count() > 1)
+                || itemAllocations.Sum(item => item.AmountCents) > refundAmountCents)
+            {
+                return (null, OrderRefundProcessResult.Failure(
+                    StatusCodes.Status409Conflict,
+                    "The refund item allocation is invalid."));
+            }
+
+            var selectedItemIds = itemAllocations.Select(item => item.OrderItemId).ToList();
+            var alreadyAllocated = await _dbContext.PaymentRefundItems
+                .Where(item =>
+                    selectedItemIds.Contains(item.OrderItemId)
+                    && item.PaymentRefund != null
+                    && item.PaymentRefund.PaymentId == payment.Id
+                    && item.PaymentRefund.Status == PaymentRefundStatus.Succeeded)
+                .GroupBy(item => item.OrderItemId)
+                .Select(group => new { OrderItemId = group.Key, AmountCents = group.Sum(item => item.AmountCents) })
+                .ToDictionaryAsync(item => item.OrderItemId, item => item.AmountCents, cancellationToken);
+
+            var alreadyAllocatedModifiers = RefundRequestItemPolicy.BuildAttributedModifierAmounts(order);
+
+            var legacyRequests = await _dbContext.PaymentRefundRequests
+                .AsNoTracking()
+                .Include(request => request.Items)
+                .Include(request => request.PaymentRefund)
+                    .ThenInclude(refund => refund!.Items)
+                .Where(request =>
+                    request.PaymentId == payment.Id
+                    && request.PaymentRefund != null
+                    && request.PaymentRefund.Status == PaymentRefundStatus.Succeeded
+                    && !request.PaymentRefund.Items.Any())
+                .ToListAsync(cancellationToken);
+            var seenLegacyRefundIds = new HashSet<Guid>();
+            foreach (var request in legacyRequests.Where(request =>
+                         request.PaymentRefundId.HasValue
+                         && seenLegacyRefundIds.Add(request.PaymentRefundId.Value)))
+            {
+                foreach (var allocation in RefundRequestItemPolicy.AttributeSucceededRefund(
+                             request.PaymentRefund!.AmountCents,
+                             request.Items.Select(item => (item.OrderItemId, item.AmountCents)).ToList()))
+                {
+                    alreadyAllocated[allocation.OrderItemId] = alreadyAllocated.GetValueOrDefault(allocation.OrderItemId)
+                        + allocation.AmountCents;
+                }
+            }
+
+            foreach (var allocation in itemAllocations)
+            {
+                var orderItem = order.OrderItems.FirstOrDefault(item => item.Id == allocation.OrderItemId);
+                if (orderItem is null)
+                {
+                    return (null, OrderRefundProcessResult.Failure(
+                        StatusCodes.Status409Conflict,
+                        "A selected refund item no longer belongs to this order."));
+                }
+
+                // An allocation naming an extra is measured against that extra's own contribution,
+                // not the dish's. Checking it against the line would let the truffle be refunded for
+                // the price of the bread it was on.
+                if (allocation.OrderItemOptionId is { } optionId)
+                {
+                    var option = orderItem.SelectedOptions.FirstOrDefault(candidate => candidate.Id == optionId);
+
+                    if (option is null || !OrderItemOptionRefund.IsRefundable(orderItem, option))
+                    {
+                        return (null, OrderRefundProcessResult.Failure(
+                            StatusCodes.Status409Conflict,
+                            $"An extra on {orderItem.MenuItemNameSnapshot} can no longer be refunded on its own."));
+                    }
+
+                    var contributionCents = OrderItemOptionRefund.ContributionCents(option, orderItem.Quantity);
+                    var remainingOptionCents = Math.Max(
+                        0,
+                        contributionCents - alreadyAllocatedModifiers.GetValueOrDefault(option.Id));
+
+                    if (allocation.AmountCents <= 0 || allocation.AmountCents > remainingOptionCents)
+                    {
+                        return (null, OrderRefundProcessResult.Failure(
+                            StatusCodes.Status409Conflict,
+                            $"The refundable balance for {option.OptionNameSnapshot} has changed. Refresh and try again."));
+                    }
+
+                    continue;
+                }
+
+                var unitPriceCents = (long)Math.Round(
+                    orderItem.UnitPrice * 100m,
+                    MidpointRounding.AwayFromZero);
+                var remainingLineAmountCents = Math.Max(
+                    0,
+                    unitPriceCents * orderItem.Quantity - alreadyAllocated.GetValueOrDefault(orderItem.Id));
+                if (!RefundRequestItemPolicy.IsValidQuantity(allocation.Quantity, orderItem.Quantity)
+                    || !RefundRequestItemPolicy.IsValidAmount(
+                        allocation.AmountCents,
+                        unitPriceCents * allocation.Quantity,
+                        remainingLineAmountCents))
+                {
+                    return (null, OrderRefundProcessResult.Failure(
+                        StatusCodes.Status409Conflict,
+                        $"The refundable balance for {orderItem.MenuItemNameSnapshot} has changed. Refresh and try again."));
+                }
+            }
+        }
 
         var now = DateTime.UtcNow;
         var refund = new PaymentRefund
@@ -782,6 +923,23 @@ public sealed class OrderRefundProcessor
             RequestedByUserId = requestedByUserId,
             CreatedAt = now
         };
+        if (itemAllocations is not null)
+        {
+            foreach (var allocation in itemAllocations)
+            {
+                refund.Items.Add(new PaymentRefundItem
+                {
+                    Id = Guid.NewGuid(),
+                    PaymentRefundId = refund.Id,
+                    OrderItemId = allocation.OrderItemId,
+                    OrderItemOptionId = allocation.OrderItemOptionId,
+                    OptionNameSnapshot = allocation.OptionNameSnapshot,
+                    MenuItemNameSnapshot = allocation.MenuItemNameSnapshot,
+                    Quantity = allocation.Quantity,
+                    AmountCents = allocation.AmountCents
+                });
+            }
+        }
         _dbContext.PaymentRefunds.Add(refund);
         _reportLogWriter.AddAudit(
             "PaymentRefund.CreateRequested",

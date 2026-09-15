@@ -12,6 +12,7 @@ import {
   CircleDollarSign,
   CreditCard,
   Download,
+  Clock3,
   FileClock,
   RefreshCw,
   Search,
@@ -48,6 +49,13 @@ import { HorizontalTableScroll } from '../components/HorizontalTableScroll'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader } from '../components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '../components/ui/dialog'
 import { Input } from '../components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover'
 import {
@@ -76,6 +84,9 @@ const emptySummary: ActivitySummary = {
   failedPaymentsToday: 0,
   paymentsReceivedToday: [],
   refundsSucceededToday: [],
+  ordersAwaitingAcceptance: 0,
+  ordersOverdueForAcceptance: 0,
+  longestAcceptanceWaitMinutes: null,
 }
 
 function getReportTab(value: string | null): ReportTab {
@@ -111,7 +122,7 @@ function ExpandableText({
 }
 
 function JsonSnippet({ value }: { value: string | null }) {
-  const [expanded, setExpanded] = useState(false)
+  const [open, setOpen] = useState(false)
   if (!value) return <span className="table-subtext">No technical details</span>
 
   let formatted = value
@@ -123,11 +134,20 @@ function JsonSnippet({ value }: { value: string | null }) {
 
   return (
     <span className="report-expandable-cell">
-      <code className={`report-json-snippet${expanded ? ' expanded' : ''}`}>{formatted}</code>
-      <button type="button" className="report-expand-button" onClick={() => setExpanded((current) => !current)}>
-        {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-        {expanded ? 'Hide details' : 'Technical details'}
+      <code className="report-json-snippet">{formatted}</code>
+      <button type="button" className="report-expand-button" onClick={() => setOpen(true)}>
+        <ChevronDown size={13} />
+        Technical details
       </button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="report-json-dialog">
+          <DialogHeader>
+            <DialogTitle>Technical details</DialogTitle>
+            <DialogDescription>Raw investigation data. Treat this content as sensitive.</DialogDescription>
+          </DialogHeader>
+          <code className="report-json-dialog-code">{formatted}</code>
+        </DialogContent>
+      </Dialog>
     </span>
   )
 }
@@ -150,9 +170,11 @@ function ActivityIcon({ category, actorType }: { category: string; actorType: st
 function ActivityFeed({
   items,
   loading,
+  displayTimeZone,
 }: {
   items: ActivityLog[]
   loading: boolean
+  displayTimeZone: string
 }) {
   if (items.length === 0) {
     return (
@@ -179,9 +201,10 @@ function ActivityFeed({
               </p>
               <time
                 dateTime={item.occurredAt}
-                title={`${formatReportDate(item.occurredAt, item.restaurantTimeZone)}${item.restaurantTimeZone ? ` (${item.restaurantTimeZone})` : ' (browser time)'}`}
+                title={`${formatReportDate(item.occurredAt, displayTimeZone)} (${displayTimeZone})`}
               >
-                {formatReportDate(item.occurredAt, item.restaurantTimeZone)}
+                <span>{formatReportDate(item.occurredAt, displayTimeZone)}</span>
+                <small>{displayTimeZone}</small>
               </time>
             </div>
 
@@ -240,6 +263,7 @@ export function AdminReportsPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [refreshVersion, setRefreshVersion] = useState(0)
   const [reportSummaryExpanded, setReportSummaryExpanded] = useState(true)
+  const [supportingDataLoaded, setSupportingDataLoaded] = useState(false)
 
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([])
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([])
@@ -270,12 +294,27 @@ export function AdminReportsPage() {
           description: error instanceof Error ? error.message : 'Supporting data is unavailable.',
         })
       }
+    }).finally(() => {
+      if (!controller.signal.aborted) setSupportingDataLoaded(true)
     })
     return () => controller.abort()
   }, [])
 
-  const createdFromUtc = useMemo(() => toUtcDateBoundary(createdFrom), [createdFrom])
-  const createdToUtc = useMemo(() => toUtcDateBoundary(createdTo, true), [createdTo])
+  const reportTimeZone = useMemo(() => {
+    if (restaurantId) {
+      return restaurants.find((restaurant) => restaurant.id === restaurantId)?.timezone ?? 'UTC'
+    }
+    return restaurants.length === 1 ? restaurants[0].timezone : 'UTC'
+  }, [restaurantId, restaurants])
+
+  const createdFromUtc = useMemo(
+    () => toUtcDateBoundary(createdFrom, false, reportTimeZone),
+    [createdFrom, reportTimeZone],
+  )
+  const createdToUtc = useMemo(
+    () => toUtcDateBoundary(createdTo, true, reportTimeZone),
+    [createdTo, reportTimeZone],
+  )
 
   const activityParams = useMemo<ActivityLogListParams>(() => ({
     page,
@@ -323,6 +362,7 @@ export function AdminReportsPage() {
   ])
 
   const loadReports = useCallback(async (signal: AbortSignal) => {
+    if ((createdFrom || createdTo) && !supportingDataLoaded) return
     setLoading(true)
     setLoadError(null)
     try {
@@ -354,11 +394,23 @@ export function AdminReportsPage() {
     } catch (error) {
       if (!isAbortError(error)) {
         setLoadError(error instanceof Error ? error.message : 'Report loading failed.')
+        setTotalItems(0)
+        setTotalPages(0)
+        if (tab === 'activity') {
+          setActivityLogs([])
+          setActivitySummary(emptySummary)
+        } else if (tab === 'audit') {
+          setAuditLogs([])
+        } else if (tab === 'orders') {
+          setOrderLogs([])
+        } else {
+          setPaymentLogs([])
+        }
       }
     } finally {
       if (!signal.aborted) setLoading(false)
     }
-  }, [activityParams, restaurantId, tab, technicalParams])
+  }, [activityParams, createdFrom, createdTo, restaurantId, supportingDataLoaded, tab, technicalParams])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -411,7 +463,7 @@ export function AdminReportsPage() {
         : paymentLogs.length
   const pageStart = totalItems === 0 ? 0 : (page - 1) * pageSize + 1
   const pageEnd = Math.min(page * pageSize, totalItems)
-  const currentPage = totalPages === 0 ? 0 : page
+  const currentPage = totalPages === 0 ? 1 : Math.min(page, totalPages)
   const currentTabLabel = tab === 'activity'
     ? 'Business activity'
     : tab === 'audit'
@@ -491,9 +543,6 @@ export function AdminReportsPage() {
     }
   }
 
-  const restaurantTimezone = (id: string | null) =>
-    restaurants.find((restaurant) => restaurant.id === id)?.timezone
-
   return (
     <main className="content-grid">
       <Card>
@@ -543,31 +592,54 @@ export function AdminReportsPage() {
                 onClick={() => setReportSummaryExpanded((current) => !current)}
               >
                 <span className="admin-reports-summary-title"><BarChart3 size={16} /> Report summary</span>
-                <span className="admin-reports-summary-meta">{activeRows} visible / {totalItems} matches</span>
+                <span className="admin-reports-summary-meta">
+                  {loadError ? 'Unavailable' : `${activeRows} visible / ${totalItems} matches`}
+                </span>
                 {reportSummaryExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
               </button>
 
-              {reportSummaryExpanded && tab === 'activity' && (
+              {reportSummaryExpanded && !loadError && tab === 'activity' && (
                 <div className="report-business-summary-grid">
-                  <div><Activity size={17} /><span>Activity today · {activitySummary.timeZone}</span><strong>{activitySummary.activityCountToday}</strong></div>
+                  <div><Activity size={17} /><span>Activity today · {reportTimeZone}</span><strong>{activitySummary.activityCountToday}</strong></div>
                   <div><CheckCircle2 size={17} /><span>Completed orders</span><strong>{activitySummary.completedOrdersToday}</strong></div>
                   <div><CircleDollarSign size={17} /><span>Payments received</span><strong>{formatMoneyTotals(activitySummary.paymentsReceivedToday)}</strong></div>
                   <div><CreditCard size={17} /><span>Refunded</span><strong>{formatMoneyTotals(activitySummary.refundsSucceededToday)}</strong></div>
                   <div className={activitySummary.failedPaymentsToday > 0 ? 'summary-has-errors' : ''}>
                     <AlertCircle size={17} /><span>Failed payments</span><strong>{activitySummary.failedPaymentsToday}</strong>
                   </div>
+                  {/* Customers who have paid and are still waiting on the restaurant. Live, not
+                      today's total — an order stranded last night is the one worth seeing. */}
+                  <div
+                    className={activitySummary.ordersOverdueForAcceptance > 0 ? 'summary-has-errors' : ''}
+                    title={activitySummary.longestAcceptanceWaitMinutes === null
+                      ? undefined
+                      : `Longest wait: ${activitySummary.longestAcceptanceWaitMinutes} minutes`}
+                  >
+                    <Clock3 size={17} />
+                    <span>Paid, awaiting acceptance</span>
+                    <strong>
+                      {activitySummary.ordersAwaitingAcceptance}
+                      {activitySummary.ordersOverdueForAcceptance > 0
+                        ? ` (${activitySummary.ordersOverdueForAcceptance} overdue)`
+                        : ''}
+                    </strong>
+                  </div>
                 </div>
               )}
 
-              {reportSummaryExpanded && tab !== 'activity' && (
+              {reportSummaryExpanded && !loadError && tab !== 'activity' && (
                 <div className="placeholder-grid report-summary-grid admin-reports-summary-grid">
                   <div className="placeholder-item"><strong>Current view</strong><span>{currentTabLabel}</span></div>
                   <div className="placeholder-item"><strong>Total matches</strong><span>{totalItems}</span></div>
                   <div className="placeholder-item">
                     <strong>Retention</strong>
-                    <span>
+                    <span title={policy?.retentionStatus}>
                       {policy
-                        ? `${tab === 'orders' ? policy.orderEventRetentionDays : tab === 'payments' ? policy.paymentEventRetentionDays : policy.auditRetentionDays} days`
+                        // "Enforced" claimed that deletion and archival are running. Nothing here
+                        // knows that: the settings behind it are evidence references someone typed,
+                        // and the runtime deliberately holds none of the credentials that would let
+                        // it check. "Declared" is what was actually established.
+                        ? `${tab === 'orders' ? policy.orderEventRetentionDays : tab === 'payments' ? policy.paymentEventRetentionDays : policy.auditRetentionDays} days · ${policy.retentionEnforcementConfigured ? 'Declared' : 'Policy only'}`
                         : 'Loading policy…'}
                     </span>
                   </div>
@@ -721,11 +793,13 @@ export function AdminReportsPage() {
               </div>
             )}
 
-            <TabsContent value="activity" className="report-tab-content">
-              <ActivityFeed items={activityLogs} loading={loading} />
-            </TabsContent>
+            {!loadError && (
+              <TabsContent value="activity" className="report-tab-content">
+                <ActivityFeed items={activityLogs} loading={loading} displayTimeZone={reportTimeZone} />
+              </TabsContent>
+            )}
 
-            <TabsContent value="audit" className="report-tab-content">
+            {!loadError && <TabsContent value="audit" className="report-tab-content">
               <div className="report-table-wrap">
                 <HorizontalTableScroll topScrollLabel="Scroll audit log table horizontally">
                   <table className="data-table report-log-table">
@@ -739,7 +813,7 @@ export function AdminReportsPage() {
                           <td><strong>{log.entityType}</strong><span className="table-subtext">{shortReportId(log.entityId)}</span></td>
                           <td><ExpandableText value={log.summary} empty="No summary" /></td>
                           <td><JsonSnippet value={log.afterJson ?? log.beforeJson} /></td>
-                          <td>{formatReportDate(log.createdAt, restaurantTimezone(log.restaurantId))}</td>
+                          <td>{formatReportDate(log.createdAt, reportTimeZone)} <span className="report-inline-timezone">{reportTimeZone}</span></td>
                         </tr>
                       ))}
                       {auditLogs.length === 0 && <tr><td colSpan={6} className="empty-cell">{loading ? 'Loading audit logs…' : 'No audit logs found.'}</td></tr>}
@@ -750,7 +824,7 @@ export function AdminReportsPage() {
               <div className="restaurant-mobile-list report-mobile-list" aria-label="Technical audit events">
                 {auditLogs.map((log) => (
                   <article key={log.id} className="report-mobile-card">
-                    <div className="report-mobile-card-heading"><Badge variant="outline">{log.action}</Badge><time>{formatReportDate(log.createdAt, restaurantTimezone(log.restaurantId))}</time></div>
+                    <div className="report-mobile-card-heading"><Badge variant="outline">{log.action}</Badge><time>{formatReportDate(log.createdAt, reportTimeZone)} · {reportTimeZone}</time></div>
                     <strong>{log.actorEmail || (log.actorType === 'System' ? 'DineFlow' : 'Unknown actor')}</strong>
                     <span>{log.summary || 'No summary'}</span>
                     <small>{log.entityType} · {shortReportId(log.entityId)}</small>
@@ -758,9 +832,9 @@ export function AdminReportsPage() {
                   </article>
                 ))}
               </div>
-            </TabsContent>
+            </TabsContent>}
 
-            <TabsContent value="orders" className="report-tab-content">
+            {!loadError && <TabsContent value="orders" className="report-tab-content">
               <div className="report-table-wrap">
                 <HorizontalTableScroll topScrollLabel="Scroll order event table horizontally">
                   <table className="data-table report-log-table">
@@ -774,7 +848,7 @@ export function AdminReportsPage() {
                           <td><strong>{log.actorDisplayName || (log.actorType === 'Automation' ? 'DineFlow automation' : 'System')}</strong><span className="table-subtext">{log.actorRoles || log.actorType || log.actorUserId || 'System'}</span></td>
                           <td><ExpandableText value={log.message} /></td>
                           <td><JsonSnippet value={log.dataJson} /></td>
-                          <td>{formatReportDate(log.createdAt, restaurantTimezone(log.restaurantId))}</td>
+                          <td>{formatReportDate(log.createdAt, reportTimeZone)} <span className="report-inline-timezone">{reportTimeZone}</span></td>
                         </tr>
                       ))}
                       {orderLogs.length === 0 && <tr><td colSpan={6} className="empty-cell">{loading ? 'Loading order events…' : 'No order events found.'}</td></tr>}
@@ -785,7 +859,7 @@ export function AdminReportsPage() {
               <div className="restaurant-mobile-list report-mobile-list" aria-label="Order event timeline">
                 {orderLogs.map((log) => (
                   <article key={log.id} className="report-mobile-card">
-                    <div className="report-mobile-card-heading"><Badge variant="outline">{log.eventType}</Badge><time>{formatReportDate(log.createdAt, restaurantTimezone(log.restaurantId))}</time></div>
+                    <div className="report-mobile-card-heading"><Badge variant="outline">{log.eventType}</Badge><time>{formatReportDate(log.createdAt, reportTimeZone)} · {reportTimeZone}</time></div>
                     <Link to={`/admin/orders?q=${encodeURIComponent(log.orderNumber)}`}><strong>{log.orderNumber}</strong></Link>
                     <span>{log.message}</span>
                     <small>{log.actorDisplayName || (log.actorType === 'Automation' ? 'DineFlow automation' : 'System')}</small>
@@ -793,9 +867,9 @@ export function AdminReportsPage() {
                   </article>
                 ))}
               </div>
-            </TabsContent>
+            </TabsContent>}
 
-            <TabsContent value="payments" className="report-tab-content">
+            {!loadError && <TabsContent value="payments" className="report-tab-content">
               <div className="report-table-wrap">
                 <HorizontalTableScroll topScrollLabel="Scroll payment event table horizontally">
                   <table className="data-table report-log-table">
@@ -811,7 +885,7 @@ export function AdminReportsPage() {
                           <td>{log.status ? <Badge variant="secondary">{log.status}</Badge> : <span className="table-subtext">None</span>}</td>
                           <td><ExpandableText value={log.message} /></td>
                           <td><JsonSnippet value={log.dataJson} /></td>
-                          <td>{formatReportDate(log.createdAt, restaurantTimezone(log.restaurantId))}</td>
+                          <td>{formatReportDate(log.createdAt, reportTimeZone)} <span className="report-inline-timezone">{reportTimeZone}</span></td>
                         </tr>
                       ))}
                       {paymentLogs.length === 0 && <tr><td colSpan={8} className="empty-cell">{loading ? 'Loading payment events…' : 'No payment events found.'}</td></tr>}
@@ -822,7 +896,7 @@ export function AdminReportsPage() {
               <div className="restaurant-mobile-list report-mobile-list" aria-label="Payment and refund provider events">
                 {paymentLogs.map((log) => (
                   <article key={log.id} className="report-mobile-card">
-                    <div className="report-mobile-card-heading"><Badge variant="outline">{log.eventType}</Badge><time>{formatReportDate(log.createdAt, restaurantTimezone(log.restaurantId))}</time></div>
+                    <div className="report-mobile-card-heading"><Badge variant="outline">{log.eventType}</Badge><time>{formatReportDate(log.createdAt, reportTimeZone)} · {reportTimeZone}</time></div>
                     <strong>{log.actorDisplayName || (log.actorType === 'Provider' ? log.provider : 'System')}</strong>
                     <span>{log.message}</span>
                     <small>{log.orderNumber || shortReportId(log.paymentId)} · {log.status || 'No status'}</small>
@@ -830,10 +904,10 @@ export function AdminReportsPage() {
                   </article>
                 ))}
               </div>
-            </TabsContent>
+            </TabsContent>}
           </Tabs>
 
-          <div className="pagination-bar compact-pagination admin-reports-pagination">
+          {!loadError && totalItems > 0 && <div className="pagination-bar compact-pagination admin-reports-pagination">
             <span className="pagination-range">
               <span className="pagination-full">Showing {pageStart}-{pageEnd} of {totalItems}</span>
               <span className="pagination-compact">{pageStart}-{pageEnd} / {totalItems}</span>
@@ -854,12 +928,22 @@ export function AdminReportsPage() {
               <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={loading || page <= 1} aria-label="Previous report page"><ChevronLeft size={16} /></Button>
               <Button type="button" variant="outline" size="icon" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={loading || page >= totalPages} aria-label="Next report page"><ChevronRight size={16} /></Button>
             </div>
-          </div>
+          </div>}
 
           <p className="report-policy-note">
             <ShieldCheck size={14} />
             Logs are append-only. Raw technical details and network identifiers are restricted to platform owners.
             {policy && ` CSV exports are limited to ${policy.maxExportRows.toLocaleString('en-AU')} rows.`}
+            {policy && !policy.retentionEnforcementConfigured && (
+              <strong className="report-policy-warning"> Retention maintenance is not configured for production.</strong>
+            )}
+            {policy?.retentionEnforcementConfigured && policy.restoreDrillAgeDays !== null && (
+              <>
+                {' '}Retention maintenance is declared, not checked from here — the scheduler log,
+                archive manifest and deletion audit live with the release record. Last restore drill
+                declared {policy.restoreDrillAgeDays} days ago.
+              </>
+            )}
           </p>
         </CardContent>
       </Card>

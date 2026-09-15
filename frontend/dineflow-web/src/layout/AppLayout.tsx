@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import {
   BarChart3,
   BadgeCheck,
@@ -23,16 +23,28 @@ import {
   Utensils,
   UserRound,
   UserPlus,
+  BellOff,
+  BellRing,
   Volume2,
-  VolumeX,
+  VolumeX, Wallet
 } from 'lucide-react'
 import { motion } from 'motion/react'
 import { useTheme } from 'next-themes'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useAuth } from '../auth/AuthContext'
+import { adminRoles } from '../auth/postLoginDestination'
+import { buildBillingNotice } from '@/lib/billingNotice'
+import { buildRefundOwedNotice } from '@/lib/refundOwedNotice'
+import { buildRefundQueueNotice } from '@/lib/refundQueueNotice'
 import { BrandLogo } from '../components/BrandLogo'
 import { DemoIdentitySwitcher } from '../components/DemoIdentitySwitcher'
+import {
+  OperationalNotificationBanner,
+  OperationalNotificationButton,
+  sortOperationalNotices,
+  type OperationalNotice,
+} from '../components/OperationalNotificationCenter'
 import { Avatar, AvatarFallback, AvatarImage } from '../components/ui/avatar'
 import { Button } from '../components/ui/button'
 import { Switch } from '../components/ui/switch'
@@ -55,12 +67,22 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '../components/ui/popover'
-import { PrinterSettingsDialog } from '../pages/StaffOrdersPage'
+/**
+ * Lazily, because it lives in the staff orders page and a static import pulled that whole page —
+ * the thermal-printer driver, the QZ transport, every settings panel — into the entry chunk, for
+ * every visitor including a customer opening a menu. The dialog is behind a button only staff can
+ * see, so the wait is theirs and it is a click long.
+ */
+const PrinterSettingsDialog = lazy(() =>
+  import('../pages/StaffOrdersPage').then((module) => ({ default: module.PrinterSettingsDialog })))
 import { useRestaurantPrinting } from '../printing/RestaurantPrintingContext'
+import {
+  subscribeOperationalSuccess,
+  type OperationalSuccessEvent,
+} from '../lib/operationalNotifications'
 
 const consoleRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']
 const restaurantStaffRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff']
-const adminRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin']
 const adminLinks = [
   {
     to: '/admin',
@@ -114,6 +136,11 @@ const adminLinks = [
     ],
   },
   {
+    to: '/admin/billing',
+    label: 'Billing',
+    icon: Wallet,
+  },
+  {
     to: '/admin/reports',
     label: 'Reports',
     icon: BarChart3,
@@ -122,6 +149,12 @@ const adminLinks = [
       { to: '/admin/reports?section=orders', label: 'Orders' },
       { to: '/admin/reports?section=payments', label: 'Payments' },
     ],
+  },
+  {
+    to: '/admin/privacy-requests',
+    label: 'Privacy requests',
+    icon: ShieldCheck,
+    platformOwnerOnly: true,
   },
 ]
 type BackendStatus = 'idle' | 'checking' | 'ok' | 'fail'
@@ -194,6 +227,10 @@ export function AppLayout() {
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
   const [isDesktopUserMenuOpen, setIsDesktopUserMenuOpen] = useState(false)
   const [expandedAdminGroups, setExpandedAdminGroups] = useState<Record<string, boolean>>({})
+  const [recentSuccesses, setRecentSuccesses] = useState<OperationalSuccessEvent[]>([])
+  const [visibleSuccessIds, setVisibleSuccessIds] = useState<Set<string>>(() => new Set())
+  const [dismissedBannerIds, setDismissedBannerIds] = useState<Set<string>>(() => new Set())
+  const successTimersRef = useRef<number[]>([])
   const printing = useRestaurantPrinting()
   const themeMode: ThemeMode = theme === 'light' || theme === 'dark' ? theme : 'system'
   const ThemeIcon = themeMode === 'dark' ? Moon : themeMode === 'light' ? Sun : Monitor
@@ -201,20 +238,302 @@ export function AppLayout() {
   const canUseAdminArea = hasAnyRole(consoleRoles)
   const canUseAdminTools = hasAnyRole(adminRoles)
   const canUseStaffOrders = hasAnyRole(restaurantStaffRoles)
+  const isPlatformOwner = hasAnyRole(['PlatformOwner'])
   const isAdminArea = location.pathname.startsWith('/admin')
   const isStaffOrdersArea = location.pathname.startsWith('/staff/')
   const isBackendPulseActive = backendStatus === 'checking' || backendStatus === 'ok'
   const showStripeForwardButton = import.meta.env.DEV && isSignedIn
-  const visibleAdminLinks = adminLinks.filter((link) => canUseAdminTools || ['/admin', '/admin/orders'].includes(link.to))
+  // Privacy requests concern a person's information across the whole platform, so they are the
+  // platform owner's to answer — and until this link existed, nobody could reach the queue at all.
+  const visibleAdminLinks = adminLinks
+    .filter((link) => !('platformOwnerOnly' in link && link.platformOwnerOnly) || isPlatformOwner)
+    .filter((link) => canUseAdminTools || ['/admin', '/admin/orders'].includes(link.to))
   const selectedPrintRestaurant = printing.printRestaurants.find(
     (restaurant) => restaurant.id === printing.activeRestaurantId,
   )
+
+  const operationalNotices = useMemo<OperationalNotice[]>(() => {
+    if (!canUseStaffOrders) return []
+
+    const notices: OperationalNotice[] = []
+    const paymentRestaurants = printing.isPlatformOwner && !printing.activeRestaurantId
+      ? printing.printRestaurants
+          .filter((restaurant) => restaurant.isActive && restaurant.onlinePaymentsEnabled !== true)
+          .map((restaurant) => ({
+            id: restaurant.id,
+            name: restaurant.name,
+            stripeConnectStatus: restaurant.stripeConnectStatus ?? 'NotConnected',
+            onlinePaymentsEnabled: restaurant.onlinePaymentsEnabled === true,
+          }))
+      : printing.activeRestaurantOperations
+        ? [{
+            id: printing.activeRestaurantOperations.id,
+            name: printing.activeRestaurantOperations.name,
+            stripeConnectStatus: printing.activeRestaurantOperations.stripeConnectStatus,
+            onlinePaymentsEnabled: printing.activeRestaurantOperations.onlinePaymentsEnabled,
+          }]
+        : []
+
+    paymentRestaurants.forEach((restaurant) => {
+      if (restaurant.onlinePaymentsEnabled) return
+      const statusMessage = restaurant.stripeConnectStatus === 'Restricted'
+        ? 'Stripe has restricted this account, so Online payment is disabled until the required details are resolved.'
+        : restaurant.stripeConnectStatus === 'OnboardingIncomplete'
+          ? 'Stripe setup is incomplete, so Online payment is disabled until onboarding is finished.'
+          : 'Stripe is not connected, so Online payment is disabled. Customers can still pay at the counter.'
+      const canOpenPaymentSettings = canUseAdminTools
+
+      notices.push({
+        id: `stripe-${restaurant.id}`,
+        severity: 'error',
+        title: `${restaurant.name}: Online payment unavailable`,
+        message: statusMessage,
+        actionLabel: canOpenPaymentSettings ? 'Open payment settings' : undefined,
+        onAction: canOpenPaymentSettings
+          ? () => navigate(`/admin/restaurants?section=restaurants&q=${encodeURIComponent(restaurant.name)}&payments=${restaurant.id}`)
+          : undefined,
+      })
+    })
+
+    if (
+      printing.settings.mode === 'qz-tray'
+      && printing.settings.autoPrintNewOrders
+      && printing.qzConnectionStatus !== 'connected'
+      && printing.qzConnectionStatus !== 'checking'
+    ) {
+      notices.push({
+        id: 'printer-qz-disconnected',
+        severity: 'warning',
+        title: 'Kitchen printer is not connected',
+        message: 'Automatic printing is paused until QZ Tray reconnects. Orders can still be accepted manually.',
+        actionLabel: 'Open printer settings',
+        onAction: () => printing.setSettingsOpen(true),
+      })
+    }
+
+    // FS-021. QZ can be connected while the printer is not: the websocket only reaches the desktop
+    // app on this same machine. Without this, a shop whose printer has gone sees nothing wrong
+    // until a paid order fails to produce a docket.
+    if (
+      printing.settings.autoPrintNewOrders
+      && printing.printerReadiness?.state === 'unreachable'
+      && (printing.settings.mode !== 'qz-tray' || printing.qzConnectionStatus === 'connected')
+    ) {
+      notices.push({
+        id: 'printer-unreachable',
+        severity: 'error',
+        title: 'Printer is not responding',
+        message: `${printing.printerReadiness.detail}. Tickets will not print until this is fixed, `
+          + 'even though the printing service is still connected.',
+        actionLabel: 'Open printer settings',
+        onAction: () => printing.setSettingsOpen(true),
+      })
+    }
+
+    const failedPrintJobs = printing.printJobs.failedCount + printing.printJobs.deadLetterCount
+    if (failedPrintJobs > 0) {
+      notices.push({
+        id: 'printer-failed-jobs',
+        severity: 'warning',
+        title: `${failedPrintJobs} print ${failedPrintJobs === 1 ? 'task needs' : 'tasks need'} attention`,
+        message: 'One or more kitchen tickets were not printed successfully.',
+        actionLabel: 'Review print tasks',
+        // Lands on the task list itself. Opening the settings dialog alone put people in front of a
+        // collapsed section and no sign the thing they came for was inside it.
+        onAction: () => printing.openPrintTasks(),
+      })
+    }
+
+    // Only the roles that can answer one. Approving is AdminApi — PlatformOwner, RestaurantOwner
+    // and Admin — so telling a Staff member that three refunds are waiting hands them an alarm and
+    // no way to silence it, and teaches everyone that the bell holds things you cannot act on.
+    if (canUseAdminTools) {
+      // Read from the same two places the payment warnings are: the platform owner is assigned to
+      // no restaurant, so their single-restaurant record is always empty and the list is the only
+      // thing that knows. Named per restaurant so an owner watching several is told which one.
+      const refundQueues = printing.isPlatformOwner && !printing.activeRestaurantId
+        ? printing.printRestaurants
+            .filter((restaurant) => restaurant.isActive)
+            .map((restaurant) => ({
+              id: restaurant.id,
+              name: restaurant.name,
+              count: restaurant.pendingRefundRequestCount ?? 0,
+              oldest: restaurant.oldestPendingRefundRequestAt ?? null,
+              owedCount: restaurant.refundOwedCount ?? 0,
+              owedAmountCents: restaurant.refundOwedAmountCents ?? 0,
+              owedOldest: restaurant.oldestRefundOwedAt ?? null,
+              currency: restaurant.currency,
+            }))
+        : printing.activeRestaurantOperations
+          ? [{
+              id: printing.activeRestaurantOperations.id,
+              name: printing.activeRestaurantOperations.name,
+              count: printing.activeRestaurantOperations.pendingRefundRequestCount,
+              oldest: printing.activeRestaurantOperations.oldestPendingRefundRequestAt,
+              owedCount: printing.activeRestaurantOperations.refundOwedCount ?? 0,
+              owedAmountCents: printing.activeRestaurantOperations.refundOwedAmountCents ?? 0,
+              owedOldest: printing.activeRestaurantOperations.oldestRefundOwedAt ?? null,
+              currency: printing.activeRestaurantOperations.billing?.currency ?? null,
+            }]
+          : []
+
+      refundQueues.forEach((queue) => {
+        const pendingRefunds = buildRefundQueueNotice(queue.count, queue.oldest)
+        if (pendingRefunds) notices.push({
+          id: `refund-requests-pending-${queue.id}`,
+          severity: pendingRefunds.severity,
+          title: refundQueues.length > 1
+            ? `${queue.name}: ${pendingRefunds.title}`
+            : pendingRefunds.title,
+          message: pendingRefunds.message,
+          actionLabel: 'Review refund requests',
+          onAction: () => navigate(
+            `/admin/payments?view=requests&requestStatus=Pending&restaurant=${queue.id}`,
+          ),
+        })
+
+        // Separate from the queue above on purpose. That one is customers who asked; this one is
+        // customers who were never told, and folding them into a single number would let the
+        // quieter, worse case hide inside the busier one.
+        const owed = buildRefundOwedNotice(
+          queue.owedCount,
+          queue.owedAmountCents,
+          queue.owedOldest,
+          queue.currency,
+        )
+        if (owed) notices.push({
+          id: `refund-owed-${queue.id}`,
+          severity: owed.severity,
+          title: refundQueues.length > 1
+            ? `${queue.name}: ${owed.title}`
+            : owed.title,
+          message: owed.message,
+          // Lands on the orders these are, not on the refund request list — there are no requests
+          // to review here, which is the whole difficulty.
+          actionLabel: 'Review these orders',
+          onAction: () => navigate(
+            `/staff/orders?queue=closed&restaurant=${queue.id}`,
+          ),
+        })
+      })
+    }
+
+    // Read from the same two places the payment warnings are, for the same reason: the platform
+    // owner is assigned to no restaurant, so their own operations record is always empty and the
+    // restaurants list is the only thing that knows.
+    if (canUseAdminTools) {
+      const billingSources = printing.isPlatformOwner && !printing.activeRestaurantId
+        ? printing.printRestaurants
+            .filter((restaurant) => restaurant.isActive)
+            .map((restaurant) => ({
+              id: restaurant.id,
+              name: restaurant.name,
+              billing: restaurant.billing ?? null,
+            }))
+        : printing.activeRestaurantOperations
+          ? [{
+              id: printing.activeRestaurantOperations.id,
+              name: printing.activeRestaurantOperations.name,
+              billing: printing.activeRestaurantOperations.billing,
+            }]
+          : []
+
+      billingSources.forEach((source) => {
+        const notice = buildBillingNotice(
+          source.billing,
+          billingSources.length > 1 ? source.name : null,
+        )
+        if (!notice) return
+
+        notices.push({
+          id: `platform-billing-${source.id}`,
+          severity: notice.severity,
+          title: notice.title,
+          message: notice.message,
+          actionLabel: 'Open billing',
+          // Carries which restaurant. The platform owner is assigned to none, so a bare link would
+          // send them from a warning naming one shop to a page that says it knows of no shop.
+          onAction: () => navigate(`/admin/billing?restaurantId=${source.id}`),
+        })
+      })
+    }
+
+    if (printing.printStationLeaseHeld) {
+      notices.push({
+        id: 'printer-station-standby',
+        severity: 'warning',
+        title: 'This print station is standing by',
+        message: 'Another browser tab or computer owns automatic printing for this restaurant.',
+        actionLabel: 'Open printer settings',
+        onAction: () => printing.setSettingsOpen(true),
+      })
+    }
+
+    return notices
+  }, [
+    canUseAdminTools,
+    canUseStaffOrders,
+    navigate,
+    printing,
+  ])
+
+  const successNotices = useMemo<OperationalNotice[]>(() => recentSuccesses.map((event) => ({
+    id: event.id,
+    severity: 'success',
+    title: event.title,
+    message: event.message,
+    createdAt: event.createdAt,
+  })), [recentSuccesses])
+  const allOperationalNotices = useMemo(
+    () => sortOperationalNotices([...operationalNotices, ...successNotices]),
+    [operationalNotices, successNotices],
+  )
+  const bannerNotice = useMemo(() => sortOperationalNotices([
+    ...operationalNotices,
+    ...successNotices.filter((notice) => visibleSuccessIds.has(notice.id)),
+  ]).find((notice) => !dismissedBannerIds.has(notice.id)), [
+    dismissedBannerIds,
+    operationalNotices,
+    successNotices,
+    visibleSuccessIds,
+  ])
 
   useEffect(() => {
     if (location.hash) {
       scrollToHash(location.hash)
     }
   }, [location.hash, location.pathname, location.search])
+
+  useEffect(() => {
+    const unsubscribe = subscribeOperationalSuccess((event) => {
+      setRecentSuccesses((current) => [event, ...current].slice(0, 8))
+      setVisibleSuccessIds((current) => new Set(current).add(event.id))
+      const timer = window.setTimeout(() => {
+        setVisibleSuccessIds((current) => {
+          const next = new Set(current)
+          next.delete(event.id)
+          return next
+        })
+      }, 6_000)
+      successTimersRef.current.push(timer)
+    })
+
+    return () => {
+      unsubscribe()
+      successTimersRef.current.forEach((timer) => window.clearTimeout(timer))
+      successTimersRef.current = []
+    }
+  }, [])
+
+  useEffect(() => {
+    // Drops dismissals for notices that are no longer active. One extra render on mount, not a stale value.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDismissedBannerIds((current) => {
+      const activeIds = new Set(operationalNotices.map((notice) => notice.id))
+      const next = new Set([...current].filter((id) => activeIds.has(id)))
+      return next.size === current.size ? current : next
+    })
+  }, [operationalNotices])
 
   const handleLogout = () => {
     logout()
@@ -389,6 +708,8 @@ export function AppLayout() {
             </PopoverContent>
           </Popover>
 
+          {canUseStaffOrders ? <OperationalNotificationButton notices={allOperationalNotices} compact /> : null}
+
           {canUseStaffOrders ? (
             <>
               <TooltipProvider>
@@ -454,6 +775,29 @@ export function AppLayout() {
                   </TooltipTrigger>
                   <TooltipContent side="bottom">
                     {printing.audioEnabled ? 'New order sound on' : 'New order sound off'}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="mobile-topbar-icon"
+                      aria-label={printing.overdueAlertEnabled
+                        ? 'Mute unaccepted order alert'
+                        : 'Enable unaccepted order alert'}
+                      onClick={() => void printing.toggleOverdueAlert()}
+                    >
+                      {printing.overdueAlertEnabled ? <BellRing size={18} /> : <BellOff size={18} />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    {printing.overdueAlertEnabled
+                      ? 'Unaccepted order alert on'
+                      : 'Unaccepted order alert off'}
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -665,6 +1009,7 @@ export function AppLayout() {
               </div>
             </PopoverContent>
           </Popover>
+          {canUseStaffOrders ? <OperationalNotificationButton notices={allOperationalNotices} /> : null}
           {canUseStaffOrders ? (
             <>
               <TooltipProvider>
@@ -730,6 +1075,28 @@ export function AppLayout() {
                   </TooltipTrigger>
                   <TooltipContent side="bottom">
                     {printing.audioEnabled ? 'New order sound on' : 'New order sound off'}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      aria-label={printing.overdueAlertEnabled
+                        ? 'Mute unaccepted order alert'
+                        : 'Enable unaccepted order alert'}
+                      onClick={() => void printing.toggleOverdueAlert()}
+                    >
+                      {printing.overdueAlertEnabled ? <BellRing size={18} /> : <BellOff size={18} />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    {printing.overdueAlertEnabled
+                      ? 'Unaccepted order alert on'
+                      : 'Unaccepted order alert off'}
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -825,7 +1192,15 @@ export function AppLayout() {
         </nav>
       </header>
 
+      {bannerNotice ? (
+        <OperationalNotificationBanner
+          notice={bannerNotice}
+          onDismiss={() => setDismissedBannerIds((current) => new Set(current).add(bannerNotice.id))}
+        />
+      ) : null}
+
       {canUseStaffOrders ? (
+        <Suspense fallback={null}>
         <PrinterSettingsDialog
           open={printing.settingsOpen}
           kitchenSettings={printing.settings}
@@ -841,11 +1216,17 @@ export function AppLayout() {
             target,
             selectedPrintRestaurant?.name ?? 'DineFlow',
           )}
+          showPrintTasks={printing.printTasksRequested}
+          onPrintTasksShown={printing.acknowledgePrintTasksRequest}
+          printerReadiness={printing.printerReadiness}
+          lastSuccessfulPrintAt={printing.lastSuccessfulPrintAt}
+          onCheckPrinterReadiness={printing.checkPrinterReadiness}
           showPrintRestaurantSelector={printing.isPlatformOwner}
           printRestaurants={printing.printRestaurants}
           activePrintRestaurantId={printing.activeRestaurantId}
           onPrintRestaurantChange={printing.setPlatformRestaurantId}
         />
+        </Suspense>
       ) : null}
 
       {canUseAdminArea && isAdminArea && (

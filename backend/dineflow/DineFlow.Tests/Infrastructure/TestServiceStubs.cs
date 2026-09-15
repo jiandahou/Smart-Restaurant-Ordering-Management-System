@@ -1,9 +1,13 @@
 using DineFlow.Api.Hubs;
+using DineFlow.Api.Options;
 using DineFlow.Api.Services;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Microsoft.EntityFrameworkCore;
+using Stripe;
 
 namespace DineFlow.Tests.Infrastructure;
 
@@ -15,8 +19,17 @@ public static class TestServiceStubs
         new(
             context,
             CreateOrderRealtimeNotifier(),
+            CreateRefundedOrderCloser(context),
             CreateReportLogWriter(context),
             NullLogger<CounterPaymentReversalService>.Instance);
+
+    /// Real, against the real database: a refund that settles an order closes it and gives its
+    /// portions back, and a stub here would let that regress unnoticed.
+    public static OrderStockLedger CreateStockLedger(AppDbContext context) =>
+        new(context, new MenuItemStockService(context));
+
+    public static RefundedOrderCloser CreateRefundedOrderCloser(AppDbContext context) =>
+        new(context, CreateStockLedger(context), CreateReportLogWriter(context));
 
     public static OrderRealtimeNotifier CreateOrderRealtimeNotifier() =>
         new(new NoOpHubContext(), NullLogger<OrderRealtimeNotifier>.Instance);
@@ -24,8 +37,49 @@ public static class TestServiceStubs
     public static ReportLogWriter CreateReportLogWriter(AppDbContext context) =>
         new(context, new HttpContextAccessor());
 
-    public static PaymentNotificationService CreatePaymentNotificationService() =>
-        new(new NoOpEmailSender(), NullLogger<PaymentNotificationService>.Instance);
+    /// <summary>Real layout, unconfigured operator: enough to render, nothing to assert against.</summary>
+    public static TransactionalEmailLayout CreateEmailLayout() =>
+        new(Options.Create(new ComplianceOptions()));
+
+    /// <summary>
+    /// What a payment landing on an order does, wired to a real refund processor.
+    /// </summary>
+    /// <remarks>
+    /// Takes the Stripe client because the interesting half is what happens when money arrives on an
+    /// order the restaurant already turned away, and that path refunds.
+    /// </remarks>
+    public static OrderPaymentLanding CreateOrderPaymentLanding(
+        AppDbContext context,
+        IStripeClient stripeClient,
+        IOptions<StripeOptions> stripeOptions)
+    {
+        var reportLogWriter = CreateReportLogWriter(context);
+
+        return new OrderPaymentLanding(
+            context,
+            new OrderAutoAcceptanceService(context, reportLogWriter),
+            new OrderRefundProcessor(
+                context,
+                stripeClient,
+                stripeOptions,
+                CreateOrderRealtimeNotifier(),
+                CreatePaymentNotificationService(context),
+                reportLogWriter,
+                TestServiceStubs.CreateRefundedOrderCloser(context),
+                NullLogger<OrderRefundProcessor>.Instance),
+            reportLogWriter,
+            NullLogger<OrderPaymentLanding>.Instance);
+    }
+
+    public static PaymentNotificationService CreatePaymentNotificationService(AppDbContext? context = null) =>
+        new(
+            new TransactionalEmailOutbox(
+                context ?? new AppDbContext(new DbContextOptionsBuilder<AppDbContext>()
+                    .UseInMemoryDatabase($"stub-outbox-{Guid.NewGuid()}")
+                    .Options),
+                NullLogger<TransactionalEmailOutbox>.Instance),
+            NullLogger<PaymentNotificationService>.Instance,
+            CreateEmailLayout());
 
     private sealed class NoOpEmailSender : IEmailSender
     {

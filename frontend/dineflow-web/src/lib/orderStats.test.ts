@@ -5,6 +5,7 @@ import { isOrderPayable } from './orderStats'
 function createOrder(overrides: Partial<AdminOrder>): AdminOrder {
   return {
     id: 'order-1',
+    pendingRefundRequest: null,
     restaurantId: 'restaurant-1',
     restaurantName: 'Central Market Table',
     orderNumber: 'ORD-1001',

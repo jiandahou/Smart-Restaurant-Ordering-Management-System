@@ -4,6 +4,7 @@ using DineFlow.Api.Contracts.Restaurant;
 using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
+using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
@@ -19,6 +20,7 @@ public class RestaurantOperationsController(
     AppDbContext dbContext,
     UserManager<ApplicationUser> userManager,
     RestaurantOperatingHoursService restaurantOperatingHoursService,
+    PlatformBillingPresenter billingPresenter,
     ReportLogWriter reportLogWriter) : ControllerBase
 {
     /// <summary>
@@ -113,7 +115,12 @@ public class RestaurantOperationsController(
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
         return restaurant is null
             ? NotFound(new { message = "Restaurant not found." })
-            : Ok(MapToResponse(restaurant));
+            : Ok(MapToResponse(
+                restaurant,
+                await GetPendingRefundsAsync(id, cancellationToken),
+                await GetRefundsOwedAsync(id, cancellationToken),
+                DateTime.UtcNow,
+                billingPresenter));
     }
 
     [HttpPatch("{id:guid}/auto-accept")]
@@ -148,7 +155,12 @@ public class RestaurantOperationsController(
             before: new { autoAcceptOrders = previousValue },
             after: new { restaurant.AutoAcceptOrders });
         await dbContext.SaveChangesAsync(cancellationToken);
-        return Ok(MapToResponse(restaurant));
+        return Ok(MapToResponse(
+            restaurant,
+            await GetPendingRefundsAsync(id, cancellationToken),
+            await GetRefundsOwedAsync(id, cancellationToken),
+            DateTime.UtcNow,
+            billingPresenter));
     }
 
     private async Task<bool> CanAccessRestaurantAsync(Guid restaurantId)
@@ -168,11 +180,68 @@ public class RestaurantOperationsController(
         return currentUser?.RestaurantId == restaurantId;
     }
 
-    private static RestaurantOperationsResponse MapToResponse(
-        DineFlow.Infrastructure.Restaurant.Restaurant restaurant) => new()
+    /// <summary>
+    /// The refund requests this restaurant still owes an answer on, and the age of the oldest.
+    /// </summary>
+    /// <remarks>
+    /// Scoped the same way the admin refund list scopes itself — on the request's own RestaurantId,
+    /// not the order's — so the number on the bell is the number of rows the page opens with. A
+    /// count assembled a second way is worse than no count: it sends someone to a screen to find
+    /// something that is not there, and after that they stop believing the badge.
+    /// </remarks>
+    private async Task<(int Count, DateTime? OldestCreatedAt)> GetPendingRefundsAsync(
+        Guid restaurantId,
+        CancellationToken cancellationToken)
     {
+        var pending = dbContext.PaymentRefundRequests
+            .AsNoTracking()
+            .Where(request =>
+                request.RestaurantId == restaurantId
+                && request.Status == PaymentRefundRequestStatus.Pending);
+
+        return (
+            await pending.CountAsync(cancellationToken),
+            await pending
+                .OrderBy(request => request.CreatedAt)
+                .Select(request => (DateTime?)request.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken));
+    }
+
+    /// <summary>
+    /// Money this restaurant is holding from customers it turned away.
+    /// </summary>
+    /// <remarks>
+    /// The rule itself lives in <see cref="RefundsOwedQuery"/> beside the one the refund uses, so
+    /// the badge and the refund can never come to disagree about which orders owe money.
+    /// </remarks>
+    private async Task<RefundsOwedQuery.RefundsOwed> GetRefundsOwedAsync(
+        Guid restaurantId,
+        CancellationToken cancellationToken) =>
+        (await RefundsOwedQuery.ByRestaurantAsync(dbContext, [restaurantId], cancellationToken))
+            .GetValueOrDefault(restaurantId, RefundsOwedQuery.RefundsOwed.None);
+
+    private static RestaurantOperationsResponse MapToResponse(
+        DineFlow.Infrastructure.Restaurant.Restaurant restaurant,
+        (int Count, DateTime? OldestCreatedAt) pendingRefunds,
+        RefundsOwedQuery.RefundsOwed refundsOwed,
+        DateTime utcNow,
+        PlatformBillingPresenter billingPresenter) => new()
+    {
+        Billing = billingPresenter.Describe(restaurant, utcNow),
+        PendingRefundRequestCount = pendingRefunds.Count,
+        OldestPendingRefundRequestAt = pendingRefunds.OldestCreatedAt,
+        RefundOwedCount = refundsOwed.Count,
+        RefundOwedAmountCents = refundsOwed.AmountCents,
+        OldestRefundOwedAt = refundsOwed.OldestTakenAt,
         Id = restaurant.Id,
         Name = restaurant.Name,
-        AutoAcceptOrders = restaurant.AutoAcceptOrders
+        AutoAcceptOrders = restaurant.AutoAcceptOrders,
+        StripeConnectStatus = string.IsNullOrWhiteSpace(restaurant.StripeAccountId)
+            ? "NotConnected"
+            : restaurant.StripeChargesEnabled && restaurant.StripePayoutsEnabled
+                ? "Ready"
+                : restaurant.StripeDetailsSubmitted ? "Restricted" : "OnboardingIncomplete",
+        OnlinePaymentsEnabled = restaurant.StripeChargesEnabled &&
+            !string.IsNullOrWhiteSpace(restaurant.StripeAccountId)
     };
 }

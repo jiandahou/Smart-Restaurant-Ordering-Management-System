@@ -15,12 +15,35 @@ public class RefundStatePolicyTests
         Assert.True(RefundStatePolicy.CanApplyProviderStatus(PaymentRefundStatus.Pending, incoming));
     }
 
-    [Theory]
-    [InlineData(PaymentRefundStatus.Pending)]
-    [InlineData(PaymentRefundStatus.Failed)]
-    public void SucceededRefund_NeverRegresses(PaymentRefundStatus incoming)
+    /// <summary>
+    /// A succeeded refund never slides back to pending. Ordering is not guaranteed, and a late
+    /// refund.created must not undo a refund that has gone through.
+    /// </summary>
+    [Fact]
+    public void SucceededRefund_NeverSlidesBackToPending()
     {
-        Assert.False(RefundStatePolicy.CanApplyProviderStatus(PaymentRefundStatus.Succeeded, incoming));
+        Assert.False(RefundStatePolicy.CanApplyProviderStatus(
+            PaymentRefundStatus.Succeeded,
+            PaymentRefundStatus.Pending));
+    }
+
+    /// <summary>
+    /// It does, however, accept a later failure.
+    /// </summary>
+    /// <remarks>
+    /// This test used to assert the opposite, and in asserting it, kept a real defect in place:
+    /// Stripe calls a refund succeeded once it has sent the money on, and the customer's bank can
+    /// reject it days later. Refusing that refund.failed left the record claiming a customer had been
+    /// refunded when they had not, with the refundable balance spent so nobody could try again.
+    /// Ordering is handled by the refund's own provider event clock, not by refusing the provider's
+    /// own correction.
+    /// </remarks>
+    [Fact]
+    public void SucceededRefund_AcceptsALaterFailureBecauseStripeIsAuthoritative()
+    {
+        Assert.True(RefundStatePolicy.CanApplyProviderStatus(
+            PaymentRefundStatus.Succeeded,
+            PaymentRefundStatus.Failed));
     }
 
     [Fact]

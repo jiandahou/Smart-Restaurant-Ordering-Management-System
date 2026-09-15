@@ -41,6 +41,19 @@ public sealed class PrintJobResponse
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
+
+    /// <summary>
+    /// Which station and printer this ticket was meant for.
+    /// </summary>
+    /// <remarks>
+    /// A kitchen has more than one printer, and "a ticket failed" is not actionable until someone
+    /// knows which machine to go and look at. The job has always known — the station was on the
+    /// entity and simply never loaded or sent.
+    /// </remarks>
+    public string? StationName { get; set; }
+
+    public string? PrinterName { get; set; }
+
     public AdminOrderResponse Order { get; set; } = new();
 }
 

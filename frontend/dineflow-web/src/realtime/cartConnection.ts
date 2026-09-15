@@ -6,7 +6,6 @@ import {
 } from '@microsoft/signalr'
 import type { Cart, SubmittedOrder } from '@/api/carts'
 
-const realtimeBaseUrl = (import.meta.env.VITE_SIGNALR_BASE_URL || '').replace(/\/$/, '')
 
 export type CartRealtimeUpdate = {
   reason: string
@@ -45,7 +44,7 @@ export function createCartRealtimeClient(
   handlers: CartRealtimeHandlers,
 ): CartRealtimeClient {
   const connection = new HubConnectionBuilder()
-    .withUrl(`${realtimeBaseUrl}/api/hubs/carts`)
+    .withUrl('/api/hubs/carts')
     .withAutomaticReconnect([0, 2_000, 5_000, 10_000, 30_000])
     .configureLogging(LogLevel.Warning)
     .build()

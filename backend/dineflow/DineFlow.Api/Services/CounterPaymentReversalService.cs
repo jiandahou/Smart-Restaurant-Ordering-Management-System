@@ -21,6 +21,7 @@ public sealed record CounterReversalResult(bool IsSuccess, int StatusCode, strin
 public sealed class CounterPaymentReversalService(
     AppDbContext dbContext,
     OrderRealtimeNotifier orderRealtimeNotifier,
+    RefundedOrderCloser refundedOrderCloser,
     ReportLogWriter reportLogWriter,
     ILogger<CounterPaymentReversalService> logger)
 {
@@ -177,8 +178,11 @@ public sealed class CounterPaymentReversalService(
             UpdatedAt = now,
             RefundedAt = now
         };
+        // Added to the context only. The refund already names its payment, so EF puts it into that
+        // payment's collection itself — adding it again put the same refund in there twice, and
+        // anything that summed the collection in this same unit of work read double. A partial
+        // refund then looked like a full one.
         dbContext.PaymentRefunds.Add(refund);
-        payment.Refunds.Add(refund);
 
         var totalRefunded = alreadyRefunded + amountCents;
         payment.Status = totalRefunded >= payment.AmountCents
@@ -187,6 +191,13 @@ public sealed class CounterPaymentReversalService(
         payment.UpdatedAt = now;
         order.PaymentStatus = payment.Status;
         order.UpdatedAt = now;
+
+        // Money handed back at the counter settles an order the same way money returned through
+        // Stripe does, so it goes through the same rule: an order refunded in full before anything
+        // left the pass is off, and the portions it reserved go back with it. One refunded after
+        // the food exists keeps its history, because rewriting that as cancelled would record a day
+        // the kitchen did not have. Inside this transaction, so the money and the food agree.
+        await refundedOrderCloser.CloseIfFullyRefundedAsync(order, actorUserId, now, cancellationToken);
 
         reportLogWriter.AddAudit(
             "Payment.CounterRefunded",

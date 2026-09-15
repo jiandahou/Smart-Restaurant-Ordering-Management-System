@@ -54,7 +54,7 @@ export function ForgotPasswordPage() {
       <Card className="login-card">
         <CardHeader>
           <p className="eyebrow">DineFlow</p>
-          <CardTitle>Reset password</CardTitle>
+          <CardTitle asChild><h1>Reset password</h1></CardTitle>
           <CardDescription>Enter your customer account email and check your inbox.</CardDescription>
         </CardHeader>
         <CardContent>

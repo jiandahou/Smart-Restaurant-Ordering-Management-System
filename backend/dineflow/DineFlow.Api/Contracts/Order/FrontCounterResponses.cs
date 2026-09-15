@@ -12,6 +12,29 @@ public sealed class FrontCounterListRequest
     public int PageSize { get; set; } = 100;
 }
 
+/// <summary>
+/// Counter payments recent enough to still be put right.
+/// </summary>
+/// <remarks>
+/// Completing a pickup takes the order out of the counter's working lists, and the reversal controls
+/// live on those lists — so the moment an order was finished, the payment taken for it could no
+/// longer be reached from this screen at all. The endpoints were always there; nothing led to them.
+/// The customer who comes back two minutes later saying they were charged twice is the ordinary
+/// case, and it happens after the pickup, not before.
+/// </remarks>
+public sealed class FrontCounterRecentPaymentsResponse
+{
+    public DateTime GeneratedAt { get; set; }
+
+    /// <summary>How far back this list reaches, so the screen can say so rather than imply "all".</summary>
+    public int WindowHours { get; set; }
+
+    /// <summary>Matching transactions in the window, whether or not the pickup is finished.</summary>
+    public int TotalOrders { get; set; }
+
+    public IReadOnlyList<AdminOrderResponse> Orders { get; set; } = [];
+}
+
 public sealed class FrontCounterTakeawayResponse
 {
     public DateTime GeneratedAt { get; set; }
@@ -46,6 +69,14 @@ public class FrontCounterTableSummaryResponse
     public Guid RestaurantId { get; set; }
 
     public string RestaurantName { get; set; } = string.Empty;
+    public string RestaurantLegalBusinessName { get; set; } = string.Empty;
+    public string? RestaurantAbn { get; set; }
+    public bool RestaurantGstRegistered { get; set; }
+    public bool RestaurantPricesIncludeGst { get; set; }
+    public string RestaurantAddress { get; set; } = string.Empty;
+    public string RestaurantPhone { get; set; } = string.Empty;
+    public string RestaurantRefundContactEmail { get; set; } = string.Empty;
+    public string? RestaurantCustomerSurchargeNotice { get; set; }
 
     public Guid TableId { get; set; }
 
@@ -128,6 +159,9 @@ public sealed class FrontCounterMergedItemResponse
     public string ItemName { get; set; } = string.Empty;
 
     public int Quantity { get; set; }
+
+    /// Menu price for one unit before any option adjustments.
+    public decimal BasePriceSnapshot { get; set; }
 
     public decimal UnitPrice { get; set; }
 

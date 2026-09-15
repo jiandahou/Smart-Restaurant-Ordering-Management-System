@@ -21,6 +21,7 @@ public sealed class StripeOrderCheckoutService
     private readonly IStripeClient _stripeClient;
     private readonly StripeOptions _stripeOptions;
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
+    private readonly PaymentSyncService _paymentSyncService;
     private readonly ReportLogWriter _reportLogWriter;
     private readonly ILogger<StripeOrderCheckoutService> _logger;
 
@@ -29,6 +30,7 @@ public sealed class StripeOrderCheckoutService
         IStripeClient stripeClient,
         IOptions<StripeOptions> stripeOptions,
         OrderRealtimeNotifier orderRealtimeNotifier,
+        PaymentSyncService paymentSyncService,
         ReportLogWriter reportLogWriter,
         ILogger<StripeOrderCheckoutService> logger)
     {
@@ -36,6 +38,7 @@ public sealed class StripeOrderCheckoutService
         _stripeClient = stripeClient;
         _stripeOptions = stripeOptions.Value;
         _orderRealtimeNotifier = orderRealtimeNotifier;
+        _paymentSyncService = paymentSyncService;
         _reportLogWriter = reportLogWriter;
         _logger = logger;
     }
@@ -131,26 +134,10 @@ public sealed class StripeOrderCheckoutService
             return StripeCheckoutStartResult.Failure(StatusCodes.Status400BadRequest, "Order has no items to pay for.");
         }
 
-        if (order.PaymentStatus is PaymentStatus.Paid
-            or PaymentStatus.Refunded
-            or PaymentStatus.PartiallyRefunded
-            or PaymentStatus.NotRequired)
+        var refusal = OnlineCheckoutEligibility.Refuse(order.Status, order.PaymentStatus, order.PaymentMethod);
+        if (refusal is not null)
         {
-            return StripeCheckoutStartResult.Failure(StatusCodes.Status409Conflict, "This order cannot be paid online.");
-        }
-
-        if (order.PaymentMethod != PaymentMethod.Online)
-        {
-            return StripeCheckoutStartResult.Failure(
-                StatusCodes.Status409Conflict,
-                "This order is configured for payment at the counter.");
-        }
-
-        if (order.Status is OrderStatus.Cancelled or OrderStatus.Rejected)
-        {
-            return StripeCheckoutStartResult.Failure(
-                StatusCodes.Status400BadRequest,
-                "Cancelled or rejected orders cannot be paid.");
+            return StripeCheckoutStartResult.Failure(StatusCodes.Status409Conflict, refusal);
         }
 
         var restaurant = order.Restaurant;
@@ -193,11 +180,25 @@ public sealed class StripeOrderCheckoutService
             if (reuse == CheckoutSessionReuse.AlreadyCompleted)
             {
                 // Stripe already took payment and we simply have not processed the webhook yet.
-                // Minting a second session here is how customers get charged twice.
+                // Reconcile immediately so "refresh" is an actual recovery path, while still
+                // refusing to mint the second session that could charge the customer twice.
+                var syncResult = await _paymentSyncService.SyncCheckoutSessionAsync(
+                    payment,
+                    actorUserId: null,
+                    cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
+
+                if (!syncResult.IsSuccess)
+                {
+                    return StripeCheckoutStartResult.Failure(
+                        syncResult.StatusCode,
+                        "This order has already been paid, but its local status could not be refreshed yet.",
+                        syncResult.Message);
+                }
+
                 return StripeCheckoutStartResult.Failure(
                     StatusCodes.Status409Conflict,
-                    "This order has already been paid. Refresh to see the updated payment status.");
+                    "Payment confirmed. The order status has been updated.");
             }
 
             if (reuse == CheckoutSessionReuse.Indeterminate)
@@ -261,6 +262,11 @@ public sealed class StripeOrderCheckoutService
             Mode = "payment",
             SuccessUrl = AppendSessionId(AddReturnTo(_stripeOptions.SuccessUrl, returnTo)),
             CancelUrl = AddReturnTo(_stripeOptions.CancelUrl, returnTo),
+            // Bounded on purpose. Stripe's default leaves the link payable for 24 hours, long after
+            // the kitchen has closed on the order it belongs to. Deliberately no AfterExpiration:
+            // Stripe's recovery URL mints a second payable session this service cannot see, and the
+            // reuse guard above exists precisely so one order never has two live checkouts.
+            ExpiresAt = HostedCheckoutExpiry.ExpiresAt(DateTime.UtcNow),
             CustomerEmail = string.IsNullOrWhiteSpace(customerEmail) ? null : customerEmail.Trim(),
             LineItems = order.OrderItems
                 .OrderBy(item => item.CreatedAt)
@@ -386,7 +392,7 @@ public sealed class StripeOrderCheckoutService
             : QueryHelpers.AddQueryString(url, "returnTo", returnTo);
 
     private static string AppendSessionId(string url) =>
-        QueryHelpers.AddQueryString(url, "session_id", "{CHECKOUT_SESSION_ID}");
+        StripeCheckoutReturnUrl.WithSessionId(url);
 }
 
 public sealed record StripeCheckoutStartResult(

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, beforeEach } from 'vitest'
 import {
   createDefaultLayout,
   cycleSize,
@@ -8,6 +8,9 @@ import {
   reorderLayout,
   setWidgetSize,
   type DashboardWidget,
+  loadStoredLayout,
+  mergeForStorage,
+  type DashboardLayout,
 } from './dashboardLayout'
 
 function widget(id: string, allowedSizes: DashboardWidget['allowedSizes']): DashboardWidget {
@@ -161,5 +164,97 @@ describe('moveVisibleWidget', () => {
   it('does nothing at the beginning or end', () => {
     expect(moveVisibleWidget(layout, 'alpha', -1)).toBe(layout)
     expect(moveVisibleWidget(layout, 'gamma', 1)).toBe(layout)
+  })
+})
+
+describe('reading a stored layout', () => {
+  const scope = 'user-a'
+  const key = dashboardStorageKey(scope)
+  const legacyKey = 'dineflow.dashboard.layout.v2'
+  const layout = [{ id: 'recent-orders', w: 2, h: 1, hidden: true }]
+
+  beforeEach(() => {
+    window.localStorage.clear()
+  })
+
+  it('prefers this account over the shared legacy key', () => {
+    window.localStorage.setItem(key, JSON.stringify(layout))
+    window.localStorage.setItem(legacyKey, JSON.stringify([{ id: 'public-urls', w: 1, h: 1, hidden: false }]))
+
+    expect(loadStoredLayout(scope)).toEqual(layout)
+  })
+
+  /**
+   * The legacy key is unscoped, so it belongs to whoever last used this browser. It was read as a
+   * fallback by every account that had no layout of its own, so one person's hidden widgets kept
+   * reappearing on their colleague's dashboard.
+   */
+  it('claims the legacy layout once and removes it', () => {
+    window.localStorage.setItem(legacyKey, JSON.stringify(layout))
+
+    expect(loadStoredLayout(scope)).toEqual(layout)
+    expect(window.localStorage.getItem(key)).not.toBeNull()
+    expect(window.localStorage.getItem(legacyKey)).toBeNull()
+  })
+
+  it('leaves the next account to start from defaults', () => {
+    window.localStorage.setItem(legacyKey, JSON.stringify(layout))
+    loadStoredLayout('user-a')
+
+    expect(loadStoredLayout('user-b')).toBeNull()
+  })
+
+  it.each([
+    ['not JSON at all', '{oops'],
+    ['a JSON object', '{"id":"recent-orders"}'],
+    ['a JSON string', '"recent-orders"'],
+    ['an empty array', '[]'],
+    ['entries of the wrong shape', '[{"id":1,"w":"wide"}]'],
+  ])('treats %s as no preference', (_label, raw) => {
+    window.localStorage.setItem(key, raw)
+
+    expect(loadStoredLayout(scope)).toBeNull()
+  })
+
+  it('keeps the entries it can read when only some are malformed', () => {
+    window.localStorage.setItem(key, JSON.stringify([layout[0], { id: 5 }, null]))
+
+    expect(loadStoredLayout(scope)).toEqual(layout)
+  })
+})
+
+describe('deciding what to persist', () => {
+  /**
+   * The registry is incomplete on first render — the schedule widgets appear only once the
+   * restaurant list resolves — and reconciling drops what it does not recognise. Saving that
+   * reconciled value erased those widgets' preferences on every reload.
+   */
+  it('keeps entries for widgets that have not registered yet', () => {
+    const onScreen: DashboardLayout = [{ id: 'public-urls', w: 1, h: 1, hidden: false }]
+    const stored: DashboardLayout = [
+      { id: 'public-urls', w: 1, h: 1, hidden: false },
+      { id: 'opening-hours', w: 2, h: 2, hidden: true },
+      { id: 'special-calendar', w: 1, h: 1, hidden: true },
+    ]
+
+    expect(mergeForStorage(onScreen, stored)).toEqual([
+      { id: 'public-urls', w: 1, h: 1, hidden: false },
+      { id: 'opening-hours', w: 2, h: 2, hidden: true },
+      { id: 'special-calendar', w: 1, h: 1, hidden: true },
+    ])
+  })
+
+  it('lets the on-screen value win for a widget that is present', () => {
+    const onScreen: DashboardLayout = [{ id: 'public-urls', w: 2, h: 2, hidden: true }]
+    const stored: DashboardLayout = [{ id: 'public-urls', w: 1, h: 1, hidden: false }]
+
+    expect(mergeForStorage(onScreen, stored)).toEqual(onScreen)
+  })
+
+  it('is the layout itself when nothing was stored', () => {
+    const onScreen: DashboardLayout = [{ id: 'public-urls', w: 1, h: 1, hidden: false }]
+
+    expect(mergeForStorage(onScreen, null)).toEqual(onScreen)
+    expect(mergeForStorage(onScreen, [])).toEqual(onScreen)
   })
 })

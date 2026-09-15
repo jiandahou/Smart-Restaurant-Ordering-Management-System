@@ -24,19 +24,31 @@ public static class GuestAccessTokenService
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token))).ToLowerInvariant();
 
     /// <summary>
-    /// Compared in fixed time so the API cannot be used as an oracle to recover a token byte by
-    /// byte. A null or blank stored hash means the order predates guest tokens — those stay
-    /// readable by id so existing customers do not lose access mid-order. Tighten this once the
-    /// pre-token orders have aged out.
+    /// Whether the caller holds the secret this order was issued.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Compared in fixed time so the API cannot be used as an oracle to recover a token byte by
+    /// byte.
+    /// </para>
+    /// <para>
+    /// A blank stored hash means no credential was ever issued for this order, which was true of
+    /// the guest orders placed in the days before tokens existed. Those were let through on the
+    /// order id alone so customers mid-order did not lose access, with the note that it should be
+    /// tightened once they had aged out. They have: the last of them was placed on 8 August 2026,
+    /// and nine remain. Until now the id alone authorised reading an order and filing a refund
+    /// request against it — an order id is a thing that ends up in browser histories, screenshots
+    /// and shared links, and it is not a credential.
+    /// </para>
+    /// <para>
+    /// Signed-in customers are unaffected: their orders carry no hash either, and every caller
+    /// checks ownership against the account first and only reaches this when there is no account
+    /// behind the order at all.
+    /// </para>
+    /// </remarks>
     public static bool IsAuthorized(string? storedHash, string? providedToken)
     {
-        if (string.IsNullOrWhiteSpace(storedHash))
-        {
-            return true;
-        }
-
-        if (string.IsNullOrWhiteSpace(providedToken))
+        if (string.IsNullOrWhiteSpace(storedHash) || string.IsNullOrWhiteSpace(providedToken))
         {
             return false;
         }

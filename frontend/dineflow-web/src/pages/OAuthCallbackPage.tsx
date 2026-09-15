@@ -4,10 +4,10 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { exchangeOAuthCode } from '../auth/authSlice'
 import { Button } from '../components/ui/button'
+import { resolvePostLoginDestination } from '../auth/postLoginDestination'
+import { getSafeMenuReturnPath } from '../lib/customerMenuNavigation'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { useAppDispatch } from '../hooks'
-
-const adminRoles = ['PlatformOwner', 'RestaurantOwner', 'Admin']
 
 const PROVIDER_LABELS: Record<string, string> = {
   google: 'Google',
@@ -20,33 +20,68 @@ export function OAuthCallbackPage() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const dispatch = useAppDispatch()
-  const [state, setState] = useState<OAuthState>('checking')
   const exchangeStartedRef = useRef(false)
 
   const rawProvider = searchParams.get('provider') ?? 'google'
   const providerLabel = PROVIDER_LABELS[rawProvider] ?? rawProvider
-  const [message, setMessage] = useState(`Finishing ${providerLabel} sign-in...`)
+  // Whether there is a code to exchange is fixed by the callback URL, so it is derived for the
+  // first render rather than rendered as "checking" and then corrected by an effect.
+  const oauthCode = searchParams.get('code')
+  /**
+   * Where the customer was before the provider took over the tab.
+   *
+   * <p>
+   * Checked here rather than trusted: the value has been round-tripped through Google or Facebook,
+   * so it arrives as something outside this app has had a chance to influence. `getSafeMenuReturnPath`
+   * accepts only a menu path on this origin, which is also what keeps a "sign in to keep ordering"
+   * link from becoming a way into an admin screen.
+   * </p>
+   */
+  const menuReturnPath = getSafeMenuReturnPath(searchParams.get('returnTo'))
+  const [state, setState] = useState<OAuthState>(oauthCode ? 'checking' : 'error')
+  const [message, setMessage] = useState(
+    oauthCode
+      ? `Finishing ${providerLabel} sign-in...`
+      : `${providerLabel} sign-in is missing required information.`,
+  )
 
   useEffect(() => {
-    if (exchangeStartedRef.current) {
+    if (exchangeStartedRef.current || !oauthCode) {
       return
     }
 
     exchangeStartedRef.current = true
-    const code = searchParams.get('code')
-
-    if (!code) {
-      setState('error')
-      setMessage(`${providerLabel} sign-in is missing required information.`)
-      return
-    }
-
-    const oauthCode = code
+    const code = oauthCode
 
     async function run() {
       try {
-        const response = await dispatch(exchangeOAuthCode({ code: oauthCode })).unwrap()
-        const destination = response.user.roles.some((role) => adminRoles.includes(role)) ? '/admin/users' : '/me'
+        const response = await dispatch(exchangeOAuthCode({ code })).unwrap()
+
+        // The account asks for a second factor at sign-in, and the provider is only the first.
+        // The login page already knows how to run the challenge, so it is handed over rather than
+        // duplicated here.
+        if ('mfaRequired' in response) {
+          setState('success')
+          setMessage('Extra verification is required to finish signing in.')
+          // The return path goes in the query, not router state: the login page reads it from there,
+          // and finishing a second factor must not be what loses the menu the customer came from.
+          navigate(
+            menuReturnPath ? `/login?returnTo=${encodeURIComponent(menuReturnPath)}` : '/login',
+            {
+              replace: true,
+              state: {
+                mfaChallenge: {
+                  challengeId: response.challengeId,
+                  methods: response.methods,
+                  preferredMethod: response.preferredMethod,
+                },
+              },
+            },
+          )
+          return
+        }
+
+        const destination = menuReturnPath ?? resolvePostLoginDestination(response.user.roles)
 
         setState('success')
         setMessage(response.message)
@@ -65,14 +100,14 @@ export function OAuthCallbackPage() {
     }
 
     void run()
-  }, [dispatch, navigate, providerLabel, searchParams])
+  }, [dispatch, menuReturnPath, navigate, oauthCode, providerLabel])
 
   return (
     <main className="login-screen">
       <Card className="login-card">
         <CardHeader>
           <p className="eyebrow">DineFlow</p>
-          <CardTitle>{providerLabel} sign-in</CardTitle>
+          <CardTitle asChild><h1>{providerLabel} sign-in</h1></CardTitle>
           <CardDescription>{message}</CardDescription>
         </CardHeader>
         <CardContent className="form-grid">

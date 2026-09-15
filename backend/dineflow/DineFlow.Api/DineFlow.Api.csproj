@@ -31,4 +31,13 @@
     <ProjectReference Include="..\DineFlow.Infrastructure\DineFlow.Infrastructure.csproj" />
   </ItemGroup>
 
+  <!-- Pinned to clear GHSA-qj66-m88j-hmgj and GHSA-8g4q-xg66-9fp4. Both arrive transitively at
+       vulnerable versions (8.0.0 / 8.0.4), so an explicit reference is the only way to raise them
+       without moving off the .NET 8 LTS line. Keep in step across every project in the solution;
+       `dotnet list package` with the vulnerable and transitive switches is the check. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="8.0.1" />
+    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+  </ItemGroup>
+
 </Project>

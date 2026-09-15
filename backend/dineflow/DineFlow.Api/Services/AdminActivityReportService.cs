@@ -250,8 +250,38 @@ public sealed class AdminActivityReportService(AppDbContext dbContext)
             .ToListAsync(cancellationToken);
         var failedPayments = await failedPaymentsQuery.CountAsync(cancellationToken);
 
+        // Paid, still Pending, right now — not scoped to today, because an order stranded
+        // yesterday evening is exactly the one worth surfacing.
+        var awaitingAcceptance = await ScopeOrders(
+                dbContext.Orders.AsNoTracking(),
+                currentRestaurantId,
+                requestedRestaurantId,
+                isPlatformOwner)
+            .Where(order =>
+                order.Status == OrderStatus.Pending &&
+                (order.PaymentStatus == PaymentStatus.Paid ||
+                    order.PaymentStatus == PaymentStatus.PartiallyRefunded))
+            .Select(order => new
+            {
+                order.CreatedAt,
+                PaidAt = order.Payments
+                    .Where(payment => payment.PaidAt.HasValue)
+                    .Max(payment => payment.PaidAt)
+            })
+            .ToListAsync(cancellationToken);
+
+        var nowUtc = DateTime.UtcNow;
+        var acceptanceWaits = awaitingAcceptance
+            .Select(order => OrderAcceptancePolicy.WaitedForAcceptance(order.PaidAt, order.CreatedAt, nowUtc))
+            .ToList();
+
         return new ActivitySummaryResponse
         {
+            OrdersAwaitingAcceptance = acceptanceWaits.Count,
+            OrdersOverdueForAcceptance = acceptanceWaits.Count(OrderAcceptancePolicy.IsOverdue),
+            LongestAcceptanceWaitMinutes = acceptanceWaits.Count == 0
+                ? null
+                : (int)Math.Floor(acceptanceWaits.Max().TotalMinutes),
             TimeZone = timeZone.Id,
             ActivityCountToday = auditCount + orderCount + paymentEventCount,
             CompletedOrdersToday = completedOrders,
@@ -302,13 +332,13 @@ public sealed class AdminActivityReportService(AppDbContext dbContext)
         var search = request.Search?.Trim();
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var pattern = $"%{search}%";
+            var pattern = SearchPattern.Contains(search);
             query = query.Where(log =>
-                EF.Functions.ILike(log.Action, pattern) ||
-                EF.Functions.ILike(log.EntityType, pattern) ||
-                (log.EntityId != null && EF.Functions.ILike(log.EntityId, pattern)) ||
-                (log.Summary != null && EF.Functions.ILike(log.Summary, pattern)) ||
-                (log.ActorEmail != null && EF.Functions.ILike(log.ActorEmail, pattern)));
+                EF.Functions.ILike(log.Action, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(log.EntityType, pattern, SearchPattern.EscapeCharacter) ||
+                (log.EntityId != null && EF.Functions.ILike(log.EntityId, pattern, SearchPattern.EscapeCharacter)) ||
+                (log.Summary != null && EF.Functions.ILike(log.Summary, pattern, SearchPattern.EscapeCharacter)) ||
+                (log.ActorEmail != null && EF.Functions.ILike(log.ActorEmail, pattern, SearchPattern.EscapeCharacter)));
         }
 
         return query;
@@ -342,12 +372,12 @@ public sealed class AdminActivityReportService(AppDbContext dbContext)
         var search = request.Search?.Trim();
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var pattern = $"%{search}%";
+            var pattern = SearchPattern.Contains(search);
             query = query.Where(log =>
-                EF.Functions.ILike(log.EventType, pattern) ||
-                EF.Functions.ILike(log.Message, pattern) ||
-                EF.Functions.ILike(log.OrderNumber, pattern) ||
-                (log.ActorDisplayName != null && EF.Functions.ILike(log.ActorDisplayName, pattern)));
+                EF.Functions.ILike(log.EventType, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(log.Message, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(log.OrderNumber, pattern, SearchPattern.EscapeCharacter) ||
+                (log.ActorDisplayName != null && EF.Functions.ILike(log.ActorDisplayName, pattern, SearchPattern.EscapeCharacter)));
         }
 
         return query;
@@ -380,14 +410,14 @@ public sealed class AdminActivityReportService(AppDbContext dbContext)
         var search = request.Search?.Trim();
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var pattern = $"%{search}%";
+            var pattern = SearchPattern.Contains(search);
             query = query.Where(log =>
-                EF.Functions.ILike(log.EventType, pattern) ||
-                EF.Functions.ILike(log.Message, pattern) ||
-                EF.Functions.ILike(log.Provider, pattern) ||
-                (log.Status != null && EF.Functions.ILike(log.Status, pattern)) ||
-                (log.OrderNumber != null && EF.Functions.ILike(log.OrderNumber, pattern)) ||
-                (log.ActorDisplayName != null && EF.Functions.ILike(log.ActorDisplayName, pattern)));
+                EF.Functions.ILike(log.EventType, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(log.Message, pattern, SearchPattern.EscapeCharacter) ||
+                EF.Functions.ILike(log.Provider, pattern, SearchPattern.EscapeCharacter) ||
+                (log.Status != null && EF.Functions.ILike(log.Status, pattern, SearchPattern.EscapeCharacter)) ||
+                (log.OrderNumber != null && EF.Functions.ILike(log.OrderNumber, pattern, SearchPattern.EscapeCharacter)) ||
+                (log.ActorDisplayName != null && EF.Functions.ILike(log.ActorDisplayName, pattern, SearchPattern.EscapeCharacter)));
         }
 
         return query;
@@ -437,11 +467,13 @@ public sealed class AdminActivityReportService(AppDbContext dbContext)
             Status = NormalizeStatus(status),
             AmountCents = amountCents,
             Currency = currency,
-            CorrelationId = item.CorrelationId ??
-                            item.ProviderEventId ??
-                            item.PaymentId?.ToString() ??
-                            item.OrderId?.ToString() ??
-                            item.SubjectId,
+            CorrelationId = includeTechnicalDetails
+                ? item.CorrelationId ??
+                  item.ProviderEventId ??
+                  item.PaymentId?.ToString() ??
+                  item.OrderId?.ToString() ??
+                  item.SubjectId
+                : null,
             TechnicalJson = includeTechnicalDetails ? item.TechnicalJson : null
         };
     }
@@ -471,6 +503,7 @@ public sealed class AdminActivityReportService(AppDbContext dbContext)
             "counter.recorded" => $"recorded a counter payment for {order}.",
             "checkout_session.created" => $"created a Stripe checkout session for {order}.",
             "checkout_session.failed" => $"could not create a Stripe checkout session for {order}.",
+            "checkout_session.expired" => $"closed the Stripe checkout session for {order} without payment.",
             "checkout.session.completed" when amount is not null => $"confirmed receipt of {amount} for {order}.",
             "checkout.session.completed" => $"confirmed payment for {order}.",
             "payment_intent.payment_failed" => $"reported a failed payment for {order}.",
@@ -595,6 +628,7 @@ public sealed class AdminActivityReportService(AppDbContext dbContext)
         "counter.recorded" => "Counter payment received",
         "checkout_session.created" => "Checkout started",
         "checkout_session.failed" => "Checkout failed",
+        "checkout_session.expired" => "Checkout expired",
         "checkout.session.completed" => "Payment received",
         "payment_intent.payment_failed" => "Payment failed",
         "refund.requested" => "Refund requested",
@@ -898,6 +932,18 @@ public sealed class AdminActivityReportService(AppDbContext dbContext)
     {
         if (!isPlatformOwner) query = query.Where(log => log.RestaurantId == currentRestaurantId);
         return requestedRestaurantId.HasValue ? query.Where(log => log.RestaurantId == requestedRestaurantId) : query;
+    }
+
+    private static IQueryable<Order> ScopeOrders(
+        IQueryable<Order> query,
+        Guid? currentRestaurantId,
+        Guid? requestedRestaurantId,
+        bool isPlatformOwner)
+    {
+        if (!isPlatformOwner) query = query.Where(order => order.RestaurantId == currentRestaurantId);
+        return requestedRestaurantId.HasValue
+            ? query.Where(order => order.RestaurantId == requestedRestaurantId)
+            : query;
     }
 
     private static IQueryable<Payment> ScopePayments(

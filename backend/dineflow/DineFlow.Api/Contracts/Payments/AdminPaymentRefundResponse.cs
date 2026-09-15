@@ -22,6 +22,10 @@ public sealed class AdminPaymentRefundResponse
 
     public string? RequestedByUserId { get; set; }
 
+    public long UnattributedAmountCents { get; set; }
+
+    public List<AdminPaymentRefundItemResponse> Items { get; set; } = [];
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime? UpdatedAt { get; set; }
@@ -29,4 +33,25 @@ public sealed class AdminPaymentRefundResponse
     public DateTime? RefundedAt { get; set; }
 
     public DateTime? FailedAt { get; set; }
+}
+
+public sealed class AdminPaymentRefundItemResponse
+{
+    public Guid OrderItemId { get; set; }
+
+    /// <summary>
+    /// The extra this refund was for, when it was for one.
+    /// </summary>
+    /// <remarks>
+    /// Without it a refund history showing "1 × Chicken Wings — 0.74" reads as the whole plate
+    /// returned for 74 cents rather than the sauce on it, which is the one thing the record exists
+    /// to make clear.
+    /// </remarks>
+    public string? OptionNameSnapshot { get; set; }
+
+    public string MenuItemNameSnapshot { get; set; } = string.Empty;
+
+    public int Quantity { get; set; }
+
+    public long AmountCents { get; set; }
 }

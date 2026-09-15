@@ -83,6 +83,14 @@ public sealed class ActivitySummaryResponse
     public IReadOnlyList<ActivityMoneyTotalResponse> PaymentsReceivedToday { get; set; } = [];
 
     public IReadOnlyList<ActivityMoneyTotalResponse> RefundsSucceededToday { get; set; } = [];
+
+    // FS-017. Live rather than daily: the question is whether a customer is being left waiting
+    // right now, having already paid, on an order no one in the restaurant has accepted.
+    public int OrdersAwaitingAcceptance { get; set; }
+
+    public int OrdersOverdueForAcceptance { get; set; }
+
+    public int? LongestAcceptanceWaitMinutes { get; set; }
 }
 
 public sealed class ActivityMoneyTotalResponse
@@ -107,4 +115,22 @@ public sealed class ReportPolicyResponse
     public bool LogsAreImmutable { get; set; }
 
     public bool SensitiveTechnicalDetailsRequirePlatformOwner { get; set; }
+
+    public bool RetentionEnforcementConfigured { get; set; }
+
+    public bool LegalHoldWorkflowConfigured { get; set; }
+
+    public bool RestoreDrillCurrent { get; set; }
+
+    /// <summary>
+    /// How long ago the last restore drill was declared, or null when none has been.
+    /// </summary>
+    /// <remarks>
+    /// The gate only asks whether a drill happened within a year, so a drill from three hundred and
+    /// sixty-four days ago reads exactly like one from yesterday. Whoever has to arrange the next one
+    /// needs the number, not the boolean.
+    /// </remarks>
+    public int? RestoreDrillAgeDays { get; set; }
+
+    public string RetentionStatus { get; set; } = string.Empty;
 }

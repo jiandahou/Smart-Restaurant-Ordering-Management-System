@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import type { AdminOrder } from '@/api/auth'
+import type { AdminOrder, AdminPayment } from '@/api/auth'
 import {
   canStaffProcessOrder,
   getStaffDestructiveActions,
   getStaffPaymentMessage,
   getStaffPaymentState,
   getStaffPrimaryAction,
+  getStaffRecoveryAction,
   hasSafetyNote,
   isCarriedOverOrder,
   isStaffPaymentHold,
@@ -14,6 +15,7 @@ import {
 function order(overrides: Partial<AdminOrder> = {}): AdminOrder {
   return {
     id: 'order-1',
+    pendingRefundRequest: null,
     restaurantId: 'restaurant-1',
     restaurantName: 'Central Market Table',
     currency: 'AUD',
@@ -45,9 +47,14 @@ function order(overrides: Partial<AdminOrder> = {}): AdminOrder {
       menuItemId: 'menu-1',
       itemNameSnapshot: 'Market Arancini',
       quantity: 1,
+      basePriceSnapshot: 24,
       unitPrice: 24,
-      totalPrice: 24,
-      note: null,
+            totalPrice: 24,
+            refundedAmountCents: 0,
+            refundableAmountCents: 2400,
+            refundedQuantity: 0,
+            refundableQuantity: 2,
+            note: null,
       selectedOptions: [],
     }],
     ...overrides,
@@ -103,5 +110,178 @@ describe('staff order management helpers', () => {
     expect(isCarriedOverOrder(order({ status: 'Completed' }), now)).toBe(false)
     expect(hasSafetyNote(order({ customerNote: 'Tree nut allergy' }))).toBe(true)
     expect(hasSafetyNote(order({ customerNote: 'Extra napkins' }))).toBe(false)
+  })
+})
+
+/**
+ * Putting a finished order back into service.
+ *
+ * <p>
+ * The server offers <code>Reopen</code> on every terminal order and the screen offered it on none:
+ * eighty-six closed cards, zero buttons. An order cancelled by mistake had no way back.
+ * </p>
+ */
+describe('reopening a finished order', () => {
+  const terminal = ['Completed', 'Cancelled', 'Rejected'] as const
+
+  it.each(terminal)('offers it on a %s order the server will reopen', (status) => {
+    expect(getStaffRecoveryAction(order({ status, availableActions: ['Reopen'] }))).toBe('Reopen')
+  })
+
+  /**
+   * Whether an order may be reopened is the server's call — reopening a completed order needs the
+   * payment to be settled, and it withholds the action when it is not. The screen follows that list
+   * rather than keeping a second opinion that could disagree with it.
+   */
+  it.each(terminal)('offers nothing on a %s order the server withheld it from', (status) => {
+    expect(getStaffRecoveryAction(order({ status, availableActions: [] }))).toBeNull()
+  })
+
+  it('offers nothing while the order is still running', () => {
+    expect(getStaffRecoveryAction(order({ status: 'Preparing', availableActions: ['MarkReady', 'Cancel'] }))).toBeNull()
+  })
+
+  /** An order fetched without its actions is not an order with none — it says nothing either way. */
+  it('offers nothing when the server said nothing', () => {
+    expect(getStaffRecoveryAction(order({ status: 'Cancelled', availableActions: undefined }))).toBeNull()
+  })
+
+  /** Reopening is a correction, not the order's next step, so it stays out of the primary slot. */
+  it('does not become the primary action', () => {
+    const closed = order({ status: 'Cancelled', availableActions: ['Reopen'] })
+
+    expect(getStaffPrimaryAction(closed)).toBeNull()
+    expect(getStaffDestructiveActions(closed)).toEqual([])
+    expect(getStaffRecoveryAction(closed)).toBe('Reopen')
+  })
+})
+
+/**
+ * An order the restaurant turned away that is still holding the customer's money.
+ *
+ * <p>
+ * It happens when a refund fails, and when a payment lands after the decision — cancelling asks
+ * Stripe to close the checkout page, that request can fail, and a customer with the tab still open
+ * pays for an order that no longer exists. Both were silent: a paid order read as eligible for the
+ * kitchen, a closed one showed no payment message at all, and the card said "Closed".
+ * </p>
+ */
+describe('an order closed while still holding the money', () => {
+  it.each(['Cancelled', 'Rejected'] as const)('is a payment hold when %s and paid', (status) => {
+    const value = order({ status, paymentStatus: 'Paid' })
+
+    expect(getStaffPaymentState(value)).toBe('unsettledClosure')
+    expect(isStaffPaymentHold(value)).toBe(true)
+    expect(canStaffProcessOrder(value)).toBe(false)
+  })
+
+  it('says what is outstanding and what to do', () => {
+    expect(getStaffPaymentMessage(order({ status: 'Rejected', paymentStatus: 'Paid' })))
+      .toMatch(/rejected but the customer has still paid/i)
+    expect(getStaffPaymentMessage(order({ status: 'Cancelled', paymentStatus: 'Paid' })))
+      .toMatch(/cancelled but the customer has still paid/i)
+  })
+
+  it('counts a partial refund, which still leaves money behind', () => {
+    expect(getStaffPaymentState(order({ status: 'Rejected', paymentStatus: 'PartiallyRefunded' })))
+      .toBe('unsettledClosure')
+  })
+
+  it('lets go once the refund lands', () => {
+    const value = order({ status: 'Rejected', paymentStatus: 'Refunded' })
+
+    expect(getStaffPaymentState(value)).toBe('refunded')
+  })
+
+  /** Keeping the money is the whole point of a completed order. */
+  it('says nothing about a completed order', () => {
+    const value = order({ status: 'Completed', paymentStatus: 'Paid' })
+
+    expect(getStaffPaymentState(value)).toBe('eligible')
+    expect(getStaffPaymentMessage(value)).toBeNull()
+  })
+
+  /** Counter money never came through the platform, so there is nothing here to send back. */
+  it('says nothing about a counter order', () => {
+    const value = order({ status: 'Rejected', paymentStatus: 'Paid', paymentMethod: 'PayAtCounter' })
+
+    expect(getStaffPaymentState(value)).not.toBe('unsettledClosure')
+  })
+})
+
+describe('money held by a closed order is read off the payment', () => {
+  function payment(overrides: Partial<AdminPayment> = {}): AdminPayment {
+    return {
+      status: 'Paid',
+      amountCents: 2_550,
+      refundCount: 0,
+      refundedAmountCents: 0,
+      refundableAmountCents: 2_550,
+      ...overrides,
+    } as AdminPayment
+  }
+
+  /**
+   * The bug. An order whose summary field says the payment was cancelled, with a succeeded charge
+   * sitting underneath it, used to read as settled — so no screen ever mentioned the money and no
+   * action offered to send it back.
+   */
+  it('sees money the order\'s own summary has lost track of', () => {
+    const stranded = order({
+      status: 'Cancelled',
+      paymentStatus: 'Cancelled',
+      latestPayment: payment(),
+    })
+
+    expect(getStaffPaymentState(stranded)).toBe('unsettledClosure')
+    expect(getStaffPaymentMessage(stranded)).toMatch(/still paid/i)
+  })
+
+  /**
+   * The mirror, and the reason the payment's status is checked alongside its amount: a checkout
+   * that expired without charging reports its full amount as refundable, because that figure is
+   * only "charged less refunded" and does not know whether the charge ever happened.
+   */
+  it('does not invent money from a payment that never went through', () => {
+    const nothingTaken = order({
+      status: 'Cancelled',
+      paymentStatus: 'Cancelled',
+      latestPayment: payment({ status: 'Expired' }),
+    })
+
+    expect(getStaffPaymentState(nothingTaken)).not.toBe('unsettledClosure')
+  })
+
+  it('lets go once the payment has been refunded down to nothing', () => {
+    const settled = order({
+      status: 'Rejected',
+      paymentStatus: 'Paid',
+      latestPayment: payment({ refundedAmountCents: 2_550, refundableAmountCents: 0 }),
+    })
+
+    expect(getStaffPaymentState(settled)).not.toBe('unsettledClosure')
+  })
+
+  it('still counts what a partial refund left behind', () => {
+    const partly = order({
+      status: 'Rejected',
+      paymentStatus: 'PartiallyRefunded',
+      latestPayment: payment({
+        status: 'PartiallyRefunded',
+        refundedAmountCents: 1_000,
+        refundableAmountCents: 1_550,
+      }),
+    })
+
+    expect(getStaffPaymentState(partly)).toBe('unsettledClosure')
+  })
+
+  /** With no payment on the card there is nothing better to read, so the summary still answers. */
+  it('falls back to the summary when the card carries no payment', () => {
+    expect(getStaffPaymentState(order({
+      status: 'Rejected',
+      paymentStatus: 'Paid',
+      latestPayment: null,
+    }))).toBe('unsettledClosure')
   })
 })

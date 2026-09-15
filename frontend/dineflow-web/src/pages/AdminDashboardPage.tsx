@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import {
   Armchair,
   ChevronDown,
@@ -29,6 +29,8 @@ import {
   type RestaurantTradingStatus,
 } from '../api/auth'
 import { useAuth } from '../auth/AuthContext'
+import { formatMoney } from '../lib/formatMoney'
+import { describeRevenue } from '../lib/revenueByCurrency'
 import { Badge } from '../components/ui/badge'
 import { OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { PaymentStatusBadge } from '../components/orders/PaymentStatusBadge'
@@ -55,13 +57,20 @@ import { WatchedMenuItemsWidget } from '../components/dashboard/WatchedMenuItems
 import type { DashboardWidget } from '../components/dashboard/dashboardLayout'
 
 /** The panels need the whole entity (schedule JSON + availability), not just the summary bits. */
+const dashboardErrorToastId = 'dashboard-load-error'
+
 type DashboardRestaurant = Restaurant
 
-function formatMoney(amount: number, currencyCode?: string | null) {
-  return new Intl.NumberFormat(undefined, {
-    style: 'currency',
-    currency: (currencyCode || 'AUD').toUpperCase(),
-  }).format(amount)
+/**
+ * Whether customers can order right now.
+ *
+ * <p>The raw <c>acceptingOrders</c> column still reads false after a timed pause has expired — the
+ * effective answer lives in <c>availability</c>, which is what the public and staff endpoints
+ * report. Reading the column left the dashboard showing Paused while orders were already arriving.
+ * </p>
+ */
+function isAcceptingOrders(restaurant: DashboardRestaurant): boolean {
+  return restaurant.availability?.acceptingOrders ?? restaurant.acceptingOrders
 }
 
 async function copyText(value: string, successMessage: string) {
@@ -139,8 +148,10 @@ function PublicMenuCard({
             <Badge variant={restaurant.isActive ? 'secondary' : 'outline'}>
               {restaurant.isActive ? 'Active' : 'Inactive'}
             </Badge>
-            <Badge variant={restaurant.acceptingOrders ? 'outline' : 'destructive'}>
-              {restaurant.acceptingOrders ? 'Accepting' : 'Paused'}
+            {/* The column keeps whatever the pause wrote; availability is what customers get once
+                the pause window has passed. */}
+            <Badge variant={isAcceptingOrders(restaurant) ? 'outline' : 'destructive'}>
+              {isAcceptingOrders(restaurant) ? 'Accepting' : 'Paused'}
             </Badge>
           </div>
           <code>{url}</code>
@@ -247,17 +258,20 @@ function MetricCard({
   value,
   detail,
   tone,
+  unavailable = false,
 }: {
   label: string
   value: string | number
   detail: string
   tone: 'orders' | 'kitchen' | 'paid' | 'payment'
+  /** The load failed, so there is no figure — as opposed to a figure that happens to be zero. */
+  unavailable?: boolean
 }) {
   return (
     <div className={`dashboard-metric dashboard-metric-${tone}`}>
       <span className="dashboard-metric-label">{label}</span>
-      <strong>{value}</strong>
-      <small>{detail}</small>
+      <strong>{unavailable ? '—' : value}</strong>
+      <small>{unavailable ? 'Could not be loaded' : detail}</small>
     </div>
   )
 }
@@ -272,18 +286,26 @@ export function AdminDashboardPage() {
     pendingPayment: 0,
     failedPayment: 0,
     payable: 0,
-    revenue: 0,
+    revenue: [],
   })
   const [restaurants, setRestaurants] = useState<DashboardRestaurant[]>([])
   const [tradingStatus, setTradingStatus] = useState<RestaurantTradingStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const loadInFlightRef = useRef(false)
 
   const isPlatformOwner = hasRole(user, 'PlatformOwner')
   const isStaff = hasRole(user, 'Staff') && !hasRole(user, 'Admin') && !hasRole(user, 'RestaurantOwner') && !isPlatformOwner
   const canLoadRestaurantDirectory = !isStaff
 
   const loadDashboard = useCallback(async (showToast = false) => {
+    // Set synchronously in the handler: the disabled attribute only lands on the render that
+    // follows the click, which left an ~86ms window for a second click to start a second load.
+    if (loadInFlightRef.current) {
+      return
+    }
+
+    loadInFlightRef.current = true
     setLoading(true)
     setError(null)
 
@@ -311,11 +333,13 @@ export function AdminDashboardPage() {
     } catch (loadError) {
       const message = loadError instanceof Error ? loadError.message : 'Dashboard loading failed.'
       setError(message)
-      toast.error('Could not load dashboard', { description: message })
+      // A fixed id: React mounts effects twice in development, and two identical toasts stacked up.
+      toast.error('Could not load dashboard', { id: dashboardErrorToastId, description: message })
     } finally {
+      loadInFlightRef.current = false
       setLoading(false)
     }
-  }, [canLoadRestaurantDirectory, user])
+  }, [canLoadRestaurantDirectory])
 
   useEffect(() => {
     void Promise.resolve().then(() => loadDashboard())
@@ -330,6 +354,9 @@ export function AdminDashboardPage() {
   )
 
   const scopedCurrency = activeRestaurants[0]?.currency || orders[0]?.currency || 'AUD'
+  // Zeros after a failed load read as "a quiet day", which is the one thing they do not mean.
+  const loadFailed = Boolean(error) && !loading
+  const metricsScopeLabel = isPlatformOwner ? 'Across all restaurants' : 'Visible to this role'
   const primaryRestaurant = activeRestaurants[0] ?? null
   // Admin roles get availability off the full entity; staff get it from the read-only endpoint.
   const dashboardAvailability = primaryRestaurant?.availability ?? tradingStatus?.availability ?? null
@@ -388,7 +415,8 @@ export function AdminDashboardPage() {
           render: () => (
             <WatchedMenuItemsWidget
               restaurantId={primaryRestaurant?.id ?? null}
-              currency={scopedCurrency}
+              restaurantName={primaryRestaurant?.name ?? null}
+              currency={primaryRestaurant?.currency ?? scopedCurrency}
             />
           ),
         },
@@ -428,8 +456,6 @@ export function AdminDashboardPage() {
     activeRestaurants,
     canEditSchedule,
     canLoadRestaurantDirectory,
-    dashboardAvailability,
-    dashboardRestaurantName,
     isPlatformOwner,
     isStaff,
     loadDashboard,
@@ -438,7 +464,6 @@ export function AdminDashboardPage() {
     recentOrders,
     restaurants,
     scopedCurrency,
-    stats,
     updateRestaurantInState,
   ])
 
@@ -451,7 +476,7 @@ export function AdminDashboardPage() {
               <LayoutDashboard size={22} />
               <div>
                 <div className="dashboard-title-row">
-                  <CardTitle>Dashboard</CardTitle>
+                  <CardTitle asChild><h1>Dashboard</h1></CardTitle>
                   <Badge variant="outline">{dashboardRoleLabel}</Badge>
                 </div>
                 <CardDescription>
@@ -493,15 +518,25 @@ export function AdminDashboardPage() {
           {primaryRestaurant && canLoadRestaurantDirectory ? (
             <OrderingPauseControl
               restaurant={primaryRestaurant}
+              // Named because the metrics under it are platform-wide: without it, "Close
+              // restaurant" sitting above "ORDERS 113 across 12 restaurants" reads as closing
+              // the platform.
+              showRestaurantName={isPlatformOwner}
               onRestaurantUpdated={updateRestaurantInState}
             />
           ) : null}
 
           <div className="dashboard-metrics-grid">
-            <MetricCard label="Orders" value={stats.total} detail="Visible to this role" tone="orders" />
-            <MetricCard label="Kitchen active" value={stats.activeKitchen} detail="Pending through ready" tone="kitchen" />
-            <MetricCard label="Paid" value={stats.paid} detail={formatMoney(stats.revenue, scopedCurrency)} tone="paid" />
-            <MetricCard label="Awaiting payment" value={stats.pendingPayment} detail={`${stats.payable} payable`} tone="payment" />
+            <MetricCard unavailable={loadFailed} label="Orders" value={stats.total} detail={metricsScopeLabel} tone="orders" />
+            <MetricCard unavailable={loadFailed} label="Kitchen active" value={stats.activeKitchen} detail="Pending through ready" tone="kitchen" />
+            <MetricCard
+              label="Paid"
+              value={stats.paid}
+              detail={describeRevenue(stats.revenue)}
+              tone="paid"
+              unavailable={loadFailed}
+            />
+            <MetricCard unavailable={loadFailed} label="Awaiting payment" value={stats.pendingPayment} detail={`${stats.payable} payable`} tone="payment" />
           </div>
         </CardContent>
       </Card>
@@ -552,7 +587,11 @@ function PublicUrlsWidget({
                 />
               ))}
               {!loading && activeRestaurants.length === 0 && (
-                <div className="dashboard-empty-state">No active restaurant URL is available for this account.</div>
+                <div className="dashboard-empty-state">
+                  {canShowTableUrls
+                    ? 'No active restaurant URL is available for this account.'
+                    : 'Menu URLs are managed by your restaurant admin. Ask them for the link to share with customers.'}
+                </div>
               )}
             </div>
           </CardContent>
@@ -596,7 +635,7 @@ function RecentOrdersWidget({
                   </div>
                   <strong className="dashboard-order-total">{formatMoney(order.totalAmount, order.currency)}</strong>
                   <div className="dashboard-order-state">
-                    <OrderStatusBadge status={order.status} />
+                    <OrderStatusBadge status={order.status} paymentStatus={order.paymentStatus} />
                     <PaymentStatusBadge status={order.paymentStatus} />
                   </div>
                   {isStaff && (

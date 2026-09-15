@@ -52,22 +52,126 @@ public static class IdentitySeeder
         17.50m, 7.00m, 9.50m, 12.00m, 27.50m, 6.50m
     ];
 
-    public static async Task SeedAsync(IServiceProvider serviceProvider)
+    /// <summary>
+    /// Authorization roles. Safe everywhere: the application cannot authorize anything without
+    /// them, and creating a role that already exists is a no-op.
+    /// </summary>
+    public static async Task SeedRolesAsync(IServiceProvider serviceProvider)
     {
         using var scope = serviceProvider.CreateScope();
-
         var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
-        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
-        var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
-        var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        ResolvedSeedMenuImageUrls = await ResolveSeedMenuImageUrlsAsync(scope.ServiceProvider, configuration);
 
-        // ── Roles ────────────────────────────────────────────────────────────
         foreach (var role in ApplicationRoles.All)
         {
             if (!await roleManager.RoleExistsAsync(role))
                 await roleManager.CreateAsync(new IdentityRole(role));
         }
+    }
+
+    /// <summary>
+    /// Bootstraps the single platform owner from <c>SeedOwner:*</c> so a fresh deployment has
+    /// somebody who can sign in. Safe in Production, with one deliberate restriction: an owner
+    /// that already exists never has their password rewritten there. Rewriting it on every boot
+    /// would silently undo any password the owner had since chosen, and would hand control of a
+    /// live account to whoever can read the deployment configuration.
+    /// </summary>
+    public static async Task SeedPlatformOwnerAsync(IServiceProvider serviceProvider)
+    {
+        using var scope = serviceProvider.CreateScope();
+        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
+        var environment = scope.ServiceProvider.GetService<IHostEnvironment>();
+        var logger = scope.ServiceProvider.GetService<ILoggerFactory>()?.CreateLogger(nameof(IdentitySeeder));
+
+        var ownerEmail = configuration["SeedOwner:Email"];
+        var ownerPassword = configuration["SeedOwner:Password"];
+        var ownerFullName = configuration["SeedOwner:FullName"] ?? "DineFlow Owner";
+        const string ownerAvatarUrl = "/seed-avatars/platform-owner.svg";
+
+        if (string.IsNullOrWhiteSpace(ownerEmail) || string.IsNullOrWhiteSpace(ownerPassword))
+        {
+            return;
+        }
+
+        var owner = await userManager.FindByEmailAsync(ownerEmail);
+
+        if (owner is null)
+        {
+            owner = new ApplicationUser
+            {
+                UserName = ownerEmail,
+                Email = ownerEmail,
+                FullName = ownerFullName,
+                AvatarUrl = ownerAvatarUrl,
+                RestaurantId = null,
+                EmailConfirmed = true,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            var result = await userManager.CreateAsync(owner, ownerPassword);
+
+            if (!result.Succeeded)
+            {
+                var errors = string.Join(", ", result.Errors.Select(e => e.Description));
+                throw new Exception($"Failed to seed owner user: {errors}");
+            }
+
+            await EnsureRoleAsync(userManager, owner, ApplicationRoles.PlatformOwner);
+            return;
+        }
+
+        owner.FullName = ownerFullName;
+        owner.AvatarUrl = string.IsNullOrWhiteSpace(owner.AvatarUrl) ? ownerAvatarUrl : owner.AvatarUrl;
+        owner.RestaurantId = null;
+        owner.EmailConfirmed = true;
+        owner.UpdatedAt = DateTime.UtcNow;
+
+        var updateResult = await userManager.UpdateAsync(owner);
+
+        if (!updateResult.Succeeded)
+        {
+            var errors = string.Join(", ", updateResult.Errors.Select(e => e.Description));
+            throw new Exception($"Failed to update owner user: {errors}");
+        }
+
+        if (environment?.IsProduction() == true)
+        {
+            logger?.LogInformation(
+                "Platform owner {Email} already exists; the configured password was not applied because "
+                    + "resetting a live account's password on startup is not permitted in Production.",
+                ownerEmail);
+        }
+        else
+        {
+            await SetPasswordAsync(userManager, owner, ownerPassword);
+        }
+
+        await EnsureRoleAsync(userManager, owner, ApplicationRoles.PlatformOwner);
+    }
+
+    /// <summary>
+    /// Demo restaurants, menus, orders and the fixed <c>*@dineflow.test</c> accounts that share one
+    /// well-known password. Development and testing only — it throws in Production rather than
+    /// trusting a configuration flag, because the cost of getting this wrong is fixed-credential
+    /// accounts and fabricated orders in a live database.
+    /// </summary>
+    public static async Task SeedDemoDataAsync(IServiceProvider serviceProvider)
+    {
+        using var scope = serviceProvider.CreateScope();
+
+        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var environment = scope.ServiceProvider.GetService<IHostEnvironment>();
+
+        if (environment?.IsProduction() == true)
+        {
+            throw new InvalidOperationException(
+                "Demo data seeding is not permitted in Production. It creates fixed accounts with a "
+                    + "shared password and fabricated orders.");
+        }
+
+        ResolvedSeedMenuImageUrls = await ResolveSeedMenuImageUrlsAsync(scope.ServiceProvider, configuration);
 
         // ── Restaurants (seeded before users because of FK on AspNetUsers) ───
         if (!await dbContext.Restaurants.AnyAsync())
@@ -76,12 +180,16 @@ public static class IdentitySeeder
             {
                 Id = RestaurantOneId,
                 Name = "The DineFlow Kitchen",
-                Address = "42 Flavor Street, Kathmandu 44600",
-                Phone = "+977-1-4567890",
+                // Australian because Stripe does not operate in Nepal: this restaurant used to be
+                // in Kathmandu, which made "Connect Stripe" fail with country_unsupported every
+                // time — an unfixable dead end on the demo restaurant people reach for first.
+                Address = "42 Flavour Street, Adelaide SA 5000",
+                Phone = "+61-8-8100-4242",
                 ImageUrl = GetSeedMenuImageUrl("Butter Chicken"),
-                CountryCode = "NP",
-                Timezone = "Asia/Kathmandu",
-                Currency = "NPR",
+                CountryCode = "AU",
+                Timezone = "Australia/Adelaide",
+                Currency = "AUD",
+                OpeningHoursJson = RestaurantOneAlwaysOpenJson,
                 IsActive = true,
                 CreatedAt = DateTime.UtcNow
             };
@@ -171,20 +279,27 @@ public static class IdentitySeeder
 
             var menuItems = new List<MenuItem>
             {
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = starters.Id, Name = "Veg Spring Rolls",    Description = "Crispy rolls stuffed with seasoned veggies",              Price = 250, DisplayOrder = 1, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Veg Spring Rolls") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = starters.Id, Name = "Chicken Wings",       Description = "Spicy buffalo wings with dipping sauce",                  Price = 450, DisplayOrder = 2, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Chicken Wings") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = starters.Id, Name = "Garlic Bread",        Description = "Toasted bread with garlic butter",                        Price = 180, DisplayOrder = 3, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Garlic Bread") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = mains.Id,    Name = "Butter Chicken",      Description = "Tender chicken in creamy tomato sauce, served with naan", Price = 650, DisplayOrder = 1, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Butter Chicken") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = mains.Id,    Name = "Veg Fried Rice",      Description = "Wok-tossed rice with mixed vegetables",                   Price = 380, DisplayOrder = 2, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Veg Fried Rice") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = mains.Id,    Name = "Grilled Salmon",      Description = "Pan-seared salmon with lemon butter sauce",               Price = 950, DisplayOrder = 3, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Grilled Salmon") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = mains.Id,    Name = "Mushroom Pasta",      Description = "Creamy fettuccine with sautéed mushrooms",               Price = 480, DisplayOrder = 4, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Mushroom Pasta") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = drinks.Id,   Name = "Mango Lassi",         Description = "Chilled yogurt drink blended with fresh mango",           Price = 200, DisplayOrder = 1, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Mango Lassi") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = drinks.Id,   Name = "Masala Chai",         Description = "Spiced milk tea brewed the traditional way",              Price = 120, DisplayOrder = 2, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Masala Chai") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = drinks.Id,   Name = "Fresh Lime Soda",     Description = "Sparkling water with fresh lime and a pinch of salt",     Price = 150, DisplayOrder = 3, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Fresh Lime Soda") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = desserts.Id, Name = "Gulab Jamun",         Description = "Soft milk-solid dumplings soaked in rose syrup",          Price = 180, DisplayOrder = 1, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Gulab Jamun") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = desserts.Id, Name = "Chocolate Lava Cake", Description = "Warm cake with a molten chocolate centre",                Price = 320, DisplayOrder = 2, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Chocolate Lava Cake") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = mains.Id,    Name = "Chef's Tasting Curry", Description = "Seasonal curry used for sold-out state testing",           Price = 720, DisplayOrder = 5, IsAvailable = true, IsSoldOut = true, ImageUrl = GetSeedMenuImageUrl("Butter Chicken") },
-                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = drinks.Id,   Name = "House Kombucha",      Description = "Temporarily hidden drink for availability testing",       Price = 230, DisplayOrder = 4, IsAvailable = false, ImageUrl = GetSeedMenuImageUrl("Fresh Lime Soda") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = starters.Id, Name = "Veg Spring Rolls",    Description = "Crispy rolls stuffed with seasoned veggies",              Price = RestaurantOnePrices["Veg Spring Rolls"], DisplayOrder = 1, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Veg Spring Rolls") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = starters.Id, Name = "Chicken Wings",       Description = "Spicy buffalo wings with dipping sauce",                  Price = RestaurantOnePrices["Chicken Wings"], DisplayOrder = 2, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Chicken Wings") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = starters.Id, Name = "Garlic Bread",        Description = "Toasted bread with garlic butter",                        Price = RestaurantOnePrices["Garlic Bread"], DisplayOrder = 3, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Garlic Bread") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = mains.Id,    Name = "Butter Chicken",      Description = "Tender chicken in creamy tomato sauce, served with naan", Price = RestaurantOnePrices["Butter Chicken"], DisplayOrder = 1, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Butter Chicken") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = mains.Id,    Name = "Veg Fried Rice",      Description = "Wok-tossed rice with mixed vegetables",                   Price = RestaurantOnePrices["Veg Fried Rice"], DisplayOrder = 2, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Veg Fried Rice") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = mains.Id,    Name = "Grilled Salmon",      Description = "Pan-seared salmon with lemon butter sauce",               Price = RestaurantOnePrices["Grilled Salmon"], DisplayOrder = 3, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Grilled Salmon") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = mains.Id,    Name = "Mushroom Pasta",      Description = "Creamy fettuccine with sautéed mushrooms",               Price = RestaurantOnePrices["Mushroom Pasta"], DisplayOrder = 4, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Mushroom Pasta") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = drinks.Id,   Name = "Mango Lassi",         Description = "Chilled yogurt drink blended with fresh mango",           Price = RestaurantOnePrices["Mango Lassi"], DisplayOrder = 1, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Mango Lassi") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = drinks.Id,   Name = "Masala Chai",         Description = "Spiced milk tea brewed the traditional way",              Price = RestaurantOnePrices["Masala Chai"], DisplayOrder = 2, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Masala Chai") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = drinks.Id,   Name = "Fresh Lime Soda",     Description = "Sparkling water with fresh lime and a pinch of salt",     Price = RestaurantOnePrices["Fresh Lime Soda"], DisplayOrder = 3, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Fresh Lime Soda") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = desserts.Id, Name = "Gulab Jamun",         Description = "Soft milk-solid dumplings soaked in rose syrup",          Price = RestaurantOnePrices["Gulab Jamun"], DisplayOrder = 1, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Gulab Jamun") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = desserts.Id, Name = "Chocolate Lava Cake", Description = "Warm cake with a molten chocolate centre",                Price = RestaurantOnePrices["Chocolate Lava Cake"], DisplayOrder = 2, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Chocolate Lava Cake") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = mains.Id,    Name = "Chef's Tasting Curry", Description = "In stock but manually marked sold out: the flag must win over the count", Price = RestaurantOnePrices["Chef's Tasting Curry"], DisplayOrder = 5, IsAvailable = true, IsSoldOut = true, ImageUrl = GetSeedMenuImageUrl("Butter Chicken") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = drinks.Id,   Name = "House Kombucha",      Description = "Temporarily hidden drink for availability testing",       Price = RestaurantOnePrices["House Kombucha"], DisplayOrder = 4, IsAvailable = false, ImageUrl = GetSeedMenuImageUrl("Fresh Lime Soda") },
+                // Stock states worth exercising by hand. Reserving happens at checkout, before any
+                // payment, so each of these behaves differently when an order is placed, abandoned,
+                // or raced against a second customer.
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = mains.Id,    Name = "Kitchen Staple Dal",  Description = "Plenty in stock: the control for anything stock-tracked", Price = RestaurantOnePrices["Kitchen Staple Dal"], DisplayOrder = 6, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Veg Fried Rice") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = mains.Id,    Name = "Tandoori Platter",    Description = "One portion left: for last-one and two-customers-at-once tests", Price = RestaurantOnePrices["Tandoori Platter"], DisplayOrder = 7, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Butter Chicken") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = starters.Id, Name = "Daily Soup",          Description = "Two portions: ordering both should flip it to sold out",  Price = RestaurantOnePrices["Daily Soup"], DisplayOrder = 4, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Garlic Bread") },
+                new() { Id = Guid.NewGuid(), RestaurantId = RestaurantOneId, CategoryId = desserts.Id, Name = "Seasonal Sorbet",     Description = "Zero stock: should refuse to be added to a cart",         Price = RestaurantOnePrices["Seasonal Sorbet"], DisplayOrder = 3, IsAvailable = true, IsSoldOut = true, ImageUrl = GetSeedMenuImageUrl("Gulab Jamun") },
                 new() { Id = Guid.NewGuid(), RestaurantId = RestaurantTwoId, CategoryId = restaurantTwoStreetFood.Id, Name = "Paneer Tikka Skewers", Description = "Charred paneer skewers with mint chutney",            Price = 340, DisplayOrder = 1, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Chicken Wings") },
                 new() { Id = Guid.NewGuid(), RestaurantId = RestaurantTwoId, CategoryId = restaurantTwoStreetFood.Id, Name = "Corn Cheese Balls",    Description = "Golden-fried corn and mozzarella croquettes",       Price = 260, DisplayOrder = 2, IsAvailable = true, ImageUrl = GetSeedMenuImageUrl("Veg Spring Rolls") },
                 new() { Id = Guid.NewGuid(), RestaurantId = RestaurantTwoId, CategoryId = restaurantTwoStreetFood.Id, Name = "Chilli Chicken Bites", Description = "Wok-tossed chicken bites with peppers",               Price = 390, DisplayOrder = 3, IsAvailable = true, IsSoldOut = true, ImageUrl = GetSeedMenuImageUrl("Chicken Wings") },
@@ -300,60 +415,10 @@ public static class IdentitySeeder
 
         await BackfillSeedMenuImagesAsync(dbContext);
         await BackfillSeedOrderItemNameSnapshotsAsync(dbContext);
-
-        // ── Platform owner ───────────────────────────────────────────────────
-        var ownerEmail    = configuration["SeedOwner:Email"];
-        var ownerPassword = configuration["SeedOwner:Password"];
-        var ownerFullName = configuration["SeedOwner:FullName"] ?? "DineFlow Owner";
-        const string ownerAvatarUrl = "/seed-avatars/platform-owner.svg";
-
-        if (!string.IsNullOrWhiteSpace(ownerEmail) && !string.IsNullOrWhiteSpace(ownerPassword))
-        {
-            var owner = await userManager.FindByEmailAsync(ownerEmail);
-
-            if (owner is null)
-            {
-                owner = new ApplicationUser
-                {
-                    UserName = ownerEmail,
-                    Email = ownerEmail,
-                    FullName = ownerFullName,
-                    AvatarUrl = ownerAvatarUrl,
-                    RestaurantId = null,
-                    EmailConfirmed = true,
-                    CreatedAt = DateTime.UtcNow
-                };
-
-                var result = await userManager.CreateAsync(owner, ownerPassword);
-
-                if (!result.Succeeded)
-                {
-                    var errors = string.Join(", ", result.Errors.Select(e => e.Description));
-                    throw new Exception($"Failed to seed owner user: {errors}");
-                }
-
-                await EnsureRoleAsync(userManager, owner, ApplicationRoles.PlatformOwner);
-            }
-            else
-            {
-                owner.FullName = ownerFullName;
-                owner.AvatarUrl = string.IsNullOrWhiteSpace(owner.AvatarUrl) ? ownerAvatarUrl : owner.AvatarUrl;
-                owner.RestaurantId = null;
-                owner.EmailConfirmed = true;
-                owner.UpdatedAt = DateTime.UtcNow;
-
-                var updateResult = await userManager.UpdateAsync(owner);
-
-                if (!updateResult.Succeeded)
-                {
-                    var errors = string.Join(", ", updateResult.Errors.Select(e => e.Description));
-                    throw new Exception($"Failed to update owner user: {errors}");
-                }
-
-                await SetPasswordAsync(userManager, owner, ownerPassword);
-                await EnsureRoleAsync(userManager, owner, ApplicationRoles.PlatformOwner);
-            }
-        }
+        // Before the stock baseline: that keys off the menu, and this rewrites its prices.
+        await MigrateRestaurantOneToAustraliaAsync(dbContext);
+        await OpenRestaurantOneAllDayAsync(dbContext);
+        await SeedStockTestingBaselineAsync(dbContext);
 
         // ── Seed users ───────────────────────────────────────────────────────
         var seedPassword = configuration["SeedUsers:Password"] ?? "DineFlow123!";
@@ -390,21 +455,54 @@ public static class IdentitySeeder
 
         await SeedPaginationDemoDataAsync(dbContext);
         await SeedMenuOptionsAsync(dbContext);
+
+        // Runs last: the option table is seeded in rupees and matched by dish name, so it only knows
+        // which figures need converting once every restaurant's menu and currency are in place.
+        await ConvertSeededOptionPricesToLocalCurrencyAsync(dbContext);
+
+        // After the options exist, since it declares what some of them contain.
+        await SeedRestaurantOneAllergensAsync(dbContext);
     }
 
     private static async Task SeedPaginationDemoDataAsync(AppDbContext dbContext)
     {
         var restaurantSeeds = new[]
         {
-            new SeedRestaurant(Guid.Parse("44444444-4444-4444-4444-444444444444"), "Harbour & Hearth", "18 Marina Walk, Adelaide SA", "+61 8 7000 0401", true, "Grilled Salmon"),
-            new SeedRestaurant(Guid.Parse("55555555-5555-5555-5555-555555555555"), "Laneway Noodles", "42 Peel Street, Adelaide SA", "+61 8 7000 0502", true, "Veg Fried Rice"),
-            new SeedRestaurant(Guid.Parse("66666666-6666-6666-6666-666666666666"), "North Terrace Cafe", "126 North Terrace, Adelaide SA", "+61 8 7000 0603", true, "Mango Lassi"),
-            new SeedRestaurant(Guid.Parse("77777777-7777-7777-7777-777777777777"), "Parkside Pizza Room", "77 Unley Road, Parkside SA", "+61 8 7000 0704", true, "Mushroom Pasta"),
-            new SeedRestaurant(Guid.Parse("88888888-8888-8888-8888-888888888888"), "Glenelg Sunset Grill", "9 Jetty Road, Glenelg SA", "+61 8 7000 0805", true, "Fresh Lime Soda"),
-            new SeedRestaurant(Guid.Parse("99999999-9999-9999-9999-999999999999"), "Norwood Garden Kitchen", "151 The Parade, Norwood SA", "+61 8 7000 0906", true, "Garlic Bread"),
+            // Six restaurants carry a full trading identity; the ABNs below are synthetic values
+            // that satisfy the ABN checksum so the validation path is exercised with realistic
+            // data. They are not registered to anyone — an ABR lookup is a manual release step.
+            new SeedRestaurant(Guid.Parse("44444444-4444-4444-4444-444444444444"), "Harbour & Hearth", "18 Marina Walk, Adelaide SA", "+61 8 7000 0401", true, "Grilled Salmon",
+                LegalBusinessName: "Harbour & Hearth Dining Pty Ltd", Abn: "12844639108", GstRegistered: true,
+                BusinessContactEmail: "accounts@harbourandhearth.example", RefundContactEmail: "refunds@harbourandhearth.example",
+                CustomerSurchargeNotice: "A 10% surcharge applies on public holidays."),
+            new SeedRestaurant(Guid.Parse("55555555-5555-5555-5555-555555555555"), "Laneway Noodles", "42 Peel Street, Adelaide SA", "+61 8 7000 0502", true, "Veg Fried Rice",
+                LegalBusinessName: "Laneway Noodle Bar Pty Ltd", Abn: "93101031715", GstRegistered: true,
+                BusinessContactEmail: "hello@lanewaynoodles.example", RefundContactEmail: "hello@lanewaynoodles.example"),
+            new SeedRestaurant(Guid.Parse("66666666-6666-6666-6666-666666666666"), "North Terrace Cafe", "126 North Terrace, Adelaide SA", "+61 8 7000 0603", true, "Mango Lassi",
+                LegalBusinessName: "North Terrace Coffee Co Pty Ltd", Abn: "30313706825", GstRegistered: true,
+                BusinessContactEmail: "office@northterracecafe.example", RefundContactEmail: "refunds@northterracecafe.example"),
+            new SeedRestaurant(Guid.Parse("77777777-7777-7777-7777-777777777777"), "Parkside Pizza Room", "77 Unley Road, Parkside SA", "+61 8 7000 0704", true, "Mushroom Pasta",
+                LegalBusinessName: "Parkside Pizza Room Pty Ltd", Abn: "94336352628", GstRegistered: true,
+                BusinessContactEmail: "admin@parksidepizza.example", RefundContactEmail: "refunds@parksidepizza.example",
+                CustomerSurchargeNotice: "A 1.5% surcharge applies to card payments."),
+            // Sole trader below the GST threshold: registered identity, but not GST registered, so
+            // its receipts must print as RECEIPT rather than TAX INVOICE.
+            new SeedRestaurant(Guid.Parse("88888888-8888-8888-8888-888888888888"), "Glenelg Sunset Grill", "9 Jetty Road, Glenelg SA", "+61 8 7000 0805", true, "Fresh Lime Soda",
+                LegalBusinessName: "A. Whitmore trading as Glenelg Sunset Grill", Abn: "86886693712", GstRegistered: false,
+                BusinessContactEmail: "sunsetgrill@example.com", RefundContactEmail: "sunsetgrill@example.com"),
+            new SeedRestaurant(Guid.Parse("99999999-9999-9999-9999-999999999999"), "Norwood Garden Kitchen", "151 The Parade, Norwood SA", "+61 8 7000 0906", true, "Garlic Bread",
+                LegalBusinessName: "Norwood Garden Kitchen Pty Ltd", Abn: "47325413907", GstRegistered: true,
+                BusinessContactEmail: "accounts@norwoodgarden.example", RefundContactEmail: "refunds@norwoodgarden.example"),
+
+            // Deliberately incomplete, so the "identity not provided" paths stay testable:
+            // no ABN and no contacts at all.
             new SeedRestaurant(Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), "Central Market Table", "44 Gouger Street, Adelaide SA", "+61 8 7000 1007", true, "https://images.unsplash.com/photo-1519708227418-c8fd9a32b7a2?auto=format&fit=crop&w=1600&q=80"),
+            // Inactive and unidentified.
             new SeedRestaurant(Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"), "West End Test Kitchen", "23 Hindley Street, Adelaide SA", "+61 8 7000 1108", false, "Chocolate Lava Cake"),
-            new SeedRestaurant(Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc"), "Hills Seasonal Dining", "6 Mount Barker Road, Stirling SA", "+61 8 7000 1209", true, "Gulab Jamun")
+            // Half-configured: a legal name and contacts, but the ABN was never supplied.
+            new SeedRestaurant(Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc"), "Hills Seasonal Dining", "6 Mount Barker Road, Stirling SA", "+61 8 7000 1209", true, "Gulab Jamun",
+                LegalBusinessName: "Hills Seasonal Dining Pty Ltd", Abn: null, GstRegistered: false,
+                BusinessContactEmail: "bookings@hillsseasonal.example", RefundContactEmail: "bookings@hillsseasonal.example")
         };
 
         var existingRestaurantIds = (await dbContext.Restaurants
@@ -421,6 +519,13 @@ public static class IdentitySeeder
                 Name = seed.Name,
                 Address = seed.Address,
                 Phone = seed.Phone,
+                LegalBusinessName = seed.LegalBusinessName,
+                Abn = seed.Abn,
+                GstRegistered = seed.GstRegistered,
+                PricesIncludeGst = seed.GstRegistered,
+                BusinessContactEmail = seed.BusinessContactEmail,
+                RefundContactEmail = seed.RefundContactEmail,
+                CustomerSurchargeNotice = seed.CustomerSurchargeNotice,
                 ImageUrl = GetSeedRestaurantImageUrl(seed.CoverItemName),
                 CountryCode = "AU",
                 Timezone = "Australia/Adelaide",
@@ -951,6 +1056,95 @@ public static class IdentitySeeder
         item.UpdatedAt = DateTime.UtcNow;
     }
 
+    /// <summary>
+    /// Converts option prices in a database that was seeded before the divisor above existed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Seeding options only ever inserts the ones that are missing, so correcting the table alone
+    /// fixes new databases and leaves every existing one offering a A$150 garlic naan beside a A$24
+    /// butter chicken. This rewrites those rows.
+    /// </para>
+    /// <para>
+    /// Keyed on the stored price still being the exact rupee figure it was seeded with: a price
+    /// somebody has since edited is left alone, the same way the opening hours and stock baselines
+    /// only touch untouched defaults. The target comes from the constants each time, so running it
+    /// again after it has done its work changes nothing.
+    /// </para>
+    /// </remarks>
+    internal static async Task ConvertSeededOptionPricesToLocalCurrencyAsync(AppDbContext dbContext)
+    {
+        var currencyByRestaurant = await dbContext.Restaurants
+            .Select(restaurant => new { restaurant.Id, restaurant.Currency })
+            .ToDictionaryAsync(entry => entry.Id, entry => entry.Currency);
+
+        // (dish, group, option) -> the rupee figure the table holds. The group belongs in the key:
+        // one dish can offer the same option name in two groups at two different prices.
+        var seededPrices = BuildSeedMenuOptionGroups()
+            .SelectMany(group => group.Options.Select(option =>
+                (group.MenuItemName, GroupName: group.Name, option.Name, option.PriceAdjustment)))
+            .ToDictionary(
+                entry => SeededOptionKey(entry.MenuItemName, entry.GroupName, entry.Name),
+                entry => entry.PriceAdjustment);
+
+        var options = await dbContext.MenuItemOptions
+            .Join(
+                dbContext.MenuItems,
+                option => option.MenuItemId,
+                menuItem => menuItem.Id,
+                (option, menuItem) => new { Option = option, MenuItemName = menuItem.Name })
+            .Join(
+                dbContext.MenuItemOptionGroups,
+                row => row.Option.GroupId,
+                group => group.Id,
+                (row, group) => new { row.Option, row.MenuItemName, GroupName = group.Name })
+            .ToListAsync();
+
+        var corrected = 0;
+
+        foreach (var row in options)
+        {
+            var divisor = OptionPriceDivisorFor(currencyByRestaurant.GetValueOrDefault(row.Option.RestaurantId));
+
+            if (divisor == 1m
+                || !seededPrices.TryGetValue(SeededOptionKey(row.MenuItemName, row.GroupName, row.Option.Name), out var rupees)
+                || row.Option.PriceAdjustment != rupees)
+            {
+                continue;
+            }
+
+            row.Option.PriceAdjustment = ConvertOptionPrice(rupees, divisor);
+            row.Option.UpdatedAt = DateTime.UtcNow;
+            corrected++;
+        }
+
+        if (corrected > 0)
+        {
+            await dbContext.SaveChangesAsync();
+        }
+    }
+
+    /// <summary>
+    /// How much to divide the seeded option prices by for a restaurant trading in this currency.
+    /// </summary>
+    /// <remarks>
+    /// Always applied to the constants rather than to whatever is already stored, so seeding twice
+    /// cannot divide a price twice.
+    /// </remarks>
+    private static decimal OptionPriceDivisorFor(string? currency) =>
+        string.Equals(currency, "AUD", StringComparison.OrdinalIgnoreCase) ? RupeeToAudDivisor : 1m;
+
+    /// <summary>
+    /// Identifies one seeded option by the dish, group and option it names, ignoring case. The group
+    /// is part of it because a dish can offer the same option name in two groups at two prices.
+    /// </summary>
+    private static string SeededOptionKey(string menuItemName, string groupName, string optionName) =>
+        string.Join('|', menuItemName.Trim().ToUpperInvariant(),
+            groupName.Trim().ToUpperInvariant(), optionName.Trim().ToUpperInvariant());
+
+    private static decimal ConvertOptionPrice(decimal rupees, decimal divisor) =>
+        Math.Round(rupees / divisor, 2, MidpointRounding.AwayFromZero);
+
     private static async Task SeedMenuOptionsAsync(AppDbContext dbContext)
     {
         var explicitSeeds = BuildSeedMenuOptionGroups();
@@ -976,6 +1170,10 @@ public static class IdentitySeeder
             return;
         }
 
+        var currencyByRestaurant = await dbContext.Restaurants
+            .Select(restaurant => new { restaurant.Id, restaurant.Currency })
+            .ToDictionaryAsync(entry => entry.Id, entry => entry.Currency);
+
         var resolvedSeeds = new List<ResolvedMenuOptionGroupSeed>();
 
         foreach (var seed in explicitSeeds)
@@ -983,7 +1181,10 @@ public static class IdentitySeeder
             foreach (var menuItem in menuItems.Where(item =>
                          string.Equals(item.Name, seed.MenuItemName, StringComparison.OrdinalIgnoreCase)))
             {
-                resolvedSeeds.Add(seed.Resolve(menuItem.Id, menuItem.RestaurantId));
+                var divisor = OptionPriceDivisorFor(
+                    currencyByRestaurant.GetValueOrDefault(menuItem.RestaurantId));
+
+                resolvedSeeds.Add(seed.Resolve(menuItem.Id, menuItem.RestaurantId, divisor));
             }
         }
 
@@ -1061,6 +1262,7 @@ public static class IdentitySeeder
                     PriceAdjustment = optionSeed.PriceAdjustment,
                     AdjustmentType = optionSeed.AdjustmentType,
                     MaxQuantity = optionSeed.MaxQuantity,
+                    StockQuantity = optionSeed.StockQuantity,
                     DisplayOrder = optionSeed.DisplayOrder,
                     IsAvailable = optionSeed.IsAvailable,
                     CreatedAt = DateTime.UtcNow.AddDays(-44)
@@ -1098,11 +1300,14 @@ public static class IdentitySeeder
             new(1, "Extra roll", 90, OptionAdjustmentType.Add, 3, 1),
             new(2, "Sesame sprinkle", 15, OptionAdjustmentType.Add, 1, 2)
         ]),
+        // A required group: when the tracked sauce runs out the group must still be satisfiable from
+        // the others, or the dish becomes unorderable without anything saying why.
         new("Chicken Wings", 900003, "Sauce", true, 1, 1, 1,
         [
             new(1, "Buffalo", 0, OptionAdjustmentType.Add, 1, 1),
             new(2, "Smoky BBQ", 20, OptionAdjustmentType.Add, 1, 2),
-            new(3, "Honey garlic", 30, OptionAdjustmentType.Add, 1, 3)
+            new(3, "Honey garlic", 30, OptionAdjustmentType.Add, 1, 3),
+            new(4, "Reserve chilli oil", 40, OptionAdjustmentType.Add, 1, 4, true, 2)
         ]),
         new("Chicken Wings", 900004, "Heat level", true, 1, 1, 2,
         [
@@ -1110,11 +1315,19 @@ public static class IdentitySeeder
             new(2, "Hot", 0, OptionAdjustmentType.Add, 1, 2),
             new(3, "Extra hot", 10, OptionAdjustmentType.Add, 1, 3)
         ]),
+        // Garlic Bread carries dish stock of its own, so the two limits meet here on purpose: a
+        // tracked modifier can run out while the dish is still available, and the multiplication —
+        // two breads each taking two shavings is four — is where a naive count oversells.
         new("Garlic Bread", 900005, "Finish", false, 0, 2, 1,
         [
             new(1, "Add mozzarella", 80, OptionAdjustmentType.Add, 1, 1),
             new(2, "Extra garlic butter", 25, OptionAdjustmentType.Add, 1, 2),
-            new(3, "Chilli flakes", 0, OptionAdjustmentType.Add, 1, 3)
+            new(3, "Chilli flakes", 0, OptionAdjustmentType.Add, 1, 3),
+            // Up to two per bread, three left in the kitchen: one order of two leaves one, and the
+            // next order of two is refused on the modifier while the bread itself is still there.
+            new(4, "Truffle shavings", 250, OptionAdjustmentType.Add, 2, 4, true, 3),
+            // Fewer left than one item may take, so asking for three is refused outright.
+            new(5, "Last of the aioli", 60, OptionAdjustmentType.Add, 3, 5, true, 2)
         ]),
         new("Butter Chicken", 900006, "Spice level", true, 1, 1, 1,
         [
@@ -1413,13 +1626,21 @@ public static class IdentitySeeder
         public string AvatarUrl => $"/seed-avatars/avatar-{GetStableAvatarIndex(Email)}.svg";
     }
 
+    /// <param name="LegalBusinessName">Empty on purpose for a few seeds — see SeedPaginationDemoDataAsync.</param>
+    /// <param name="Abn">Checksum-valid demo values, or empty to exercise the missing-identity paths.</param>
     private sealed record SeedRestaurant(
         Guid Id,
         string Name,
         string Address,
         string Phone,
         bool IsActive,
-        string CoverItemName);
+        string CoverItemName,
+        string LegalBusinessName = "",
+        string? Abn = null,
+        bool GstRegistered = false,
+        string BusinessContactEmail = "",
+        string RefundContactEmail = "",
+        string? CustomerSurchargeNotice = null);
 
     private sealed record DemoRefundSeed(
         int OrderSequence,
@@ -1453,7 +1674,16 @@ public static class IdentitySeeder
         int DisplayOrder,
         IReadOnlyList<MenuOptionSeed> Options)
     {
-        public ResolvedMenuOptionGroupSeed Resolve(Guid menuItemId, Guid restaurantId) =>
+        /// <summary>
+        /// Places this group on one restaurant's menu item, with its option prices divided into that
+        /// restaurant's currency.
+        /// </summary>
+        /// <remarks>
+        /// The table below is written in the rupees this demo menu started in, and it is matched by
+        /// dish name — so the same figures land on a restaurant trading in rupees and on one trading
+        /// in dollars. Dividing here is what keeps a A$7 lassi from offering a A$280 "Large".
+        /// </remarks>
+        public ResolvedMenuOptionGroupSeed Resolve(Guid menuItemId, Guid restaurantId, decimal priceDivisor) =>
             new(
                 menuItemId,
                 restaurantId,
@@ -1463,7 +1693,14 @@ public static class IdentitySeeder
                 MinSelections,
                 MaxSelections,
                 DisplayOrder,
-                Options);
+                priceDivisor == 1m
+                    ? Options
+                    : Options
+                        .Select(option => option with
+                        {
+                            PriceAdjustment = ConvertOptionPrice(option.PriceAdjustment, priceDivisor)
+                        })
+                        .ToArray());
     }
 
     private sealed record ResolvedMenuOptionGroupSeed(
@@ -1484,7 +1721,9 @@ public static class IdentitySeeder
         OptionAdjustmentType AdjustmentType,
         int MaxQuantity,
         int DisplayOrder,
-        bool IsAvailable = true);
+        bool IsAvailable = true,
+        /// <summary>Units left of this modifier, or null when it is not counted.</summary>
+        int? StockQuantity = null);
 
     private static int GetStableAvatarIndex(string value)
     {
@@ -1516,6 +1755,535 @@ public static class IdentitySeeder
         return !string.IsNullOrWhiteSpace(imageUrl) &&
             (imageUrl.Contains("/seed-menu/", StringComparison.OrdinalIgnoreCase) ||
                 imageUrl.Contains("upload.wikimedia.org/wikipedia/commons/8/8a/Grilled_salmon.jpg", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// The DineFlow Kitchen trades around the clock, unlike every other seeded restaurant.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It is the restaurant everything gets tried against, and 09:00–21:00 in Adelaide means the
+    /// demo is shut for most of a working day elsewhere — every session began by prising the hours
+    /// open and ended by putting them back, which is both tedious and a good way to leave the data
+    /// half-edited.
+    /// </para>
+    /// <para>
+    /// 00:00 to 00:00 is how this system spells "all day"; see
+    /// <c>RestaurantOperatingHoursService</c>, which treats an equal open and close as 24 hours
+    /// rather than a zero-length window.
+    /// </para>
+    /// <para>
+    /// Only this restaurant. The others keep ordinary trading hours so that closed-restaurant
+    /// behaviour — refused orders, the auto-refund sweep — still has somewhere to be tested.
+    /// </para>
+    /// </remarks>
+    private const string RestaurantOneAlwaysOpenJson =
+        "[{\"dayOfWeek\":0,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]}," +
+        "{\"dayOfWeek\":1,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]}," +
+        "{\"dayOfWeek\":2,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]}," +
+        "{\"dayOfWeek\":3,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]}," +
+        "{\"dayOfWeek\":4,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]}," +
+        "{\"dayOfWeek\":5,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]}," +
+        "{\"dayOfWeek\":6,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]}]";
+
+    /// <summary>
+    /// The hours a restaurant is created with when nobody has said otherwise. Recognised so the
+    /// migration below can tell "never touched" from "somebody set these on purpose".
+    /// </summary>
+    private const string UntouchedDefaultOpeningHoursJson =
+        "[{\"dayOfWeek\":0,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]}," +
+        "{\"dayOfWeek\":1,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]}," +
+        "{\"dayOfWeek\":2,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]}," +
+        "{\"dayOfWeek\":3,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]}," +
+        "{\"dayOfWeek\":4,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]}," +
+        "{\"dayOfWeek\":5,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]}," +
+        "{\"dayOfWeek\":6,\"isOpen\":true,\"windows\":[{\"opensAt\":\"09:00\",\"closesAt\":\"21:00\"}]}]";
+
+    /// <summary>
+    /// Menu prices for The DineFlow Kitchen, in Australian dollars.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The restaurant used to be in Kathmandu priced in rupees, which made it the one demo
+    /// restaurant that could never connect Stripe — Stripe does not operate in Nepal, so
+    /// "Connect Stripe" failed with country_unsupported however many times it was tried.
+    /// </para>
+    /// <para>
+    /// These are what the dishes would cost in an Australian restaurant, not the rupee figures
+    /// converted: A$2.71 for spring rolls is an exchange rate, not a price. Held in one place so a
+    /// fresh database and a migrated one end up charging the same.
+    /// </para>
+    /// </remarks>
+    private static readonly IReadOnlyDictionary<string, decimal> RestaurantOnePrices =
+        new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Veg Spring Rolls"] = 9.50m,
+            ["Chicken Wings"] = 16.00m,
+            ["Garlic Bread"] = 8.50m,
+            ["Daily Soup"] = 9.00m,
+            ["Butter Chicken"] = 24.00m,
+            ["Veg Fried Rice"] = 15.00m,
+            ["Grilled Salmon"] = 32.00m,
+            ["Mushroom Pasta"] = 19.50m,
+            ["Chef's Tasting Curry"] = 28.00m,
+            ["Kitchen Staple Dal"] = 13.00m,
+            ["Tandoori Platter"] = 34.00m,
+            ["Mango Lassi"] = 7.00m,
+            ["Masala Chai"] = 4.50m,
+            ["Fresh Lime Soda"] = 5.50m,
+            ["House Kombucha"] = 8.00m,
+            ["Gulab Jamun"] = 8.00m,
+            ["Chocolate Lava Cake"] = 12.50m,
+            ["Seasonal Sorbet"] = 10.00m,
+        };
+
+    /// <summary>
+    /// Stock levels for The DineFlow Kitchen, covering each state worth exercising by hand.
+    /// </summary>
+    /// <remarks>
+    /// A null value means the dish is not stock-tracked and never runs out — the control case, and
+    /// what every seeded dish used to be, which is why the stock system could not be tried at all
+    /// without editing the database first.
+    /// </remarks>
+    private static readonly (string Name, int? Stock, bool SoldOut)[] StockTestingBaseline =
+    [
+        ("Veg Spring Rolls", null, false),      // untracked: unlimited, the control
+        ("Butter Chicken", null, false),        // untracked
+        ("Mango Lassi", null, false),           // untracked
+        ("Gulab Jamun", null, false),           // untracked
+        ("Masala Chai", 48, false),             // comfortable
+        ("Kitchen Staple Dal", 60, false),      // comfortable
+        ("Chicken Wings", 24, false),           // comfortable
+        ("Fresh Lime Soda", 6, false),          // getting low
+        ("Chocolate Lava Cake", 5, false),      // getting low
+        ("Garlic Bread", 3, false),             // low
+        ("Daily Soup", 2, false),               // one order of two empties it
+        ("Veg Fried Rice", 1, false),           // last portion: race two checkouts at this one
+        ("Tandoori Platter", 1, false),         // last portion
+        ("Grilled Salmon", 0, true),            // ran out
+        ("Seasonal Sorbet", 0, true),           // ran out
+        ("Chef's Tasting Curry", 12, true),     // in stock but manually stopped: the flag must win
+    ];
+
+    /// <summary>
+    /// Gives an existing demo database the stock levels above, once.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The main demo block only runs against a completely empty database, so a developer who
+    /// already has one would never see these values. This fills them in — but only when the
+    /// restaurant has no stock-tracked dish at all, because stock is operational data: rewriting it
+    /// on every start would wipe out whatever state a test was in the middle of.
+    /// </para>
+    /// <para>
+    /// That condition doubles as the way to start over. Clear every stock count on this restaurant
+    /// and the next start rebuilds the baseline.
+    /// </para>
+    /// </remarks>
+    /// <summary>
+    /// Rupee figures divided by this land close to the Australian prices above.
+    /// </summary>
+    /// <remarks>
+    /// Only used for the demo order history, where what matters is that the numbers stay in
+    /// proportion to each other and stop reading as A$9,250 for dinner.
+    /// </remarks>
+    private const decimal RupeeToAudDivisor = 27m;
+
+    /// <summary>
+    /// Moves The DineFlow Kitchen from Nepal to Australia in a database that already exists.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The demo menu is only built against an empty database, so changing the seed alone would
+    /// leave every existing developer with the restaurant that can never connect Stripe. Runs once,
+    /// keyed on the country still being NP, and leaves a restaurant somebody has already moved
+    /// themselves alone.
+    /// </para>
+    /// <para>
+    /// The order history is rescaled rather than left behind. Its amounts were rupees; relabelling
+    /// the currency without touching them would put A$9,250 dinners into the revenue reports.
+    /// </para>
+    /// </remarks>
+    internal static async Task MigrateRestaurantOneToAustraliaAsync(AppDbContext dbContext)
+    {
+        var restaurant = await dbContext.Restaurants
+            .FirstOrDefaultAsync(item => item.Id == RestaurantOneId);
+
+        if (restaurant is null || !string.Equals(restaurant.CountryCode, "NP", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        restaurant.CountryCode = "AU";
+        restaurant.Currency = "AUD";
+        restaurant.Timezone = "Australia/Adelaide";
+        restaurant.Address = "42 Flavour Street, Adelaide SA 5000";
+        restaurant.Phone = "+61-8-8100-4242";
+        restaurant.UpdatedAt = DateTime.UtcNow;
+
+        var menuItems = await dbContext.MenuItems
+            .Where(item => item.RestaurantId == RestaurantOneId)
+            .ToListAsync();
+
+        foreach (var item in menuItems)
+        {
+            if (RestaurantOnePrices.TryGetValue(item.Name, out var price))
+            {
+                item.Price = price;
+                item.UpdatedAt = DateTime.UtcNow;
+            }
+        }
+
+        await RescaleRestaurantOneOrderHistoryAsync(dbContext);
+        await dbContext.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Brings the demo order history into the same currency as the menu.
+    /// </summary>
+    /// <remarks>
+    /// Line prices are scaled and the order total is then rebuilt from them, rather than scaling the
+    /// total separately — otherwise a receipt would show lines that do not add up to what it says
+    /// at the bottom. Payment rows follow the order they belong to for the same reason.
+    /// </remarks>
+    private static async Task RescaleRestaurantOneOrderHistoryAsync(AppDbContext dbContext)
+    {
+        var orders = await dbContext.Orders
+            .Include(order => order.OrderItems)
+            .Include(order => order.Payments)
+            .Where(order => order.RestaurantId == RestaurantOneId)
+            .ToListAsync();
+
+        foreach (var order in orders)
+        {
+            foreach (var line in order.OrderItems)
+            {
+                line.UnitPrice = Math.Round(line.UnitPrice / RupeeToAudDivisor, 2, MidpointRounding.AwayFromZero);
+
+                foreach (var option in line.SelectedOptions)
+                {
+                    option.PriceAdjustmentSnapshot = Math.Round(
+                        option.PriceAdjustmentSnapshot / RupeeToAudDivisor, 2, MidpointRounding.AwayFromZero);
+                }
+            }
+
+            order.TotalAmount = order.OrderItems.Count > 0
+                ? order.OrderItems.Sum(line => line.UnitPrice * line.Quantity)
+                : Math.Round(order.TotalAmount / RupeeToAudDivisor, 2, MidpointRounding.AwayFromZero);
+
+            foreach (var payment in order.Payments)
+            {
+                payment.Currency = "aud";
+                payment.AmountCents = (long)Math.Round(order.TotalAmount * 100m, MidpointRounding.AwayFromZero);
+                payment.UpdatedAt = DateTime.UtcNow;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Opens The DineFlow Kitchen around the clock in a database that already exists.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Keyed on the hours still being the ones a restaurant is created with. Anyone who has set
+    /// their own — a closed day, a split lunch and dinner service — keeps them; the point is to fix
+    /// the default, not to overrule a decision.
+    /// </para>
+    /// <para>
+    /// That also makes it reversible: set the hours back to 09:00–21:00 every day and the next
+    /// start opens them again, which is the same escape hatch the stock baseline has.
+    /// </para>
+    /// </remarks>
+    internal static async Task OpenRestaurantOneAllDayAsync(AppDbContext dbContext)
+    {
+        var restaurant = await dbContext.Restaurants
+            .FirstOrDefaultAsync(item => item.Id == RestaurantOneId);
+
+        if (restaurant is null ||
+            !string.Equals(restaurant.OpeningHoursJson, UntouchedDefaultOpeningHoursJson, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        restaurant.OpeningHoursJson = RestaurantOneAlwaysOpenJson;
+        restaurant.UpdatedAt = DateTime.UtcNow;
+        await dbContext.SaveChangesAsync();
+    }
+
+    internal static async Task SeedStockTestingBaselineAsync(AppDbContext dbContext)
+    {
+        var items = await dbContext.MenuItems
+            .Where(item => item.RestaurantId == RestaurantOneId)
+            .ToListAsync();
+
+        if (items.Count == 0 || items.Any(item => item.StockQuantity != null))
+        {
+            return;
+        }
+
+        items.AddRange(await AddMissingStockTestingDishesAsync(dbContext, items));
+
+        var itemsByName = items
+            .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        var changed = false;
+
+        foreach (var (name, stock, soldOut) in StockTestingBaseline)
+        {
+            if (!itemsByName.TryGetValue(name, out var item) || stock is null)
+            {
+                continue;
+            }
+
+            item.StockQuantity = stock;
+            item.IsSoldOut = soldOut;
+            item.UpdatedAt = DateTime.UtcNow;
+            changed = true;
+        }
+
+        if (changed)
+        {
+            await dbContext.SaveChangesAsync();
+        }
+    }
+
+    /// <summary>
+    /// What each of The DineFlow Kitchen's dishes declares about allergens.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every seeded dish declared nothing at all, so the panel a customer reads before ordering had
+    /// only ever been seen saying "not declared" — the one state it is least important to get right.
+    /// Wording follows the Australian labelling vocabulary the rest of this menu assumes.
+    /// </para>
+    /// <para>
+    /// The spread is deliberate, so each branch of the panel can be reached from the menu: dishes
+    /// that declare allergens outright, one that only warns what it may contain, one that describes
+    /// its kitchen but declares no allergen, and two that declare nothing — the control, and the
+    /// case that must never read as "free from everything".
+    /// </para>
+    /// </remarks>
+    private static readonly (string Name, string? Contains, string? MayContain, string? CrossContact)[]
+        RestaurantOneAllergens =
+    [
+        ("Butter Chicken", "Milk, cashew (tree nut)", "Wheat (gluten)",
+            "Cooked in a kitchen that also handles wheat, peanut and sesame."),
+        ("Chicken Wings", "Wheat (gluten), soy", "Egg, sesame",
+            "Fried in oil shared with battered seafood."),
+        ("Veg Spring Rolls", "Wheat (gluten), soy, sesame", "Egg",
+            "Fried in oil shared with battered seafood."),
+        ("Garlic Bread", "Wheat (gluten), milk", null,
+            "Baked on trays shared with sesame-topped breads."),
+        ("Grilled Salmon", "Fish", "Milk", null),
+        ("Mushroom Pasta", "Wheat (gluten), milk, egg", null,
+            "Prepared on a bench shared with tree nuts."),
+        ("Chocolate Lava Cake", "Milk, egg, wheat (gluten), soy", "Tree nuts",
+            "Made in a kitchen that also handles peanut."),
+        ("Gulab Jamun", "Milk, wheat (gluten)", "Tree nuts", null),
+        ("Mango Lassi", "Milk", null, null),
+        ("Masala Chai", "Milk", null, null),
+        ("Veg Fried Rice", "Soy, sesame", "Egg", null),
+        ("Tandoori Platter", "Milk", "Tree nuts, sesame",
+            "Cooked in a tandoor shared with wheat breads."),
+        ("Chef's Tasting Curry", "Milk, cashew (tree nut), mustard", "Peanut",
+            "The tasting menu changes weekly and the kitchen handles every major allergen."),
+        // Declares no allergen but warns what it may contain: the panel must lead with that.
+        ("Kitchen Staple Dal", null, "Milk",
+            "Simmered in pans shared with dairy-based curries."),
+        ("Seasonal Sorbet", null, "Milk, tree nuts", null),
+        // Describes its kitchen but declares no allergen. A cross-contact statement is not an
+        // allergen answer and must not be summarised as one.
+        ("Daily Soup", null, null, "The recipe changes daily — ask staff before ordering."),
+        // The controls: nothing declared at all.
+        ("Fresh Lime Soda", null, null, null),
+        ("House Kombucha", null, null, null),
+    ];
+
+    /// <summary>
+    /// What a modifier itself contains, keyed by dish, group and option.
+    /// </summary>
+    /// <remarks>
+    /// The point of the panel recomputing as options are ticked is that adding naan to a dairy-only
+    /// curry adds gluten. Without these there was nothing on the menu that could demonstrate it.
+    /// </remarks>
+    private static readonly (string Dish, string Group, string Option, string? Contains, string? MayContain)[]
+        RestaurantOneOptionAllergens =
+    [
+        ("Butter Chicken", "Side", "Butter naan", "Wheat (gluten), milk", null),
+        ("Butter Chicken", "Side", "Garlic naan", "Wheat (gluten), milk", null),
+        ("Butter Chicken", "Extras", "Extra gravy", "Milk, cashew (tree nut)", null),
+        ("Chicken Wings", "Sauce", "Honey garlic", "Sesame", null),
+        ("Chicken Wings", "Sauce", "Smoky BBQ", null, "Mustard"),
+        ("Veg Spring Rolls", "Dip", "Mint chutney", null, "Peanut"),
+        ("Veg Spring Rolls", "Add-ons", "Sesame sprinkle", "Sesame", null),
+        ("Veg Fried Rice", "Protein", "Add egg", "Egg", null),
+        ("Veg Fried Rice", "Protein", "Add paneer", "Milk", null),
+        ("Mushroom Pasta", "Add-ons", "Parmesan", "Milk", null),
+        ("Mushroom Pasta", "Add-ons", "Truffle oil", null, "Tree nuts"),
+        ("Garlic Bread", "Finish", "Add mozzarella", "Milk", null),
+        ("Chocolate Lava Cake", "Topping", "Vanilla ice cream", "Milk, egg", "Tree nuts"),
+        ("Masala Chai", "Milk", "Oat milk", "Oats (gluten)", null),
+        // Declares nothing, so a plate can be assembled that adds no allergen of its own.
+        ("Masala Chai", "Milk", "No milk", null, null),
+    ];
+
+    /// <summary>
+    /// Gives an existing demo database the declarations above.
+    /// </summary>
+    /// <remarks>
+    /// Only fills a dish or option that declares nothing at all, so a restaurant that has entered
+    /// its own is never overwritten — the same restraint the stock and opening-hours baselines show,
+    /// and the same escape hatch: clear all three fields and the next start fills them again.
+    /// </remarks>
+    internal static async Task SeedRestaurantOneAllergensAsync(AppDbContext dbContext)
+    {
+        static bool DeclaresNothing(string? contains, string? mayContain, string? crossContact) =>
+            string.IsNullOrWhiteSpace(contains)
+            && string.IsNullOrWhiteSpace(mayContain)
+            && string.IsNullOrWhiteSpace(crossContact);
+
+        var items = await dbContext.MenuItems
+            .Where(item => item.RestaurantId == RestaurantOneId)
+            .ToListAsync();
+
+        if (items.Count == 0)
+        {
+            return;
+        }
+
+        var itemsByName = items
+            .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        var changed = false;
+
+        foreach (var (name, contains, mayContain, crossContact) in RestaurantOneAllergens)
+        {
+            if (!itemsByName.TryGetValue(name, out var item)
+                || !DeclaresNothing(item.Allergens, item.MayContainAllergens, item.CrossContactStatement))
+            {
+                continue;
+            }
+
+            item.Allergens = contains;
+            item.MayContainAllergens = mayContain;
+            item.CrossContactStatement = crossContact;
+            item.UpdatedAt = DateTime.UtcNow;
+            changed = true;
+        }
+
+        var options = await dbContext.MenuItemOptions
+            .Where(option => option.RestaurantId == RestaurantOneId)
+            .Join(
+                dbContext.MenuItemOptionGroups,
+                option => option.GroupId,
+                group => group.Id,
+                (option, group) => new { Option = option, GroupName = group.Name })
+            .Join(
+                dbContext.MenuItems,
+                row => row.Option.MenuItemId,
+                menuItem => menuItem.Id,
+                (row, menuItem) => new { row.Option, row.GroupName, DishName = menuItem.Name })
+            .ToListAsync();
+
+        var optionsByKey = options
+            .GroupBy(row => SeededOptionKey(row.DishName, row.GroupName, row.Option.Name))
+            .ToDictionary(group => group.Key, group => group.First().Option);
+
+        foreach (var (dish, group, option, contains, mayContain) in RestaurantOneOptionAllergens)
+        {
+            if (!optionsByKey.TryGetValue(SeededOptionKey(dish, group, option), out var row)
+                || !DeclaresNothing(row.Allergens, row.MayContainAllergens, row.CrossContactStatement))
+            {
+                continue;
+            }
+
+            row.Allergens = contains;
+            row.MayContainAllergens = mayContain;
+            row.UpdatedAt = DateTime.UtcNow;
+            changed = true;
+        }
+
+        if (changed)
+        {
+            await dbContext.SaveChangesAsync();
+        }
+    }
+
+    /// <summary>
+    /// The dishes that exist only to be tested against, and the category each belongs in.
+    /// </summary>
+    private static readonly (string Name, string Category, string Description, decimal Price, int Order, string Image)[]
+        StockTestingDishes =
+    [
+        ("Kitchen Staple Dal", "Main Course", "Plenty in stock: the control for anything stock-tracked", 290m, 6, "Veg Fried Rice"),
+        ("Tandoori Platter", "Main Course", "One portion left: for last-one and two-customers-at-once tests", 780m, 7, "Butter Chicken"),
+        ("Daily Soup", "Starters", "Two portions: ordering both should flip it to sold out", 210m, 4, "Garlic Bread"),
+        ("Seasonal Sorbet", "Desserts", "Zero stock: should refuse to be added to a cart", 260m, 3, "Gulab Jamun"),
+    ];
+
+    /// <summary>
+    /// Creates any stock-testing dish this database does not have yet, and returns the new rows.
+    /// </summary>
+    /// <remarks>
+    /// A database seeded before these dishes existed would otherwise be missing exactly the cases
+    /// worth trying, since the main demo block only ever runs against an empty database.
+    /// </remarks>
+    internal static async Task<List<MenuItem>> AddMissingStockTestingDishesAsync(
+        AppDbContext dbContext,
+        IReadOnlyCollection<MenuItem> existingItems)
+    {
+        var existingNames = existingItems
+            .Select(item => item.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missing = StockTestingDishes
+            .Where(dish => !existingNames.Contains(dish.Name))
+            .ToArray();
+
+        if (missing.Length == 0)
+        {
+            return [];
+        }
+
+        var categories = await dbContext.MenuCategories
+            .Where(category => category.RestaurantId == RestaurantOneId)
+            .ToListAsync();
+        var categoriesByName = categories
+            .GroupBy(category => category.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+
+        var created = new List<MenuItem>();
+
+        foreach (var dish in missing)
+        {
+            if (!categoriesByName.TryGetValue(dish.Category, out var category))
+            {
+                // A renamed or removed category is the developer's own menu, not something to
+                // second-guess by inventing one.
+                continue;
+            }
+
+            created.Add(new MenuItem
+            {
+                Id = Guid.NewGuid(),
+                RestaurantId = RestaurantOneId,
+                CategoryId = category.Id,
+                Name = dish.Name,
+                Description = dish.Description,
+                Price = dish.Price,
+                DisplayOrder = dish.Order,
+                IsAvailable = true,
+                ImageUrl = GetSeedMenuImageUrl(dish.Image),
+                CreatedAt = DateTime.UtcNow
+            });
+        }
+
+        if (created.Count > 0)
+        {
+            await dbContext.MenuItems.AddRangeAsync(created);
+            await dbContext.SaveChangesAsync();
+        }
+
+        return created;
     }
 
     private static async Task BackfillSeedMenuImagesAsync(AppDbContext dbContext)

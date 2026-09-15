@@ -10,6 +10,8 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
+using DineFlow.Api.Services;
+
 namespace DineFlow.Api.Controllers;
 
 [ApiController]
@@ -20,8 +22,9 @@ public sealed class StaffOrdersController(
     UserManager<ApplicationUser> userManager) : ControllerBase
 {
     [HttpGet]
-    public async Task<ActionResult<PagedResponse<AdminOrderResponse>>> GetRestaurantOrders(
+    public async Task<ActionResult<StaffOrderPageResponse>> GetRestaurantOrders(
         [FromQuery] AdminOrderListRequest request,
+        [FromQuery] string? queue,
         CancellationToken cancellationToken)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -37,14 +40,20 @@ public sealed class StaffOrdersController(
             });
         }
 
+        if (!string.IsNullOrWhiteSpace(queue) && !Infrastructure.Orders.StaffOrderQueue.IsKnown(queue))
+        {
+            return BadRequest(new
+            {
+                message = "Unsupported queue value.",
+                allowedValues = Infrastructure.Orders.StaffOrderQueue.All
+            });
+        }
+
+        // Filters first, without the related data. The queue counts are taken from this, and asking
+        // for every order's items in order to count orders would fetch the whole restaurant's history
+        // to answer a number on a tab.
         var query = dbContext.Orders
             .AsNoTracking()
-            .Include(order => order.OrderItems)
-                .ThenInclude(item => item.SelectedOptions)
-            .Include(order => order.Payments)
-            .Include(order => order.Customer)
-            .Include(order => order.Restaurant)
-            .Include(order => order.Table)
             .Where(order => order.RestaurantId == user.RestaurantId);
 
         if (!string.IsNullOrWhiteSpace(request.Status))
@@ -61,15 +70,33 @@ public sealed class StaffOrdersController(
         var search = request.Search?.Trim();
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var pattern = $"%{search}%";
-            var pickupSearch = search.TrimStart('#');
-            var hasPickupNumber = int.TryParse(pickupSearch, out var pickupNumber);
-            query = query.Where(order =>
-                EF.Functions.ILike(order.OrderNumber, pattern) ||
-                (hasPickupNumber && order.PickupNumber == pickupNumber) ||
-                (order.Table != null && EF.Functions.ILike(order.Table.TableNumber, pattern)) ||
-                order.OrderItems.Any(item => EF.Functions.ILike(item.MenuItemNameSnapshot, pattern)));
+            // Applied after the restaurant scope above, so a search can only ever reach this
+            // restaurant's own orders.
+            query = query.Where(StaffOrderSearch.Predicate(search));
         }
+
+        var utcNow = DateTime.UtcNow;
+        var queueCounts = await Infrastructure.Orders.StaffOrderQueue.CountAsync(query, utcNow, cancellationToken);
+
+        if (!string.IsNullOrWhiteSpace(queue))
+        {
+            query = query.Where(Infrastructure.Orders.StaffOrderQueue.Predicate(queue, utcNow));
+        }
+
+        // Only now the related data, and only for the rows that will be returned.
+        query = query
+            .Include(order => order.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
+            // The refunds have to come with the payments: MapToAdminResponse works out how much of
+            // each line was refunded from them, and without them every line reports nothing
+            // refunded — so a kitchen screen shows a dish to make that has already been paid back.
+            .Include(order => order.Payments)
+                .ThenInclude(payment => payment.Refunds)
+                    .ThenInclude(refund => refund.Items)
+            .Include(order => order.RefundRequests)
+            .Include(order => order.Customer)
+            .Include(order => order.Restaurant)
+            .Include(order => order.Table);
 
         var sortBy = string.IsNullOrWhiteSpace(request.SortBy) ? "createdAt" : request.SortBy.Trim();
         var sortedQuery = sortBy.ToLowerInvariant() switch
@@ -108,12 +135,13 @@ public sealed class StaffOrdersController(
             .AsSplitQuery()
             .ToPagedResponseAsync(request.Page, request.PageSize, cancellationToken);
 
-        return Ok(new PagedResponse<AdminOrderResponse>
+        return Ok(new StaffOrderPageResponse
         {
             Items = page.Items.Select(AdminOrdersController.MapToAdminResponse).ToList(),
             Page = page.Page,
             PageSize = page.PageSize,
-            TotalItems = page.TotalItems
+            TotalItems = page.TotalItems,
+            QueueCounts = queueCounts
         });
     }
 }

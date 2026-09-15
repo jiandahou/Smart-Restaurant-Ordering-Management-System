@@ -1,3 +1,4 @@
+using DineFlow.Infrastructure.Orders;
 namespace DineFlow.Api.Contracts.Order;
 
 public class OrderResponse
@@ -5,6 +6,36 @@ public class OrderResponse
     public Guid Id { get; set; }
 
     public Guid? RestaurantId { get; set; }
+
+    // Supplier details the customer's own receipt has to carry: an Australian proof of
+    // transaction needs the supplier's name and ABN, and a tax invoice needs the GST position.
+    public string? RestaurantName { get; set; }
+
+    public string? RestaurantLegalBusinessName { get; set; }
+
+    public string? RestaurantAbn { get; set; }
+
+    public bool RestaurantGstRegistered { get; set; }
+
+    /// <summary>Whether prices already include GST, for the receipt wording.</summary>
+    public bool RestaurantPricesIncludeGst { get; set; }
+
+    /// <summary>
+    /// Whether the restaurant allows settling at the counter, and whether it can take a card right
+    /// now. Sent so a page reached from an order alone — with no cart behind it — can still offer
+    /// the payment choices that actually exist.
+    /// </summary>
+    public string RestaurantPaymentPolicy { get; set; } = string.Empty;
+
+    public bool RestaurantOnlinePaymentsEnabled { get; set; }
+
+    public string? RestaurantAddress { get; set; }
+
+    public string? RestaurantPhone { get; set; }
+
+    public string? RestaurantRefundContactEmail { get; set; }
+
+    public string? RestaurantCustomerSurchargeNotice { get; set; }
 
     public Guid? TableId { get; set; }
 
@@ -40,11 +71,69 @@ public class OrderResponse
 
     public DateTime? UpdatedAt { get; set; }
 
-    public CustomerRefundRequestResponse? LatestRefundRequest { get; set; }
+    /// When the payment settled. The clock the acceptance wait is measured against.
+    public DateTime? PaidAt { get; set; }
+
+    /// True once the customer may cancel this paid order themselves and be refunded.
+    public bool CanCancelForRefund { get; set; }
+
+    /// UTC instant that right becomes available, so the page can count down to it.
+    public DateTime? CancellableForRefundAt { get; set; }
+
+    /// <summary>
+    /// UTC instant an unpaid order releases the stock and pickup number it is holding, or null when
+    /// it holds nothing — already paid, already settled, or a payment attempt is in flight.
+    /// </summary>
+    public DateTime? UnpaidExpiresAt { get; set; }
+
+    /// <summary>
+    /// Why this order was rejected or cancelled, as whoever ended it recorded at the time.
+    /// </summary>
+    /// <remarks>
+    /// Staff already choose a reason when they turn an order away — "Item is unavailable",
+    /// "Duplicate order" — and it was written to the order's history and stopped there. The customer
+    /// saw their order become Rejected with nothing beside it, which is the moment they most need
+    /// telling: whether to reorder without that dish, or not to bother.
+    /// </remarks>
+    public OrderClosureReason? ClosureReason { get; set; }
+
+    /// <summary>
+    /// Every refund request filed against this order, newest first.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Only the newest was sent, and an order can carry several: one pending request at a time, but
+    /// a rejected or settled one frees the customer to file again. What the customer saw was the
+    /// last thing they did, standing in front of everything that had already happened to their
+    /// money. On this database that hid eight of fourteen requests, seven of them approved — one
+    /// order had five approved refunds totalling A$10.48 and showed the newest A$1.96, and another
+    /// showed a rejected one cent with an approved A$11.46 behind it.
+    /// </para>
+    /// <para>
+    /// A refund is the restaurant returning money, and the customer's record of it should not be
+    /// overwritten by their next question about the same order.
+    /// </para>
+    /// </remarks>
+    public List<CustomerRefundRequestResponse> RefundRequests { get; set; } = new();
 
     public OrderRefundBalance RefundBalance { get; set; } = new();
 
     public List<OrderItemResponse> OrderItems { get; set; } = new();
+}
+
+/// <summary>How an order came to be closed, in terms a customer can act on.</summary>
+public sealed class OrderClosureReason
+{
+    /// <summary>"Reject" or "Cancel" — who turned it away matters as much as why.</summary>
+    public string Action { get; set; } = string.Empty;
+
+    /// <summary>The restaurant's own wording, verbatim. Null when none was recorded.</summary>
+    public string? Reason { get; set; }
+
+    /// <summary>True when the customer ended the order themselves.</summary>
+    public bool EndedByCustomer { get; set; }
+
+    public DateTime At { get; set; }
 }
 
 public class OrderRefundBalance
@@ -72,6 +161,13 @@ public class OrderItemResponse
 
     public decimal BasePriceSnapshot { get; set; }
 
+    /// <summary>The dish's allergen declaration as it read when the order was placed.</summary>
+    public string? AllergensSnapshot { get; set; }
+
+    public string? MayContainAllergensSnapshot { get; set; }
+
+    public string? CrossContactStatementSnapshot { get; set; }
+
     public string ItemNameSnapshot { get; set; } = string.Empty;
 
     /// Current menu image for this item, when the menu item still exists.
@@ -89,6 +185,16 @@ public class OrderItemResponse
 
     /// Money that can still be requested against this line before applying the order-wide cap.
     public long RefundableAmountCents { get; set; }
+
+    /// <summary>
+    /// Whether this line has been refunded as a whole, extra by extra, or not yet at all.
+    /// </summary>
+    /// <remarks>
+    /// A line is refunded one way or the other and never both, so the first refund on it settles
+    /// which choices remain. Sent so the screen can grey out the one that is closed rather than
+    /// offering it and having the request refused.
+    /// </remarks>
+    public string RefundGranularity { get; set; } = nameof(LineRefundGranularity.Untouched);
 
     public decimal UnitPrice { get; set; }
 
@@ -118,6 +224,39 @@ public class OrderItemOptionResponse
     public string OptionNameSnapshot { get; set; } = string.Empty;
 
     public decimal PriceAdjustmentSnapshot { get; set; }
+
+    /// <summary>
+    /// What this extra contributed to the line, and how much of that is still refundable.
+    /// </summary>
+    /// <remarks>
+    /// Both quantities are already applied: two breads each with two lots of truffle contributed
+    /// four lots of its price, and a screen that showed one lot would let a customer ask for a
+    /// quarter of what they paid.
+    /// </remarks>
+    public long ContributionCents { get; set; }
+
+    public long RefundedAmountCents { get; set; }
+
+    public long RefundableAmountCents { get; set; }
+
+    /// <summary>
+    /// Null when this extra can be refunded on its own; otherwise the reason it cannot, in words
+    /// meant for the person reading them.
+    /// </summary>
+    /// <remarks>
+    /// Carried rather than derived on the client so there is one answer to this question. The
+    /// reasons are not obvious from the fields — that an extra which replaced the price has no
+    /// share, or that an order predating the type snapshot cannot be split at all — and a client
+    /// working them out again would eventually disagree with the server that has to enforce them.
+    /// </remarks>
+    public string? RefundIneligibilityReason { get; set; }
+
+    /// <summary>The modifier's allergen declaration as it read when the order was placed.</summary>
+    public string? AllergensSnapshot { get; set; }
+
+    public string? MayContainAllergensSnapshot { get; set; }
+
+    public string? CrossContactStatementSnapshot { get; set; }
 
     public int Quantity { get; set; } = 1;
 }

@@ -13,11 +13,16 @@ public class EmailController : ControllerBase
 {
     private readonly IEmailSender _emailSender;
     private readonly ILogger<EmailController> _logger;
+    private readonly TransactionalEmailLayout _emailLayout;
 
-    public EmailController(IEmailSender emailSender, ILogger<EmailController> logger)
+    public EmailController(
+        IEmailSender emailSender,
+        ILogger<EmailController> logger,
+        TransactionalEmailLayout emailLayout)
     {
         _emailSender = emailSender;
         _logger = logger;
+        _emailLayout = emailLayout;
     }
 
     [HttpPost("test")]
@@ -40,11 +45,15 @@ public class EmailController : ControllerBase
 
         try
         {
+            // Rendered through the real layout: a test that looks nothing like the mail we actually
+            // send proves delivery but not that the message arrives intact and readable.
+            var email = new TransactionalEmail(Heading: subject, Paragraphs: [message]);
+
             await _emailSender.SendAsync(
                 request.To.Trim(),
                 subject,
-                $"<p>{System.Net.WebUtility.HtmlEncode(message)}</p>",
-                message,
+                _emailLayout.RenderHtml(email),
+                _emailLayout.RenderText(email),
                 cancellationToken);
         }
         catch (Exception ex)

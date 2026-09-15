@@ -48,6 +48,9 @@ export type PrintJob = {
   createdAt: string
   updatedAt: string
   completedAt: string | null
+  /** Which station and printer the ticket was meant for; null when it was never claimed. */
+  stationName: string | null
+  printerName: string | null
   order: AdminOrder
 }
 

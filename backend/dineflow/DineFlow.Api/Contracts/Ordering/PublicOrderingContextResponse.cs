@@ -22,6 +22,13 @@ public sealed class PublicOrderingRestaurantResponse
     public required string Address { get; init; }
 
     public required string Phone { get; init; }
+    public required string LegalBusinessName { get; init; }
+    public string? Abn { get; init; }
+    public bool GstRegistered { get; init; }
+    public bool PricesIncludeGst { get; init; }
+    public required string BusinessContactEmail { get; init; }
+    public required string RefundContactEmail { get; init; }
+    public string? CustomerSurchargeNotice { get; init; }
 
     public string? ImageUrl { get; init; }
 

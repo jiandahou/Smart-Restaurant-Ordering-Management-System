@@ -13,26 +13,26 @@ type ChangeEmailState = 'checking' | 'success' | 'error'
 export function ChangeEmailPage() {
   const [searchParams] = useSearchParams()
   const dispatch = useAppDispatch()
-  const [state, setState] = useState<ChangeEmailState>('checking')
-  const [message, setMessage] = useState('Confirming your new email...')
+  // Whether the link is usable is fixed by the URL, so it is derived for the first render rather
+  // than rendered as "checking" and then corrected by an effect.
+  const userId = searchParams.get('userId')
+  const newEmail = searchParams.get('email')
+  const token = searchParams.get('token')
+  const linkIsComplete = Boolean(userId && newEmail && token)
+  const [state, setState] = useState<ChangeEmailState>(linkIsComplete ? 'checking' : 'error')
+  const [message, setMessage] = useState(
+    linkIsComplete
+      ? 'Confirming your new email...'
+      : 'Email change link is missing required information.',
+  )
   const confirmationStartedRef = useRef(false)
 
   useEffect(() => {
-    if (confirmationStartedRef.current) {
+    if (confirmationStartedRef.current || !userId || !newEmail || !token) {
       return
     }
 
     confirmationStartedRef.current = true
-    const userId = searchParams.get('userId')
-    const newEmail = searchParams.get('email')
-    const token = searchParams.get('token')
-
-    if (!userId || !newEmail || !token) {
-      setState('error')
-      setMessage('Email change link is missing required information.')
-      return
-    }
-
     const confirmationPayload = { userId, newEmail, token }
 
     async function run() {
@@ -55,14 +55,14 @@ export function ChangeEmailPage() {
     }
 
     void run()
-  }, [dispatch, searchParams])
+  }, [dispatch, newEmail, token, userId])
 
   return (
     <main className="login-screen">
       <Card className="login-card">
         <CardHeader>
           <p className="eyebrow">DineFlow</p>
-          <CardTitle>Email change</CardTitle>
+          <CardTitle asChild><h1>Email change</h1></CardTitle>
           <CardDescription>{message}</CardDescription>
         </CardHeader>
         <CardContent className="form-grid">

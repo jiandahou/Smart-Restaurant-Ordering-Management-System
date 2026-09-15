@@ -31,20 +31,39 @@ export function getOrderStatusLabel(status: string | number) {
 
 export function OrderStatusBadge({
   status,
+  paymentStatus,
   className,
 }: {
   status: string | number
+  /**
+   * Optional, and worth passing wherever it is known: `Pending` means "waiting for the customer to
+   * pay" before settlement and "waiting for the restaurant to accept" after it, and the two need
+   * opposite responses from whoever is reading the screen.
+   */
+  paymentStatus?: string
   className?: string
 }) {
   const normalizedStatus = normalizeOrderStatus(status)
+  const awaitingAcceptance = normalizedStatus === 'Pending'
+    && (paymentStatus === 'Paid' || paymentStatus === 'PartiallyRefunded')
+  const label = normalizedStatus !== 'Pending' || paymentStatus === undefined
+    ? normalizedStatus
+    : awaitingAcceptance
+      ? 'Awaiting acceptance'
+      : 'Awaiting payment'
 
   return (
     <Badge
       variant="outline"
-      className={cn(orderStatusClasses[normalizedStatus], className)}
-      aria-label={`Order status: ${normalizedStatus}`}
+      className={cn(
+        awaitingAcceptance
+          ? 'border-amber-400 bg-amber-100 text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100'
+          : orderStatusClasses[normalizedStatus],
+        className,
+      )}
+      aria-label={`Order status: ${label}`}
     >
-      {normalizedStatus}
+      {label}
     </Badge>
   )
 }

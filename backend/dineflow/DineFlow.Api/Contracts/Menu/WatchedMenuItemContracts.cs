@@ -33,4 +33,16 @@ public class UpdateMenuItemStockRequest
 {
     /// <summary>Remaining portions. Null turns stock tracking off, making the item unlimited.</summary>
     public int? StockQuantity { get; set; }
+
+    /// <summary>
+    /// Change the count by this much instead of setting it, applied by the database rather than
+    /// computed from a value the client read earlier.
+    ///
+    /// <para>
+    /// Two people pressing "one less" at the same moment both read the same number, both wrote it
+    /// back, and one sale disappeared. A delta cannot lose that way: the row is what is being
+    /// added to, not a number the client remembered.
+    /// </para>
+    /// </summary>
+    public int? AdjustBy { get; set; }
 }

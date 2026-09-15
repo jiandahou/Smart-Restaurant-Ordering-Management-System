@@ -44,6 +44,12 @@ public class MenuItem
 
     public string? Allergens { get; set; }
 
+    public string? MayContainAllergens { get; set; }
+
+    public string? CrossContactStatement { get; set; }
+
+    public DateTime? AllergenInfoLastVerifiedAt { get; set; }
+
     /// <summary>Customer-facing heat level: 0 none, 1 mild, 2 medium, 3 hot.</summary>
     public int SpiceLevel { get; set; }
 

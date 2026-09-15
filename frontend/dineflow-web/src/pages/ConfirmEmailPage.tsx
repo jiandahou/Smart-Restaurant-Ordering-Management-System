@@ -13,25 +13,25 @@ export function ConfirmEmailPage() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const dispatch = useAppDispatch()
-  const [state, setState] = useState<ConfirmState>('checking')
-  const [message, setMessage] = useState('Confirming your email...')
+  // Whether the link is usable is fixed by the URL, so it is derived for the first render rather
+  // than rendered as "checking" and then corrected by an effect.
+  const userId = searchParams.get('userId')
+  const token = searchParams.get('token')
+  const linkIsComplete = Boolean(userId && token)
+  const [state, setState] = useState<ConfirmState>(linkIsComplete ? 'checking' : 'error')
+  const [message, setMessage] = useState(
+    linkIsComplete
+      ? 'Confirming your email...'
+      : 'Confirmation link is missing required information.',
+  )
   const confirmationStartedRef = useRef(false)
 
   useEffect(() => {
-    if (confirmationStartedRef.current) {
+    if (confirmationStartedRef.current || !userId || !token) {
       return
     }
 
     confirmationStartedRef.current = true
-    const userId = searchParams.get('userId')
-    const token = searchParams.get('token')
-
-    if (!userId || !token) {
-      setState('error')
-      setMessage('Confirmation link is missing required information.')
-      return
-    }
-
     const confirmationPayload = { userId, token }
 
     async function run() {
@@ -57,14 +57,14 @@ export function ConfirmEmailPage() {
     }
 
     void run()
-  }, [dispatch, navigate, searchParams])
+  }, [dispatch, navigate, token, userId])
 
   return (
     <main className="login-screen">
       <Card className="login-card">
         <CardHeader>
           <p className="eyebrow">DineFlow</p>
-          <CardTitle>Email confirmation</CardTitle>
+          <CardTitle asChild><h1>Email confirmation</h1></CardTitle>
           <CardDescription>{message}</CardDescription>
         </CardHeader>
         <CardContent className="form-grid">

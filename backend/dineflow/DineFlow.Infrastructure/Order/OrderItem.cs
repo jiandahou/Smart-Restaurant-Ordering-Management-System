@@ -13,6 +13,23 @@ public class OrderItem
 
     public decimal BasePriceSnapshot { get; set; }
 
+    /// <summary>
+    /// The dish's allergen declaration exactly as it read when this order was placed.
+    ///
+    /// <para>
+    /// The order recorded which version of the allergen *notice* the customer acknowledged, but not
+    /// the declarations themselves — those were only ever read live from the menu. Once a
+    /// restaurant corrected a dish, every past order silently began describing the corrected
+    /// version, so the record of what a customer was actually shown, and accepted, was gone. That
+    /// record is the one that matters when someone reacts to a meal and asks what they were told.
+    /// </para>
+    /// </summary>
+    public string? AllergensSnapshot { get; set; }
+
+    public string? MayContainAllergensSnapshot { get; set; }
+
+    public string? CrossContactStatementSnapshot { get; set; }
+
     public int Quantity { get; set; } = 1;
 
     // Calculated server-side: BasePriceSnapshot + sum of option price adjustments

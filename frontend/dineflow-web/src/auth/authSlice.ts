@@ -1,3 +1,4 @@
+import { isSessionRejected } from '../lib/sessionExpiry'
 import { createAsyncThunk, createSlice, type PayloadAction } from '@reduxjs/toolkit'
 import {
   clearStoredRefreshToken,
@@ -19,6 +20,7 @@ import {
   type ConfirmEmailRequest,
   type ExchangeOAuthCodeRequest,
   type MagicLinkLoginRequest,
+  type PasskeyAssertionAttempt,
   type LoginResponse,
   type VerifyMfaLoginRequest,
   type UpdateCurrentUserRequest,
@@ -29,6 +31,18 @@ type AuthState = {
   token: string | null
   refreshToken: string | null
   loading: boolean
+  /**
+   * Set when the session ended without the user asking, so somebody can say so.
+   *
+   * <p>
+   * Signing out used to be entirely silent. On the pages that require a login that is survivable —
+   * the next screen is a login form, which explains itself. On the pages that serve guests too it
+   * is not: My Orders simply swapped the customer's orders for whatever the browser had saved for
+   * guests and carried on, and a customer who had just paid came back to a list that no longer had
+   * their order in it.
+   * </p>
+   */
+  endedUnexpectedly: boolean
 }
 
 const initialToken = getStoredToken()
@@ -38,9 +52,18 @@ const initialState: AuthState = {
   token: initialToken,
   refreshToken: getStoredRefreshToken(),
   loading: Boolean(initialToken),
+  endedUnexpectedly: false,
 }
 
-export const loadCurrentUser = createAsyncThunk('auth/loadCurrentUser', async () => getMe())
+export const loadCurrentUser = createAsyncThunk('auth/loadCurrentUser', async (_, { rejectWithValue }) => {
+  try {
+    return await getMe()
+  } catch (error) {
+    // Passed through rather than swallowed: the reducer has to know whether the server rejected
+    // the credentials or simply could not be reached.
+    return rejectWithValue({ sessionRejected: isSessionRejected(error) })
+  }
+})
 
 export const loginUser = createAsyncThunk(
   'auth/loginUser',
@@ -84,16 +107,22 @@ export const magicLinkLogin = createAsyncThunk(
   'auth/magicLinkLogin',
   async (payload: MagicLinkLoginRequest) => {
     const response = await magicLinkLoginRequest(payload)
-    storeToken(response.token)
-    storeRefreshToken(response.refreshToken)
+
+    if ('token' in response) {
+      storeToken(response.token)
+      storeRefreshToken(response.refreshToken)
+    }
+
     return response
   },
 )
 
 export const passkeyLogin = createAsyncThunk(
   'auth/passkeyLogin',
-  async () => {
-    const response = await passkeyLoginRequest()
+  // The attempt is started in the click handler so the prompt opens while the click still counts
+  // as user activation — see startPasskeyAssertion.
+  async (attempt?: PasskeyAssertionAttempt) => {
+    const response = await passkeyLoginRequest(attempt)
     storeToken(response.token)
     storeRefreshToken(response.refreshToken)
     return response
@@ -104,8 +133,13 @@ export const exchangeOAuthCode = createAsyncThunk(
   'auth/exchangeOAuthCode',
   async (payload: ExchangeOAuthCodeRequest) => {
     const response = await exchangeOAuthCodeRequest(payload)
-    storeToken(response.token)
-    storeRefreshToken(response.refreshToken)
+
+    // An MFA challenge is not a session: nothing is stored until the second factor is verified.
+    if ('token' in response) {
+      storeToken(response.token)
+      storeRefreshToken(response.refreshToken)
+    }
+
     return response
   },
 )
@@ -131,6 +165,11 @@ const authSlice = createSlice({
       state.refreshToken = null
       state.user = null
       state.loading = false
+      state.endedUnexpectedly = false
+    },
+    /** The notice has been shown; do not show it again on the next render. */
+    acknowledgeSessionEnded(state) {
+      state.endedUnexpectedly = false
     },
     setToken(state, action: PayloadAction<string | null>) {
       state.token = action.payload
@@ -154,16 +193,26 @@ const authSlice = createSlice({
         state.user = action.payload
         state.loading = false
       })
-      .addCase(loadCurrentUser.rejected, (state) => {
-        // request() already tried a silent refresh before this rejection fired
-        // (see auth.ts), so getting here means the refresh token itself is gone
-        // or invalid — a real logout is the only remaining option.
+      .addCase(loadCurrentUser.rejected, (state, action) => {
+        // request() already tried a silent refresh before this rejection fired (see auth.ts), so a
+        // 401 or 403 here means the credentials really are finished. Anything else — a backend
+        // mid-restart, a dropped connection, a gateway blinking — is not the session's fault, and
+        // clearing it dropped a restaurant's till to the login screen because the network hiccuped.
+        const payload = action.payload as { sessionRejected?: boolean } | undefined
+
+        state.loading = false
+
+        if (!payload?.sessionRejected) {
+          return
+        }
+
         clearStoredToken()
         clearStoredRefreshToken()
         state.token = null
         state.refreshToken = null
         state.user = null
-        state.loading = false
+        // Only here. Signing out on purpose is not unexpected, and does not need telling.
+        state.endedUnexpectedly = true
       })
       .addCase(loginUser.pending, (state) => {
         state.loading = true
@@ -196,9 +245,12 @@ const authSlice = createSlice({
         state.loading = true
       })
       .addCase(magicLinkLogin.fulfilled, (state, action) => {
-        state.token = action.payload.token
-        state.refreshToken = action.payload.refreshToken
-        state.user = action.payload.user
+        if ('token' in action.payload) {
+          state.token = action.payload.token
+          state.refreshToken = action.payload.refreshToken
+          state.user = action.payload.user
+        }
+
         state.loading = false
       })
       .addCase(magicLinkLogin.rejected, (state) => {
@@ -220,9 +272,12 @@ const authSlice = createSlice({
         state.loading = true
       })
       .addCase(exchangeOAuthCode.fulfilled, (state, action) => {
-        state.token = action.payload.token
-        state.refreshToken = action.payload.refreshToken
-        state.user = action.payload.user
+        if ('token' in action.payload) {
+          state.token = action.payload.token
+          state.refreshToken = action.payload.refreshToken
+          state.user = action.payload.user
+        }
+
         state.loading = false
       })
       .addCase(exchangeOAuthCode.rejected, (state) => {
@@ -249,5 +304,5 @@ const authSlice = createSlice({
   },
 })
 
-export const { logout, setAuthenticated, setToken } = authSlice.actions
+export const { acknowledgeSessionEnded, logout, setAuthenticated, setToken } = authSlice.actions
 export default authSlice.reducer

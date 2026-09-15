@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { NoteHealthInfoNotice } from '@/components/ordering/NoteHealthInfoNotice'
 import {
   AlertCircle,
   ArrowRight,
@@ -35,7 +36,9 @@ import {
 import { toast } from 'sonner'
 import {
   addCartItem,
+  cartFromConflict,
   checkoutCart,
+  isTimeout,
   clearCartItems,
   deleteCartItem,
   getCart,
@@ -44,12 +47,17 @@ import {
   updateCartNote,
   type Cart,
   type CartItem,
+  type CheckoutCartResponse,
+  type SubmittedOrder,
 } from '@/api/carts'
 import type { AuthUser } from '@/api/auth'
+import { cancelCustomerOrder, getGuestOrders, getMyOrders } from '@/api/auth'
 import { useAuth } from '@/auth/AuthContext'
 import { type CheckoutNavigationState } from '@/pages/CheckoutPage'
+import { LEGAL_VERSIONS } from '@/legal/legalConfig'
 import {
   getPublicRestaurantMenu,
+  getPublicRestaurantMenuStock,
   getPublicRestaurantOrderingContext,
   getPublicTableOrderingContext,
   resolvePublicAssetUrl,
@@ -113,17 +121,40 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { rememberGuestOrder } from '@/lib/guestOrders'
+import { getStoredGuestOrders, rememberGuestOrder } from '@/lib/guestOrders'
+import { mergeMenuStock } from '@/lib/menuStockMerge'
+import { applyOptionAdjustment, describeOptionAdjustment } from '@/lib/menuOptionPricing'
+import {
+  describeStock,
+  optionPerItemLimit,
+  optionUnitsInCart,
+  remainingForLine,
+} from '@/lib/menuStockDisplay'
+import {
+  getOptionQuantity,
+  getSelectedCountInGroup,
+  setOptionQuantity,
+} from '@/lib/menuOptionSelection'
+import { buildPlateDisclosure, formatAllergenLines, summariseDisclosure } from '@/lib/allergenDisclosure'
 import {
   buildRestaurantMenuPath,
+  buildViewerMenuPath,
   parseCustomerMenuOrderType,
 } from '@/lib/customerMenuNavigation'
 import { cn } from '@/lib/utils'
+import { cartIdentityOf, cartSessionBelongsToSomeoneElse } from '@/lib/cartSessionIdentity'
+import { cartSessionIsGone } from '@/lib/cartSessionRecovery'
+import { findUnpaidOrderToPrompt, type UnpaidOrderPrompt } from '@/lib/unpaidOrderPrompt'
+import { copyOrderIntoCart, describeCopyFailure } from '@/lib/copyOrderToCart'
+import { UnpaidOrderDialog } from '@/components/ordering/UnpaidOrderDialog'
+import { orderNoteMaxLength, validateOrderNote } from '@/lib/cartNoteValidation'
 
 type StoredCartSession = {
   cartId: string
   participantToken: string
   participantId: string
+  /** Who this token was issued to — a user id, or `guest`. See lib/cartSessionIdentity. */
+  identity: string
 }
 
 type CartViewer = Pick<AuthUser, 'fullName' | 'email' | 'avatarUrl' | 'roles'> | null
@@ -159,7 +190,6 @@ const cartActivityBannerLaneCount = 4
 
 const cartSessionPrefix = 'dineflow.customer-cart'
 const itemNoteMaxLength = 180
-const orderNoteMaxLength = 4_000
 
 type MenuFilter = 'available' | 'popular' | 'recommended' | 'vegetarian' | 'vegan' | 'glutenFree' | 'halal' | 'spicy'
 
@@ -419,13 +449,20 @@ export function CustomerMenuPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const requestedOrderType = parseCustomerMenuOrderType(searchParams.get('orderType'))
-  const { user, logout } = useAuth()
+  /** A dish to open as soon as the menu is ready — set by a reorder that needs fresh choices. */
+  const requestedItemId = searchParams.get('item')
+  const { user, token, logout } = useAuth()
+  // Who the cart belongs to right now. Changes the moment someone signs in or out, which is the
+  // signal to stop using the participant token issued to whoever was here before.
+  const cartIdentity = cartIdentityOf(user)
   const [state, setState] = useState<CustomerMenuState>({ status: 'loading' })
   const [retryKey, setRetryKey] = useState(0)
   const [search, setSearch] = useState('')
   const [activeFilters, setActiveFilters] = useState<MenuFilter[]>([])
   const [activeCategoryId, setActiveCategoryId] = useState<string | 'all'>('all')
   const [addingItemId, setAddingItemId] = useState<string | null>(null)
+  /** True from the moment an add starts until it settles. See addItem for why this is not state. */
+  const addInFlightRef = useRef(false)
   const [cartOpen, setCartOpen] = useState(false)
   const [cartActionItemId, setCartActionItemId] = useState<string | null>(null)
   const [clearingCart, setClearingCart] = useState(false)
@@ -538,7 +575,30 @@ export function CustomerMenuPage() {
         const storageKeySuffix = restaurantId
           ? `restaurant:${context.restaurant.id}:${orderType.toLowerCase()}`
           : `table:${qrToken}`
-        const cartSession = await loadOrJoinCart(context, storageKeySuffix, orderType)
+        const cartSession = await loadOrJoinCart(context, storageKeySuffix, orderType, cartIdentity)
+
+        // A checkout that was interrupted after the server committed it. The order exists; take the
+        // customer to it rather than showing them a menu they have already ordered from.
+        if (cartSession.recoveredOrder) {
+          rememberGuestOrder(
+            cartSession.recoveredOrder.order.id,
+            cartSession.recoveredOrder.guestAccessToken ?? null,
+          )
+          toast.info('Your order was already placed', {
+            description: 'The last attempt went through even though the page did not say so.',
+          })
+          navigate('/checkout', {
+            state: buildCheckoutNavigation(
+              { ...context, orderType },
+              cartSession.cart,
+              cartSession.participantToken,
+              cartSession.recoveredOrder.order,
+              qrToken,
+            ),
+            replace: true,
+          })
+          return
+        }
 
         setState({
           status: 'ready',
@@ -567,20 +627,116 @@ export function CustomerMenuPage() {
     return () => {
       cancelled = true
     }
-  }, [restaurantId, qrToken, requestedOrderType, retryKey])
+    // cartIdentity is a dependency on purpose: signing in or out has to rebuild the cart session,
+    // not carry the previous person's participant into the new one.
+  }, [restaurantId, qrToken, requestedOrderType, retryKey, cartIdentity, navigate])
 
   useEffect(() => {
     latestCartRef.current = state.status === 'ready' ? state.cart : null
   }, [state])
 
+  /**
+   * An order placed here but never paid for is holding stock and a pickup number until it expires.
+   * A customer who bounced off the payment screen and came back would otherwise build a second
+   * order on top of the first, and then find the dish sold out by their own forgotten order.
+   */
+  const [unpaidPrompt, setUnpaidPrompt] = useState<UnpaidOrderPrompt | null>(null)
+  // Dismissing is an answer, not a deferral: re-asking on every render would make "leave it for
+  // now" impossible to mean.
+  const dismissedUnpaidOrdersRef = useRef(new Set<string>())
+
+  const readyRestaurantId = state.status === 'ready' ? state.context.restaurant.id : null
+
   useEffect(() => {
-    if (state.status !== 'ready') {
+    if (!readyRestaurantId) {
+      return
+    }
+
+    const restaurantId = readyRestaurantId
+    let cancelled = false
+
+    async function checkForUnpaidOrder() {
+      try {
+        const orders = token
+          ? await getMyOrders()
+          : await (async () => {
+              const stored = getStoredGuestOrders()
+              return stored.length > 0 ? await getGuestOrders(stored) : []
+            })()
+
+        if (cancelled) {
+          return
+        }
+
+        const found = findUnpaidOrderToPrompt(orders, restaurantId)
+        setUnpaidPrompt(
+          found && !dismissedUnpaidOrdersRef.current.has(found.order.id) ? found : null,
+        )
+      } catch {
+        // Nothing to say. This is a courtesy on top of the menu, and failing to look up past
+        // orders must never be what stops somebody ordering.
+      }
+    }
+
+    void checkForUnpaidOrder()
+
+    return () => {
+      cancelled = true
+    }
+  }, [readyRestaurantId, token])
+
+  /**
+   * Opens the dish a reorder could not finish, once the menu has loaded.
+   *
+   * <p>
+   * A reorder sends `?item=` here when the menu has started requiring choices the old order never
+   * recorded. Runs once: the id stays in the URL so a reload still works, but reopening the sheet
+   * on every re-render would fight anyone who closed it.
+   * </p>
+   */
+  const openedRequestedItemRef = useRef(false)
+
+  useEffect(() => {
+    if (!requestedItemId || openedRequestedItemRef.current || state.status !== 'ready') {
+      return
+    }
+
+    const item = state.menu.categories
+      .flatMap((category) => category.items)
+      .find((candidate) => candidate.id === requestedItemId)
+
+    if (!item) {
+      return
+    }
+
+    openedRequestedItemRef.current = true
+
+    // Deferred out of the effect body: opening the sheet is several state updates at once, which
+    // is what react-hooks/set-state-in-effect exists to stop happening synchronously here.
+    void Promise.resolve().then(() => {
+      setEditingCartItem(null)
+      setSelectedItem(item)
+      setSelectedItemQuantity(1)
+      setSelectedItemNote('')
+      setSelectedOptionIds(getDefaultSelectedOptionIds(item))
+    })
+  }, [requestedItemId, state])
+
+
+  // The realtime and polling effects key off the active cart only. Extracted so their dependency
+  // arrays hold plain values the linter can check, instead of ternaries it has to give up on.
+  const activeCartId = state.status === 'ready' ? state.cart.id : null
+  const activeParticipantToken = state.status === 'ready' ? state.participantToken : null
+  const activeParticipantId = state.status === 'ready' ? state.participantId : null
+
+  useEffect(() => {
+    if (!activeCartId || !activeParticipantToken) {
       void realtimeClientRef.current?.stop()
       realtimeClientRef.current = null
       return
     }
 
-    const client = createCartRealtimeClient(state.cart.id, state.participantToken, {
+    const client = createCartRealtimeClient(activeCartId, activeParticipantToken, {
       onCartUpdated: ({ reason, cart }) => {
         if (cart) {
           if (reason === 'item-added') {
@@ -604,7 +760,7 @@ export function CustomerMenuPage() {
         }
       },
       onCartItemAdded: (update) => {
-        if (update.actorParticipantId === state.participantId) {
+        if (update.actorParticipantId === activeParticipantId) {
           if (pendingFallbackBannerRef.current) {
             window.clearTimeout(pendingFallbackBannerRef.current.timeoutId)
             pendingFallbackBannerRef.current = null
@@ -632,7 +788,7 @@ export function CustomerMenuPage() {
         })
       },
       onReconnected: async () => {
-        const refreshed = await getCart(state.cart.id, state.participantToken)
+        const refreshed = await getCart(activeCartId, activeParticipantToken)
         latestCartRef.current = refreshed
         setState((current) =>
           current.status === 'ready' ? { ...current, cart: refreshed } : current,
@@ -647,20 +803,16 @@ export function CustomerMenuPage() {
       void client.stop()
       realtimeClientRef.current = null
     }
-  }, [
-    state.status === 'ready' ? state.cart.id : null,
-    state.status === 'ready' ? state.participantToken : null,
-    state.status === 'ready' ? state.participantId : null,
-  ])
+  }, [activeCartId, activeParticipantToken, activeParticipantId])
 
   useEffect(() => {
-    if (state.status !== 'ready') {
+    if (!activeCartId || !activeParticipantToken) {
       return undefined
     }
 
     let stopped = false
-    const cartId = state.cart.id
-    const participantToken = state.participantToken
+    const cartId = activeCartId
+    const participantToken = activeParticipantToken
 
     const intervalId = window.setInterval(async () => {
       try {
@@ -694,10 +846,81 @@ export function CustomerMenuPage() {
       stopped = true
       window.clearInterval(intervalId)
     }
-  }, [
-    state.status === 'ready' ? state.cart.id : null,
-    state.status === 'ready' ? state.participantToken : null,
-  ])
+  }, [activeCartId, activeParticipantToken])
+
+  /**
+   * What is left of the menu, kept current while it sits on screen.
+   *
+   * <p>
+   * A diner opens the menu, reads it, talks to the table, and orders ten minutes later. In between,
+   * somebody else took the last portion — and the page went on offering it until the customer
+   * happened to reload. Checkout does refuse, so nothing is oversold, but being told at the till
+   * that the dish you chose and configured was gone before you started is a bad way to find out.
+   * </p>
+   *
+   * <p>
+   * Separate from the cart poll above, and slower: the cart is this diner's own and changes when
+   * they or the person opposite touches it, while stock changes at the pace of the whole room. It
+   * also runs before there is a cart at all, because reading the menu is exactly when this is
+   * wrong. Coming back to the tab asks immediately, since that is the moment a stale menu is most
+   * likely and the diner is about to act on it.
+   * </p>
+   */
+  const activeMenuRestaurantId = state.status === 'ready' || state.status === 'choosing'
+    ? state.menu.restaurantId
+    : null
+
+  useEffect(() => {
+    if (!activeMenuRestaurantId) {
+      return undefined
+    }
+
+    let stopped = false
+    const restaurantId = activeMenuRestaurantId
+
+    const refresh = async () => {
+      try {
+        const stock = await getPublicRestaurantMenuStock(restaurantId)
+
+        if (stopped) {
+          return
+        }
+
+        setState((current) => {
+          if (current.status !== 'ready' && current.status !== 'choosing') {
+            return current
+          }
+
+          if (current.menu.restaurantId !== restaurantId) {
+            return current
+          }
+
+          const menu = mergeMenuStock(current.menu, stock)
+          // Both identities are kept when nothing moved, so a diner mid-scroll is not re-rendered
+          // every fifteen seconds to be shown the same menu.
+          return menu === current.menu ? current : { ...current, menu }
+        })
+      } catch {
+        // A missed reading leaves the page showing what it last knew, which is what it showed all
+        // the time before this existed. Checkout is still the thing that refuses.
+      }
+    }
+
+    const intervalId = window.setInterval(() => void refresh(), 15_000)
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void refresh()
+      }
+    }
+
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+
+    return () => {
+      stopped = true
+      window.clearInterval(intervalId)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [activeMenuRestaurantId])
 
   const visibleCategories = useMemo(() => {
     if (state.status !== 'ready') {
@@ -777,6 +1000,9 @@ export function CustomerMenuPage() {
         state.context,
         `restaurant:${state.context.restaurant.id}:${orderType.toLowerCase()}`,
         orderType,
+        // Without this the session is stored owning nobody, and the next load discards it as
+        // somebody else's and joins a fresh, empty cart.
+        cartIdentity,
       )
       setState({
         status: 'ready',
@@ -786,6 +1012,7 @@ export function CustomerMenuPage() {
         participantToken: cartSession.participantToken,
         participantId: cartSession.participantId,
       })
+      navigate(buildRestaurantMenuPath(state.context.restaurant.id, orderType), { replace: true })
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not start ordering')
     } finally {
@@ -814,6 +1041,9 @@ export function CustomerMenuPage() {
         state.context,
         `restaurant:${state.context.restaurant.id}:${orderType.toLowerCase()}`,
         orderType,
+        // Without this the session is stored owning nobody, and the next load discards it as
+        // somebody else's and joins a fresh, empty cart.
+        cartIdentity,
       )
       latestCartRef.current = cartSession.cart
       setCartOpen(false)
@@ -824,6 +1054,7 @@ export function CustomerMenuPage() {
         participantToken: cartSession.participantToken,
         participantId: cartSession.participantId,
       })
+      navigate(buildRestaurantMenuPath(state.context.restaurant.id, orderType), { replace: true })
       toast.success(`Switched to ${orderType === 'DineIn' ? 'dine in' : 'takeaway'}`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not change order type')
@@ -873,6 +1104,109 @@ export function CustomerMenuPage() {
   const currencyFormatter = createCurrencyFormatter(context.restaurant.currency)
   const restaurantImageUrl = resolveRestaurantHeroImageUrl(context.restaurant.imageUrl)
   const orderTypeLabel = cart.orderType === 'DineIn' ? 'Dine in' : 'Takeaway'
+  const viewerMenuPath = buildViewerMenuPath(qrToken, context.restaurant.id, cart.orderType)
+
+  /**
+   * How many of a dish the cart already holds, across every line.
+   *
+   * <p>
+   * The same dish can sit in several lines with different options or notes, and stock does not care
+   * which line it came from. Counting only the line being edited is how a cart quietly ends up
+   * holding more of a limited dish than exists.
+   * </p>
+   */
+  const quantityInCartFor = (menuItemId: string | undefined) =>
+    menuItemId
+      ? cart.items
+          .filter((line) => line.menuItemId === menuItemId)
+          .reduce((total, line) => total + line.quantity, 0)
+      : 0
+
+  // Modifiers are counted the way the server counts them, and the line being edited is left out
+  // for the same reason its own portions are: an edit replaces that line rather than adding to it.
+  // Plain rather than memoised: this sits below the page's early returns, where a hook cannot go,
+  // and a cart holds a handful of lines.
+  const optionUnitsElsewhere = optionUnitsInCart(cart.items, editingCartItem?.id ?? null)
+
+
+  const dismissUnpaidPrompt = () => {
+    if (unpaidPrompt) {
+      dismissedUnpaidOrdersRef.current.add(unpaidPrompt.order.id)
+    }
+    setUnpaidPrompt(null)
+  }
+
+  const handleContinueUnpaidPayment = () => {
+    if (!unpaidPrompt) {
+      return
+    }
+    // Checkout, not My Orders: it is the one screen that offers whichever payment methods the
+    // restaurant actually has, so a customer is not sent off to pay a restaurant that cannot
+    // currently take a card.
+    dismissUnpaidPrompt()
+    navigate(`/checkout?order=${encodeURIComponent(unpaidPrompt.order.id)}`)
+  }
+
+  /**
+   * Puts the unpaid order's items into the live cart so the customer can order the same meal again
+   * without hunting down every dish and option — and says plainly what could not be taken, since
+   * the commonest reason is that this very order is holding the last of it.
+   */
+  const handleCopyUnpaidOrderToCart = async () => {
+    if (!unpaidPrompt) {
+      return
+    }
+
+    const result = await copyOrderIntoCart(unpaidPrompt.order, cart.id, participantToken)
+
+    if (result.closedMessage) {
+      toast.error('The restaurant is not taking orders', { description: result.closedMessage })
+      return
+    }
+
+    const refreshed = await getCart(cart.id, participantToken).catch(() => null)
+    if (refreshed) {
+      setState((current) => (current.status === 'ready' ? { ...current, cart: refreshed } : current))
+    }
+
+    if (result.addedCount === 0) {
+      toast.error('Nothing could be added', {
+        description: result.failures.map(describeCopyFailure).join(' '),
+      })
+      return
+    }
+
+    dismissUnpaidPrompt()
+    setCartOpen(true)
+
+    if (result.failures.length > 0) {
+      toast.warning(`Added ${result.addedCount} of ${unpaidPrompt.order.orderItems.length}`, {
+        description: result.failures.map(describeCopyFailure).join(' '),
+      })
+    } else {
+      toast.success('Added to your cart', {
+        description: 'The same items are in your cart, ready to order again.',
+      })
+    }
+  }
+
+  const handleCancelUnpaidOrder = async () => {
+    if (!unpaidPrompt) {
+      return
+    }
+
+    try {
+      await cancelCustomerOrder(unpaidPrompt.order.id, { reason: 'Cancelled from the menu.' })
+      dismissUnpaidPrompt()
+      toast.success('Order cancelled', {
+        description: 'Those items are back on the menu.',
+      })
+    } catch (error) {
+      toast.error('Could not cancel the order', {
+        description: error instanceof Error ? error.message : 'Try again from My Orders.',
+      })
+    }
+  }
   const paymentPolicyLabel = context.restaurant.paymentPolicy === 'PrepayRequired'
     ? 'Online payment required'
     : 'Online or counter'
@@ -939,10 +1273,15 @@ export function CustomerMenuPage() {
   }
 
   const addItem = async (item: PublicMenuItem, quantity = 1, note = '', optionIds: string[] = []) => {
-    if (item.isSoldOut || !item.isAvailable || addingItemId) {
+    // Guarded by a ref, not by the state below. State updates are not applied until React re-renders,
+    // so two taps landing in one batch both read the old value and both fire — which is how a single
+    // intent reached the server twice. A ref changes on the line it is assigned.
+    if (item.isSoldOut || !item.isAvailable || addInFlightRef.current) {
       return false
     }
 
+    addInFlightRef.current = true
+    // Still set, because this is what draws the spinner and disables the button.
     setAddingItemId(item.id)
     const normalizedNote = note.trim()
     const normalizedOptionIds = getOrderedSelectedOptionIds(item, optionIds)
@@ -965,6 +1304,7 @@ export function CustomerMenuPage() {
       toast.error(error instanceof Error ? error.message : 'Could not add item')
       return false
     } finally {
+      addInFlightRef.current = false
       setAddingItemId(null)
     }
   }
@@ -991,6 +1331,8 @@ export function CustomerMenuPage() {
         quantity,
         ...(normalizedNote ? { note: normalizedNote } : {}),
         ...(optionIds ? { selectedOptionIds: optionIds } : {}),
+        // The line as this editor last saw it. The server refuses the edit if it has moved on.
+        expectedUpdatedAt: item.updatedAt ?? item.createdAt,
       })
 
       latestCartRef.current = updatedCart
@@ -999,6 +1341,21 @@ export function CustomerMenuPage() {
       )
       return true
     } catch (error) {
+      // Someone else at the table changed this line first. The server sends the cart as it now
+      // stands, so show that rather than leaving the screen describing a version that is gone.
+      const conflictCart = cartFromConflict(error)
+
+      if (conflictCart) {
+        latestCartRef.current = conflictCart
+        setState((current) =>
+          current.status === 'ready' ? { ...current, cart: conflictCart } : current,
+        )
+        toast.error('Someone else changed this item', {
+          description: 'The cart has been refreshed with their version. Try your change again.',
+        })
+        return false
+      }
+
       toast.error(error instanceof Error ? error.message : 'Could not update cart')
       return false
     } finally {
@@ -1157,6 +1514,12 @@ export function CustomerMenuPage() {
       return
     }
 
+    const validationError = validateOrderNote(note)
+    if (validationError) {
+      toast.error(validationError)
+      throw new Error(validationError)
+    }
+
     setSavingCartNote(true)
 
     try {
@@ -1185,34 +1548,47 @@ export function CustomerMenuPage() {
 
     setCheckingOut(true)
     try {
-      const result = await checkoutCart(cart.id, participantToken)
+      const result = await checkoutCart(cart.id, participantToken, {
+        acceptedCustomerTermsVersion: LEGAL_VERSIONS.customerTerms,
+        acknowledgedPrivacyPolicyVersion: LEGAL_VERSIONS.privacyPolicy,
+        acknowledgedAllergenNoticeVersion: LEGAL_VERSIONS.allergenNotice,
+      })
       // Only chance to capture the token; it is never returned again.
       rememberGuestOrder(result.order.id, result.guestAccessToken ?? null)
-      const returnPath = qrToken
-        ? `/table/${encodeURIComponent(qrToken)}`
-        : buildRestaurantMenuPath(context.restaurant.id, cart.orderType)
-
       navigate('/checkout', {
-        state: {
-          order: result.order,
-          cartId: cart.id,
-          participantToken,
-          currency: context.restaurant.currency,
-          restaurantName: context.restaurant.name,
-          tableNumber: context.table?.tableNumber ?? null,
-          paymentPolicy: context.restaurant.paymentPolicy,
-          onlinePaymentsEnabled: context.restaurant.onlinePaymentsEnabled,
-          returnPath,
-        } satisfies CheckoutNavigationState,
+        state: buildCheckoutNavigation(context, cart, participantToken, result.order, qrToken),
       })
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Could not start checkout')
       setCheckingOut(false)
+
+      // The request gave up waiting; it does not follow that the order was not placed. Saying so
+      // plainly matters, because the honest instruction is "press it again" — one cart can only
+      // ever produce one order, so a second attempt returns the first one's order rather than
+      // creating a second. Telling them it failed would be a guess, and the wrong one half the time.
+      if (isTimeout(error)) {
+        toast.error('Checkout is taking longer than expected', {
+          description:
+            'We could not tell whether your order went through. Press Go to checkout again — '
+            + 'if it did, you will be taken straight to it, and you will not be charged twice.',
+        })
+        return
+      }
+
+      toast.error(error instanceof Error ? error.message : 'Could not start checkout')
     }
   }
 
   return (
     <main className={cn('min-h-svh bg-background text-foreground', cart.items.length > 0 ? 'pb-28' : 'pb-8')}>
+      <UnpaidOrderDialog
+        prompt={unpaidPrompt}
+        currencyFormatter={currencyFormatter}
+        onlinePaymentsEnabled={context.restaurant.onlinePaymentsEnabled}
+        onContinue={handleContinueUnpaidPayment}
+        onCancel={handleCancelUnpaidOrder}
+        onCopyToCart={handleCopyUnpaidOrderToCart}
+        onDismiss={dismissUnpaidPrompt}
+      />
       <section className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-3 py-4 sm:px-6 lg:px-8">
         <header className="overflow-hidden rounded-[2rem] border bg-card shadow-sm">
           <div className="relative min-h-[190px] overflow-hidden bg-muted sm:min-h-[280px]">
@@ -1230,7 +1606,7 @@ export function CustomerMenuPage() {
               </div>
             )}
             <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/35 to-black/10" />
-            <div className="absolute inset-x-0 top-0 z-10 flex items-start justify-between gap-3 p-4 sm:p-5">
+            <div className="absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-3 p-4 sm:p-5">
               {context.table ? (
                 <Badge variant="outline" className="h-9 gap-1.5 rounded-full border-white/50 bg-background/95 px-3 text-sm text-foreground shadow-lg">
                   <Utensils className="size-3.5" />
@@ -1269,14 +1645,19 @@ export function CustomerMenuPage() {
                 <RestaurantOperatingStatusButton restaurant={context.restaurant} />
                 <CartViewerButton
                   viewer={user}
+                  menuPath={viewerMenuPath}
                   onLogout={() => {
                     logout()
-                    navigate('/login')
+                    // Back to the menu they were reading, not to a sign-in form. Signing out is
+                    // how a customer hands the phone back or orders as a guest; it is not a
+                    // request to sign in again, and dropping them on /login stranded them away
+                    // from the restaurant they were ordering from.
+                    navigate(viewerMenuPath)
                   }}
                 />
               </div>
             </div>
-            <div className="absolute inset-x-0 bottom-0 z-10 space-y-3 p-5 text-white sm:p-7">
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 space-y-3 p-5 text-white sm:p-7">
               <div className="space-y-1">
                 <BrandLogo className="public-menu-brand-logo" />
                 <h1 className="font-heading max-w-3xl text-4xl font-semibold leading-none tracking-tight sm:text-6xl">
@@ -1302,6 +1683,12 @@ export function CustomerMenuPage() {
             <div className="flex min-w-0 items-center gap-2">
               <MapPin className="size-4 shrink-0" />
               <span className="truncate">{context.restaurant.address || 'Restaurant address unavailable'}</span>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+              <span>{context.restaurant.legalBusinessName || context.restaurant.name}</span>
+              {context.restaurant.abn ? <span>ABN {context.restaurant.abn}</span> : null}
+              {context.restaurant.gstRegistered ? <span>Prices include GST</span> : null}
+              {context.restaurant.customerSurchargeNotice ? <strong className="w-full text-foreground">{context.restaurant.customerSurchargeNotice}</strong> : null}
             </div>
           </div>
         </header>
@@ -1338,7 +1725,7 @@ export function CustomerMenuPage() {
                     </button>
                   )}
                 </div>
-                <div className="flex shrink-0 items-center justify-between gap-2 rounded-xl bg-muted/60 px-3 py-2 text-xs font-semibold text-muted-foreground sm:min-w-28 sm:justify-center">
+                <div className="hidden shrink-0 items-center justify-between gap-2 rounded-xl bg-muted/60 px-3 py-2 text-xs font-semibold text-muted-foreground sm:flex sm:min-w-28 sm:justify-center">
                   <span>{visibleMenuItemCount} shown</span>
                   <span className="text-muted-foreground/60">/</span>
                   <span>{totalMenuItemCount} total</span>
@@ -1398,6 +1785,7 @@ export function CustomerMenuPage() {
                     key={category.id}
                     category={category}
                     currencyFormatter={currencyFormatter}
+                    quantityInCartFor={quantityInCartFor}
                     onOpenItem={openItemDetail}
                   />
                 ))}
@@ -1429,6 +1817,9 @@ export function CustomerMenuPage() {
       <ItemDetailOverlay
         item={selectedItem}
         quantity={selectedItemQuantity}
+        alreadyInCart={quantityInCartFor(selectedItem?.id)}
+        editingLineQuantity={editingCartItem?.quantity ?? null}
+        optionUnitsInCart={optionUnitsElsewhere}
         note={selectedItemNote}
         selectedOptionIds={selectedOptionIds}
         currencyFormatter={currencyFormatter}
@@ -1486,11 +1877,62 @@ export function CustomerMenuPage() {
   )
 }
 
+/**
+ * Where a placed order sends the customer, and with what.
+ *
+ * <p>
+ * Shared by the checkout button and by recovery, because they are the same arrival: an order
+ * exists and the customer has to be standing in front of it. Two copies of this would differ the
+ * first time one of them gained a field.
+ * </p>
+ */
+function buildCheckoutNavigation(
+  context: PublicOrderingContext,
+  cart: Cart,
+  participantToken: string,
+  order: SubmittedOrder,
+  qrToken: string | undefined,
+): CheckoutNavigationState {
+  return {
+    order,
+    cartId: cart.id,
+    participantToken,
+    currency: context.restaurant.currency,
+    restaurantName: context.restaurant.name,
+    restaurantLegalBusinessName: context.restaurant.legalBusinessName,
+    restaurantAbn: context.restaurant.abn,
+    gstRegistered: context.restaurant.gstRegistered,
+    pricesIncludeGst: context.restaurant.pricesIncludeGst,
+    refundContactEmail: context.restaurant.refundContactEmail,
+    customerSurchargeNotice: context.restaurant.customerSurchargeNotice,
+    tableNumber: context.table?.tableNumber ?? null,
+    paymentPolicy: context.restaurant.paymentPolicy,
+    onlinePaymentsEnabled: context.restaurant.onlinePaymentsEnabled,
+    returnPath: qrToken
+      ? `/table/${encodeURIComponent(qrToken)}`
+      : buildRestaurantMenuPath(context.restaurant.id, cart.orderType),
+  }
+}
+
 async function loadOrJoinCart(
   context: PublicOrderingContext,
   storageKeySuffix: string,
   orderType: 'DineIn' | 'Takeaway',
-): Promise<{ cart: Cart; participantToken: string; participantId: string }> {
+  identity: string,
+): Promise<{
+  cart: Cart
+  participantToken: string
+  participantId: string
+  /**
+   * The order a previous checkout placed, when this cart turns out to have already produced one.
+   *
+   * <p>
+   * Set only on recovery. Its presence means the customer should be taken to their order rather
+   * than shown a menu, because the thing they were trying to do already happened.
+   * </p>
+   */
+  recoveredOrder?: CheckoutCartResponse
+}> {
   if (!context.restaurant.isOrderingAvailable) {
     throw new Error(context.restaurant.orderingStatusMessage)
   }
@@ -1498,7 +1940,11 @@ async function loadOrJoinCart(
   const storageKey = `${cartSessionPrefix}.${storageKeySuffix}`
   const stored = readStoredCartSession(storageKey)
 
-  if (stored) {
+  // Signing in or out makes the stored token somebody else's. Reusing it is what attributed a
+  // guest's order to the account that had been signed in a moment earlier.
+  if (stored && cartSessionBelongsToSomeoneElse(stored.identity, identity)) {
+    sessionStorage.removeItem(storageKey)
+  } else if (stored) {
     try {
       const cart = await getCart(stored.cartId, stored.participantToken)
 
@@ -1509,7 +1955,38 @@ async function loadOrJoinCart(
           participantId: stored.participantId,
         }
       }
-    } catch {
+
+      // The cart already produced an order. That happens when a checkout was interrupted after the
+      // server had committed it — the answer never arrived, and the customer reloaded instead of
+      // pressing the button again.
+      //
+      // Falling through here started a fresh, empty cart and left that order in the kitchen with
+      // nobody able to see it: no order number on screen, no way back to it, and twenty minutes
+      // later the sweeper cancelled it. Submitting again is how the server hands the order back —
+      // one cart can only ever produce one — so ask for it rather than pretending it is not there.
+      if (cart.status === 'Submitted') {
+        const recoveredOrder = await checkoutCart(cart.id, stored.participantToken, {
+          acceptedCustomerTermsVersion: LEGAL_VERSIONS.customerTerms,
+          acknowledgedPrivacyPolicyVersion: LEGAL_VERSIONS.privacyPolicy,
+          acknowledgedAllergenNoticeVersion: LEGAL_VERSIONS.allergenNotice,
+        })
+
+        return {
+          cart,
+          participantToken: stored.participantToken,
+          participantId: stored.participantId,
+          recoveredOrder,
+        }
+      }
+    } catch (error) {
+      // A restarting backend is not a deleted cart. Discarding the token on any failure is what
+      // replaced a customer's full cart with an empty one and stranded the original in the
+      // database, so a temporary failure is raised instead — the page offers a retry, and the
+      // token is still here when the server comes back.
+      if (!cartSessionIsGone(error)) {
+        throw error
+      }
+
       sessionStorage.removeItem(storageKey)
     }
   }
@@ -1526,6 +2003,7 @@ async function loadOrJoinCart(
       cartId: joined.cart.id,
       participantToken: joined.participantToken,
       participantId: joined.participantId,
+      identity,
     } satisfies StoredCartSession),
   )
 
@@ -1694,7 +2172,7 @@ function readStoredCartSession(storageKey: string) {
 
     const parsed = JSON.parse(rawValue) as Partial<StoredCartSession>
 
-    if (!parsed.cartId || !parsed.participantToken || !parsed.participantId) {
+    if (!parsed.cartId || !parsed.participantToken || !parsed.participantId || !parsed.identity) {
       return null
     }
 
@@ -1702,6 +2180,7 @@ function readStoredCartSession(storageKey: string) {
       cartId: parsed.cartId,
       participantToken: parsed.participantToken,
       participantId: parsed.participantId,
+      identity: parsed.identity,
     }
   } catch {
     return null
@@ -1783,30 +2262,15 @@ function getDefaultSelectedOptionIds(item: PublicMenuItem) {
         return []
       }
 
-      const selectedIds: string[] = []
-      for (const option of group.options) {
-        const remainingSelections = group.minSelections - selectedIds.length
-        if (remainingSelections <= 0) {
-          break
-        }
-
-        selectedIds.push(...Array.from(
-          { length: Math.min(option.maxQuantity, remainingSelections) },
-          () => option.id,
-        ))
-      }
-
-      return selectedIds
+      // Group minimum/maximum values describe how many different choices are selected.
+      // Quantity is governed independently by each option's maxQuantity.
+      return group.options
+        // A required group opens with its first choices already ticked. One that has run out would
+        // open the panel already refusable, with nothing saying why.
+        .filter((option) => option.remainingStock == null || option.remainingStock > 0)
+        .slice(0, group.minSelections)
+        .map((option) => option.id)
     })
-}
-
-function getOptionQuantity(selectedOptionIds: string[], optionId: string) {
-  return selectedOptionIds.filter((selectedOptionId) => selectedOptionId === optionId).length
-}
-
-function getSelectedCountInGroup(selectedOptionIds: string[], group: PublicMenuOptionGroup) {
-  const groupOptionIds = new Set(group.options.map((option) => option.id))
-  return selectedOptionIds.filter((optionId) => groupOptionIds.has(optionId)).length
 }
 
 function getOrderedSelectedOptions(item: PublicMenuItem, selectedOptionIds: string[]) {
@@ -1826,30 +2290,6 @@ function getOrderedSelectedOptions(item: PublicMenuItem, selectedOptionIds: stri
 function getOrderedSelectedOptionIds(item: PublicMenuItem, selectedOptionIds: string[]) {
   return getOrderedSelectedOptions(item, selectedOptionIds)
     .flatMap(({ option, quantity }) => Array.from({ length: quantity }, () => option.id))
-}
-
-function setOptionQuantity(
-  selectedOptionIds: string[],
-  group: PublicMenuOptionGroup,
-  option: PublicMenuOption,
-  nextQuantity: number,
-) {
-  if (group.maxSelections <= 1) {
-    const groupOptionIds = new Set(group.options.map((entry) => entry.id))
-    const withoutGroup = selectedOptionIds.filter((optionId) => !groupOptionIds.has(optionId))
-    return nextQuantity > 0 ? [...withoutGroup, option.id] : withoutGroup
-  }
-
-  const currentQuantity = getOptionQuantity(selectedOptionIds, option.id)
-  const selectedInGroup = getSelectedCountInGroup(selectedOptionIds, group)
-  const availableGroupSlots = group.maxSelections - (selectedInGroup - currentQuantity)
-  const clampedQuantity = Math.max(0, Math.min(nextQuantity, option.maxQuantity, availableGroupSlots))
-  const withoutOption = selectedOptionIds.filter((optionId) => optionId !== option.id)
-
-  return [
-    ...withoutOption,
-    ...Array.from({ length: clampedQuantity }, () => option.id),
-  ]
 }
 
 function toggleOptionSelection(
@@ -1884,14 +2324,54 @@ function getOptionSelectionError(item: PublicMenuItem, selectedOptionIds: string
   return null
 }
 
+/**
+ * Why this plate cannot be ordered as chosen, when a modifier has run short.
+ *
+ * <p>
+ * Separate from the group rules above because it depends on things a selection alone does not know:
+ * how many dishes the line holds, and what the rest of the cart has already spoken for. Raising the
+ * dish quantity is the usual way a selection that was fine stops being fine.
+ * </p>
+ */
+function getOptionStockError(
+  item: PublicMenuItem,
+  selectedOptionIds: string[],
+  dishQuantity: number,
+  unitsElsewhereInCart: Map<string, number>,
+) {
+  for (const { option, quantity } of getOrderedSelectedOptions(item, selectedOptionIds)) {
+    if (option.remainingStock == null) {
+      continue
+    }
+
+    const ceiling = optionPerItemLimit(
+      option.maxQuantity,
+      option.remainingStock,
+      unitsElsewhereInCart.get(option.id) ?? 0,
+      dishQuantity,
+    )
+
+    if (quantity > ceiling) {
+      const held = unitsElsewhereInCart.get(option.id) ?? 0
+
+      return ceiling === 0
+        ? held > 0
+          ? `${option.name} is spoken for by the rest of your cart.`
+          : `${option.name} has sold out.`
+        : `Only ${option.remainingStock} of ${option.name} left — that allows ${ceiling} per dish at this quantity.`
+    }
+  }
+
+  return null
+}
+
 function calculateItemUnitPrice(item: PublicMenuItem, selectedOptionIds: string[]) {
   return getOrderedSelectedOptions(item, selectedOptionIds)
     .reduce((unitPrice, { option, quantity }) => {
-      if (option.adjustmentType === 2) {
-        return option.priceAdjustment
-      }
-
-      return unitPrice + option.priceAdjustment * quantity
+      // An option whose type names no pricing rule adds nothing, and its label shows no price
+      // either. The server refuses to price such a row at all, so there is no total this could
+      // display that the bill would agree with — inventing one is what caused the divergence.
+      return applyOptionAdjustment(unitPrice, option, quantity) ?? unitPrice
     }, item.price)
 }
 
@@ -1908,19 +2388,22 @@ function getSelectionRule(group: PublicMenuOptionGroup) {
 }
 
 function getOptionAdjustmentLabel(option: PublicMenuOption, currencyFormatter: Intl.NumberFormat) {
-  if (option.adjustmentType === 2) {
-    return `Set ${currencyFormatter.format(option.priceAdjustment)}`
-  }
+  return describeOptionAdjustment(option, currencyFormatter) ?? ''
+}
 
-  if (option.priceAdjustment === 0) {
-    return 'Included'
-  }
+/**
+ * What this modifier brings with it, for the row the customer taps. Silence stays silent: an option
+ * that declares nothing says nothing, because the dish's own panel already reports whether the
+ * restaurant has declared anything at all.
+ */
+function describeOptionAllergens(option: PublicMenuOption) {
+  const parts = [
+    option.allergens?.trim() ? `Contains ${option.allergens.trim()}` : null,
+    option.mayContainAllergens?.trim() ? `may contain ${option.mayContainAllergens.trim()}` : null,
+    option.crossContactStatement?.trim() || null,
+  ].filter(Boolean)
 
-  if (option.adjustmentType === 1 || option.priceAdjustment < 0) {
-    return currencyFormatter.format(option.priceAdjustment)
-  }
-
-  return `+${currencyFormatter.format(option.priceAdjustment)}`
+  return parts.join(' - ')
 }
 
 function CartActivityBannerView({ banner }: { banner: CartActivityBanner }) {
@@ -2042,10 +2525,13 @@ function CategorySidebar({
 function MenuCategorySection({
   category,
   currencyFormatter,
+  quantityInCartFor,
   onOpenItem,
 }: {
   category: PublicMenuCategory
   currencyFormatter: Intl.NumberFormat
+  /** Portions of a dish this cart holds, so its stock badge counts down as it is filled. */
+  quantityInCartFor: (menuItemId: string) => number
   onOpenItem: (item: PublicMenuItem) => void
 }) {
   return (
@@ -2102,7 +2588,15 @@ function MenuCategorySection({
                   )}
                   {item.isSoldOut ? (
                     <SoldOutImageBadge compact className="absolute bottom-2 left-2 max-w-[calc(100%-1rem)]" />
-                  ) : null}
+                  ) : (
+                    <StockBadge
+                      compact
+                      remainingStock={item.remainingStock}
+                      isSoldOut={item.isSoldOut}
+                      alreadyInCart={quantityInCartFor(item.id)}
+                      className="absolute bottom-2 left-2 max-w-[calc(100%-1rem)]"
+                    />
+                  )}
                 </button>
 
                 <div className="flex min-w-0 flex-col gap-3 lg:min-h-[116px]">
@@ -2163,6 +2657,9 @@ function MenuCategorySection({
 function ItemDetailOverlay({
   item,
   quantity,
+  alreadyInCart,
+  editingLineQuantity,
+  optionUnitsInCart,
   note,
   selectedOptionIds,
   currencyFormatter,
@@ -2177,6 +2674,11 @@ function ItemDetailOverlay({
 }: {
   item: PublicMenuItem | null
   quantity: number
+  alreadyInCart: number
+  /** Portions this line already holds while it is being edited, or null while adding. */
+  editingLineQuantity: number | null
+  /** Lots of each tracked modifier the cart's other lines already commit. */
+  optionUnitsInCart: Map<string, number>
   note: string
   selectedOptionIds: string[]
   currencyFormatter: Intl.NumberFormat
@@ -2231,6 +2733,9 @@ function ItemDetailOverlay({
           <ItemDetailContent
             item={item}
             quantity={quantity}
+            alreadyInCart={alreadyInCart}
+            editingLineQuantity={editingLineQuantity}
+            optionUnitsInCart={optionUnitsInCart}
             note={note}
             selectedOptionIds={selectedOptionIds}
             currencyFormatter={currencyFormatter}
@@ -2259,6 +2764,9 @@ function ItemDetailOverlay({
         <ItemDetailContent
           item={item}
           quantity={quantity}
+          alreadyInCart={alreadyInCart}
+          editingLineQuantity={editingLineQuantity}
+          optionUnitsInCart={optionUnitsInCart}
           note={note}
           selectedOptionIds={selectedOptionIds}
           currencyFormatter={currencyFormatter}
@@ -2280,6 +2788,9 @@ function ItemDetailOverlay({
 function ItemDetailContent({
   item,
   quantity,
+  alreadyInCart,
+  editingLineQuantity,
+  optionUnitsInCart,
   note,
   selectedOptionIds,
   currencyFormatter,
@@ -2295,6 +2806,11 @@ function ItemDetailContent({
 }: {
   item: PublicMenuItem
   quantity: number
+  /** How many of this dish the cart already holds, so the stepper can stop at what is left. */
+  alreadyInCart: number
+  editingLineQuantity: number | null
+  /** Lots of each tracked modifier the cart's other lines already commit. */
+  optionUnitsInCart: Map<string, number>
   note: string
   selectedOptionIds: string[]
   currencyFormatter: Intl.NumberFormat
@@ -2313,9 +2829,21 @@ function ItemDetailContent({
   const imageUrl = resolvePublicAssetUrl(item.imageUrl)
   const optionGroups = getAvailableOptionGroups(item)
   const selectedOptions = getOrderedSelectedOptions(item, selectedOptionIds)
-  const optionSelectionError = getOptionSelectionError(item, selectedOptionIds)
+  // Recomputed as options are ticked, so the panel below describes the plate being ordered rather
+  // than the dish as listed.
+  const plateDisclosure = buildPlateDisclosure(
+    item,
+    selectedOptions.map(({ option }) => option),
+  )
+  // What stays on screen while the panel is shut.
+  const allergenSummary = summariseDisclosure(plateDisclosure)
+  const optionSelectionError = getOptionSelectionError(item, selectedOptionIds) ??
+    getOptionStockError(item, selectedOptionIds, quantity, optionUnitsInCart)
   const unitPrice = calculateItemUnitPrice(item, selectedOptionIds)
   const lineTotal = unitPrice * quantity
+  // Null when the dish is unlimited. Stops the stepper where the server would refuse anyway, so
+  // the ceiling is discovered while choosing rather than at the moment of adding.
+  const addableNow = remainingForLine(item.remainingStock, alreadyInCart, editingLineQuantity)
 
   return (
     <div className={cn('flex min-h-0 flex-1 flex-col', className)}>
@@ -2335,7 +2863,14 @@ function ItemDetailContent({
           )}
           {item.isSoldOut ? (
             <SoldOutImageBadge className="absolute inset-x-4 bottom-4" />
-          ) : null}
+          ) : (
+            <StockBadge
+              remainingStock={item.remainingStock}
+              isSoldOut={item.isSoldOut}
+              alreadyInCart={alreadyInCart}
+              className="absolute bottom-4 left-4"
+            />
+          )}
           {!item.isAvailable && !item.isSoldOut ? (
             <Badge className="absolute bottom-4 left-4 rounded-full border bg-background/90 px-3 py-1 shadow-sm" variant="secondary">
               Unavailable
@@ -2361,16 +2896,39 @@ function ItemDetailContent({
                 {item.calories != null ? <span>{item.calories} kcal</span> : null}
               </div>
             ) : null}
-            {item.allergens ? (
-              <div className="flex gap-2 rounded-xl border border-amber-300/70 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-100">
+            {/* Absence of allergen information used to render as nothing at all, which is
+                indistinguishable from a dish confirmed to contain no allergens — so "not declared"
+                is still said out loud. The panel folds shut by default because the standing wording
+                below it, which is the same on every dish, was pushing the price and the options off
+                a phone screen. The declaration itself does not fold: it is the summary line, on
+                screen whether the panel is open or not. */}
+            <details className="group rounded-xl border border-amber-300/70 bg-amber-50 text-sm text-amber-950 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-100">
+              <summary className="flex cursor-pointer list-none items-start gap-2 p-3 [&::-webkit-details-marker]:hidden">
                 <ShieldAlert className="mt-0.5 size-4 shrink-0" />
-                <div>
-                  <p className="font-semibold">Contains or may contain</p>
-                  <p>{item.allergens}</p>
-                  <p className="mt-1 text-xs opacity-80">Tell the restaurant about severe allergies before ordering.</p>
-                </div>
+                <span className="min-w-0 flex-1">
+                  <span className={allergenSummary.declared ? 'font-semibold' : 'font-medium opacity-90'}>
+                    {allergenSummary.headline}
+                  </span>
+                  {plateDisclosure.hasModifierDisclosure ? (
+                    <span className="block text-xs font-semibold">
+                      Some of this comes from the options you selected. Deselecting them removes it.
+                    </span>
+                  ) : null}
+                  <span className="block text-xs opacity-80 group-open:hidden">Allergen details</span>
+                </span>
+                <ChevronDown className="mt-0.5 size-4 shrink-0 transition-transform group-open:rotate-180" />
+              </summary>
+              <div className="border-t border-amber-300/60 px-3 py-2.5 dark:border-amber-400/20">
+                <p className="font-semibold">Contains</p>
+                <p>{formatAllergenLines(plateDisclosure.allergens) || 'Not declared by the restaurant.'}</p>
+                <p className="mt-1 font-semibold">May contain</p>
+                <p>{formatAllergenLines(plateDisclosure.mayContain) || 'Not declared by the restaurant.'}</p>
+                {plateDisclosure.crossContact.length > 0
+                  ? <p className="mt-1 text-xs">{formatAllergenLines(plateDisclosure.crossContact)}</p>
+                  : <p className="mt-1 text-xs">The restaurant has not described how this dish is prepared or what it shares equipment with.</p>}
+                <p className="mt-1 text-xs font-medium opacity-90">For a severe allergy, contact the restaurant before ordering. Order notes cannot guarantee prevention of cross-contact.</p>
               </div>
-            ) : null}
+            </details>
             {selectedOptions.length > 0 ? (
               <div className="flex flex-wrap gap-1.5">
                 {selectedOptions.map(({ group, option, quantity: optionQuantity }) => (
@@ -2425,13 +2983,24 @@ function ItemDetailContent({
                       {group.options.map((option) => {
                         const selectedQuantity = getOptionQuantity(selectedOptionIds, option.id)
                         const selected = selectedQuantity > 0
-                        const optionDisabled = disabled || isAdding || (!selected && maxReached && !isSingleChoice)
+                        // The recipe rule and the shelf, whichever is lower. Shown and enforced
+                        // here so the stepper stops where the server's refusal would have been.
+                        const optionCeiling = optionPerItemLimit(
+                          option.maxQuantity,
+                          option.remainingStock,
+                          optionUnitsInCart.get(option.id) ?? 0,
+                          quantity,
+                        )
+                        const optionSoldOut = optionCeiling < 1
+                        const optionDisabled = disabled ||
+                          isAdding ||
+                          (!selected && optionSoldOut) ||
+                          (!selected && maxReached && !isSingleChoice)
                         const canDecrease = selected && !disabled && !isAdding
                         const canIncrease = !disabled &&
                           !isAdding &&
                           selected &&
-                          selectedQuantity < option.maxQuantity &&
-                          selectedInGroup < group.maxSelections
+                          selectedQuantity < optionCeiling
 
                         return (
                           <div
@@ -2463,10 +3032,30 @@ function ItemDetailContent({
                               </span>
                               <span className="min-w-0">
                                 <span className="block truncate text-sm font-semibold text-foreground">{option.name}</span>
-                                {option.maxQuantity > 1 ? (
-                                  <span className="mt-0.5 block text-xs text-muted-foreground">
-                                    Max {option.maxQuantity}
-                                    {selectedQuantity > 1 ? ` - selected ${selectedQuantity}` : ''}
+                                {option.maxQuantity > 1 || option.remainingStock != null ? (
+                                  <span
+                                    className={cn(
+                                      'mt-0.5 block text-xs',
+                                      optionSoldOut ? 'font-medium text-destructive' : 'text-muted-foreground',
+                                    )}
+                                    data-testid={`option-limit-${option.id}`}
+                                  >
+                                    {/* The count is the part a customer can act on; "Max 3" beside
+                                        two left would be telling them something untrue. */}
+                                    {option.remainingStock != null
+                                      ? optionSoldOut
+                                        ? 'Sold out'
+                                        : `${optionCeiling} available`
+                                      : `Max ${option.maxQuantity}`}
+                                    {!optionSoldOut && selectedQuantity > 1 ? ` - selected ${selectedQuantity}` : ''}
+                                  </span>
+                                ) : null}
+                                {/* On the row itself, so it can be read before selecting rather
+                                    than noticed afterwards in a panel further up. */}
+                                {describeOptionAllergens(option) ? (
+                                  <span className="mt-0.5 flex items-start gap-1 text-xs font-medium text-amber-800 dark:text-amber-200">
+                                    <ShieldAlert className="mt-0.5 size-3 shrink-0" />
+                                    <span>{describeOptionAllergens(option)}</span>
                                   </span>
                                 ) : null}
                               </span>
@@ -2532,7 +3121,22 @@ function ItemDetailContent({
           <div className="rounded-2xl border bg-card p-3.5 shadow-sm">
             <div className="mb-2 flex items-center justify-between gap-3">
               <p className="text-sm font-semibold">Quantity</p>
-              <span className="text-xs text-muted-foreground">Choose how many</span>
+              <span
+                className={cn(
+                  'text-xs',
+                  addableNow !== null && quantity >= addableNow ? 'font-medium text-rose-600 dark:text-rose-400' : 'text-muted-foreground',
+                )}
+              >
+                {addableNow === null
+                  ? 'Choose how many'
+                  // "More" is only true while adding. An edit sets the whole line, so the number is
+                  // what this line may hold, not what may be added on top of it.
+                  : isEditing
+                    ? `${addableNow} available`
+                    : alreadyInCart > 0
+                      ? `${addableNow} more available`
+                      : `${addableNow} available`}
+              </span>
             </div>
             <div className="flex w-fit items-center gap-2 rounded-full border bg-muted/20 p-1">
               <Button
@@ -2541,7 +3145,7 @@ function ItemDetailContent({
                 size="icon"
                 aria-label="Decrease quantity"
                 className="size-9"
-                disabled={quantity <= 1 || isAdding}
+                disabled={disabled || quantity <= 1 || isAdding}
                 onClick={() => onQuantityChange(Math.max(1, quantity - 1))}
               >
                 <Minus className="size-4" />
@@ -2553,7 +3157,7 @@ function ItemDetailContent({
                 size="icon"
                 aria-label="Increase quantity"
                 className="size-9"
-                disabled={isAdding}
+                disabled={disabled || isAdding || (addableNow !== null && quantity >= addableNow)}
                 onClick={() => onQuantityChange(quantity + 1)}
               >
                 <Plus className="size-4" />
@@ -2579,6 +3183,7 @@ function ItemDetailContent({
               disabled={isAdding || disabled}
               onChange={(event) => onNoteChange(event.target.value)}
             />
+            <NoteHealthInfoNotice scope="item" />
             <QuickNotePresetGroups
               groups={itemNotePresetGroups}
               note={note}
@@ -2759,7 +3364,12 @@ function QuickNotePresetGroups({
   )
 }
 
-function CartSummaryBar({
+/**
+ * Exported for the Clear-cart regression test. The confirmation this component guards is the only
+ * thing standing between a tap and an emptied cart, so it is worth testing on its own rather than
+ * only through the whole page.
+ */
+export function CartSummaryBar({
   cart,
   currencyFormatter,
   menuItemsById,
@@ -2800,9 +3410,58 @@ function CartSummaryBar({
   onCheckout: () => void
 }) {
   const hasItems = cart.items.length > 0
+  // The server's own verdict, not a guess assembled from two flags here. Checkout would refuse
+  // these, so offering the button would only produce a rejection the customer cannot act on.
+  const unorderableItems = cart.items.filter((item) => item.isOrderable === false)
+  const hasUnorderableItems = unorderableItems.length > 0
   const isReadOnly = cart.status !== 'Active'
   const [orderNoteHasUnsavedChanges, setOrderNoteHasUnsavedChanges] = useState(false)
   const [unsavedNoteDialogOpen, setUnsavedNoteDialogOpen] = useState(false)
+  /**
+   * How far the panel has been dragged down, in pixels. A bottom sheet that only closes from a
+   * small chevron is a bottom sheet people fight with on a phone; swiping it away is the gesture
+   * they already expect, and following the finger is what makes it feel like one rather than a
+   * hidden shortcut.
+   */
+  const [dragOffset, setDragOffset] = useState(0)
+  // Rendered from, so it is state rather than a ref: the transition below is chosen during render,
+  // and a ref read there would not re-render when it changed.
+  const [isDragging, setIsDragging] = useState(false)
+  const dragStartRef = useRef<number | null>(null)
+  // Far enough that a stray downward flick while reaching for Clear does not close the cart.
+  const dismissThresholdPx = 80
+
+  const handleDragStart = (event: React.TouchEvent) => {
+    dragStartRef.current = event.touches[0]?.clientY ?? null
+    setIsDragging(dragStartRef.current !== null)
+  }
+
+  const handleDragMove = (event: React.TouchEvent) => {
+    const start = dragStartRef.current
+
+    if (start === null) {
+      return
+    }
+
+    // Downward only: dragging up should do nothing rather than lift the panel off the bottom.
+    setDragOffset(Math.max(0, (event.touches[0]?.clientY ?? start) - start))
+  }
+
+  const handleDragEnd = () => {
+    if (dragStartRef.current === null) {
+      return
+    }
+
+    dragStartRef.current = null
+    setIsDragging(false)
+
+    if (dragOffset > dismissThresholdPx) {
+      onOpenChange(false)
+    }
+
+    // Reset either way: on dismissal the panel unmounts, and otherwise it springs back.
+    setDragOffset(0)
+  }
 
   const requestCheckout = () => {
     if (orderNoteHasUnsavedChanges) {
@@ -2814,17 +3473,42 @@ function CartSummaryBar({
   }
 
   return (
+    // Pinned to the bottom, so anything taller than the screen overflows off the *top* — where
+    // nothing can scroll to it. The panel used to be unbounded: a header, a list capped at 52svh
+    // and a footer of note, total, button and terms easily exceeded the viewport on a phone, and
+    // the cart's own heading, item count and Clear button ended up above the screen for good.
     <div className={cn(
-      'fixed bottom-0 z-20 p-3',
+      'fixed bottom-0 z-20 flex max-h-dvh flex-col p-3',
       hasItems || open
         ? 'inset-x-0 border-t bg-background/85 shadow-[0_-18px_45px_rgba(0,0,0,0.08)] backdrop-blur-xl'
         : 'right-0',
     )}>
-      <div className={cn('flex flex-col gap-3', hasItems || open ? 'mx-auto max-w-6xl' : 'items-end')}>
+      <div className={cn('flex min-h-0 flex-col gap-3', hasItems || open ? 'mx-auto w-full max-w-6xl' : 'items-end')}>
         {open ? (
-          <Card className="overflow-hidden rounded-3xl border shadow-2xl shadow-black/10">
-            <CardContent className="p-0">
-              <div className="flex items-start justify-between gap-3 border-b bg-muted/20 p-4">
+          <Card
+            className="flex min-h-0 flex-col overflow-hidden rounded-3xl border shadow-2xl shadow-black/10"
+            style={{
+              transform: dragOffset ? `translateY(${dragOffset}px)` : undefined,
+              // Only while the finger is up, so the panel tracks the drag exactly and springs back
+              // smoothly when released.
+              transition: isDragging ? undefined : 'transform 200ms ease-out',
+            }}
+          >
+            <CardContent className="flex min-h-0 flex-col p-0">
+              <div
+                className="flex shrink-0 touch-pan-y flex-col gap-3 border-b bg-card p-4"
+                onTouchStart={handleDragStart}
+                onTouchMove={handleDragMove}
+                onTouchEnd={handleDragEnd}
+                onTouchCancel={handleDragEnd}
+              >
+                {/* The grab handle. Phone only: a swipe target nobody can see is a swipe target
+                    nobody uses, and on a pointer device the chevron is the obvious control. */}
+                <span
+                  aria-hidden="true"
+                  className="mx-auto -mt-1 h-1 w-10 shrink-0 rounded-full bg-border sm:hidden"
+                />
+              <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="min-w-0 space-y-1">
                     <h2 className="font-heading flex items-center gap-2 text-xl font-semibold tracking-tight">
@@ -2895,8 +3579,9 @@ function CartSummaryBar({
                   </Button>
                 </div>
               </div>
+              </div>
 
-              <div className="max-h-[52svh] overflow-y-auto bg-background/80 p-4">
+              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-background/80 p-4">
                 {hasItems ? (
                   <div className="space-y-3">
                     {cart.items.map((item) => (
@@ -2904,6 +3589,8 @@ function CartSummaryBar({
                         key={item.id}
                         item={item}
                         menuItem={menuItemsById.get(item.menuItemId) ?? null}
+                        // Excluding itself: this stepper sets the line's own quantity.
+                        optionUnitsElsewhere={optionUnitsInCart(cart.items, item.id)}
                         currencyFormatter={currencyFormatter}
                         isReadOnly={isReadOnly}
                         isUpdating={updatingItemId === item.id}
@@ -2925,17 +3612,25 @@ function CartSummaryBar({
                     </div>
                   </div>
                 )}
+
+                <div className="mt-3">
+                  <CartOrderNoteEditor
+                    note={cart.customerNote ?? ''}
+                    isReadOnly={isReadOnly}
+                    isSaving={isSavingNote}
+                    onSave={onOrderNoteSave}
+                    onDirtyChange={setOrderNoteHasUnsavedChanges}
+                  />
+                </div>
               </div>
 
-              <div className="space-y-3 border-t bg-card p-4">
-                <CartOrderNoteEditor
-                  note={cart.customerNote ?? ''}
-                  isReadOnly={isReadOnly}
-                  isSaving={isSavingNote}
-                  onSave={onOrderNoteSave}
-                  onDirtyChange={setOrderNoteHasUnsavedChanges}
-                />
-
+              {/* Stays put: the total and the button are what the customer acts on, and they are
+                  short enough to pin at any viewport height. */}
+              {/* Capped in viewport units, not per cent: a percentage max-height needs a definite
+                  height on the parent, and this parent is a flex item that has none — so it
+                  resolved to nothing and the bar clipped instead of scrolling. On a normal phone
+                  the cap is well above the bar's natural height and never engages. */}
+              <div className="max-h-[50dvh] shrink-0 space-y-3 overflow-y-auto border-t bg-card p-4">
                 <div className="flex items-center justify-between gap-3 rounded-2xl bg-muted/35 px-4 py-3">
                   <span className="text-sm font-semibold text-muted-foreground">Total</span>
                   <PriceText value={cart.total} currencyFormatter={currencyFormatter} variant="total" />
@@ -2947,10 +3642,31 @@ function CartSummaryBar({
                   </p>
                 ) : null}
 
+                {hasUnorderableItems ? (
+                  <div className="flex gap-2 rounded-xl border border-amber-300/70 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-100">
+                    <ShieldAlert className="mt-0.5 size-4 shrink-0" />
+                    <div>
+                      <p className="font-semibold">
+                        {unorderableItems.length === 1
+                          ? 'One item can no longer be ordered'
+                          : `${unorderableItems.length} items can no longer be ordered`}
+                      </p>
+                      <ul className="mt-1 space-y-0.5">
+                        {unorderableItems.map((item) => (
+                          <li key={item.id}>
+                            {item.name} — {item.unavailableReason ?? 'No longer available.'}
+                          </li>
+                        ))}
+                      </ul>
+                      <p className="mt-1 text-xs">Remove them to continue.</p>
+                    </div>
+                  </div>
+                ) : null}
+
                 <Button
                   type="button"
                   className="h-12 w-full rounded-xl text-base shadow-sm"
-                  disabled={!hasItems || isReadOnly || isCheckingOut || isClearingCart || isSavingNote}
+                  disabled={!hasItems || isReadOnly || isCheckingOut || isClearingCart || isSavingNote || hasUnorderableItems}
                   onClick={requestCheckout}
                 >
                   {isCheckingOut ? (
@@ -2960,6 +3676,12 @@ function CartSummaryBar({
                   )}
                   {isCheckingOut ? 'Starting checkout…' : 'Go to checkout'}
                 </Button>
+
+                {/* Consent rides on the checkout action itself; the accepted versions are still
+                    recorded against the order. */}
+                <p className="text-center text-xs leading-5 text-muted-foreground">
+                  Placing this order means you accept the <Link to="/terms/customer" target="_blank" className="underline">Customer Terms</Link> and acknowledge the <Link to="/privacy" target="_blank" className="underline">Privacy Policy</Link> and <Link to="/allergen-information" target="_blank" className="underline">allergen notice</Link>.
+                </p>
 
                 <AlertDialog open={unsavedNoteDialogOpen} onOpenChange={setUnsavedNoteDialogOpen}>
                   <AlertDialogContent size="sm">
@@ -3039,6 +3761,8 @@ function CartOrderNoteEditor({
   const normalizedNote = note.trim()
   const normalizedDraft = draft.trim()
   const hasChanges = normalizedDraft !== normalizedNote
+  const validationError = validateOrderNote(draft)
+  const displayedError = validationError ?? saveError
 
   useEffect(() => {
     onDirtyChange?.(open && hasChanges)
@@ -3067,6 +3791,12 @@ function CartOrderNoteEditor({
 
   const handleSave = async () => {
     updateSaveError(null)
+
+    const nextValidationError = validateOrderNote(draft)
+    if (nextValidationError) {
+      updateSaveError(nextValidationError)
+      return
+    }
 
     try {
       await onSave(draft)
@@ -3115,6 +3845,7 @@ function CartOrderNoteEditor({
           <Textarea
             value={draft}
             maxLength={orderNoteMaxLength}
+            aria-invalid={Boolean(validationError)}
             rows={3}
             placeholder="Please bring extra cutlery, keep all spicy dishes mild, allergy notes..."
             disabled={isReadOnly || isSaving}
@@ -3122,6 +3853,9 @@ function CartOrderNoteEditor({
               updateDraft(event.target.value)
             }}
           />
+          {/* The moment the cross-contact limit actually matters is while an allergy is being
+              typed into the note, not inside a checkbox further down the cart. */}
+          <NoteHealthInfoNotice scope="order" />
           <QuickNotePresetGroups
             groups={orderNotePresetGroups}
             note={draft}
@@ -3137,10 +3871,10 @@ function CartOrderNoteEditor({
               <span>This order note is not saved yet.</span>
             </div>
           ) : null}
-          {saveError ? (
+          {displayedError ? (
             <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm font-semibold text-destructive">
               <AlertCircle className="mt-0.5 size-4 shrink-0" />
-              <span>{saveError}</span>
+              <span>{displayedError}</span>
             </div>
           ) : null}
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -3162,7 +3896,7 @@ function CartOrderNoteEditor({
                   type="button"
                   size="sm"
                   className="min-w-28"
-                  disabled={isSaving || !hasChanges}
+                  disabled={isSaving || !hasChanges || Boolean(validationError)}
                   onClick={() => void handleSave()}
                 >
                   {isSaving ? <Loader2 className="size-4 animate-spin" /> : null}
@@ -3213,11 +3947,23 @@ function CartViewerPill({ viewer }: { viewer: CartViewer }) {
   )
 }
 
-function CartViewerButton({ viewer, onLogout }: { viewer: CartViewer; onLogout: () => void }) {
+function CartViewerButton({
+  viewer,
+  onLogout,
+  menuPath,
+}: {
+  viewer: CartViewer
+  onLogout: () => void
+  /** Where "back to menu" should lead from the orders page. */
+  menuPath: string
+}) {
   const displayName = viewer?.fullName?.trim() || viewer?.email?.trim() || 'Guest'
   const canUseAdminArea = Boolean(viewer?.roles.some((role) =>
     ['PlatformOwner', 'RestaurantOwner', 'Admin', 'Staff'].includes(role),
   ))
+  // Carried in the URL rather than in router state so it survives a reload — somebody who reloads
+  // their orders page should not lose the way back to the menu they came from.
+  const myOrdersPath = `/my-orders?returnTo=${encodeURIComponent(menuPath)}`
 
   return (
     <Popover>
@@ -3248,7 +3994,7 @@ function CartViewerButton({ viewer, onLogout }: { viewer: CartViewer; onLogout: 
               <Link to="/me"><UserRound />User Center</Link>
             </Button>
             <Button variant="ghost" className="justify-start" asChild>
-              <Link to={canUseAdminArea ? '/admin/orders' : '/my-orders'}>
+              <Link to={myOrdersPath}>
                 <ClipboardList />My Orders
               </Link>
             </Button>
@@ -3265,7 +4011,11 @@ function CartViewerButton({ viewer, onLogout }: { viewer: CartViewer; onLogout: 
         ) : (
           <div className="grid gap-1">
             <Button variant="ghost" className="justify-start" asChild>
-              <Link to="/login"><LogIn />Sign in</Link>
+              <Link to={myOrdersPath}><ClipboardList />My Orders</Link>
+            </Button>
+            <Separator />
+            <Button variant="ghost" className="justify-start" asChild>
+              <Link to={`/login?returnTo=${encodeURIComponent(menuPath)}`}><LogIn />Sign in</Link>
             </Button>
             <Button variant="ghost" className="justify-start" asChild>
               <Link to="/register"><UserPlus />Create account</Link>
@@ -3280,6 +4030,7 @@ function CartViewerButton({ viewer, onLogout }: { viewer: CartViewer; onLogout: 
 function CartSummaryLine({
   item,
   menuItem,
+  optionUnitsElsewhere,
   currencyFormatter,
   isReadOnly,
   isUpdating,
@@ -3290,6 +4041,8 @@ function CartSummaryLine({
 }: {
   item: CartItem
   menuItem: PublicMenuItem | null
+  /** Lots of each tracked modifier the cart's other lines commit, so this stepper stops in time. */
+  optionUnitsElsewhere: Map<string, number>
   currencyFormatter: Intl.NumberFormat
   isReadOnly: boolean
   isUpdating: boolean
@@ -3310,7 +4063,7 @@ function CartSummaryLine({
 
   return (
     <div className="rounded-2xl border bg-card p-3 shadow-sm">
-      <div className="grid min-w-0 grid-cols-[56px_minmax(0,1fr)_auto] gap-3">
+      <div className="grid min-w-0 grid-cols-[56px_minmax(0,1fr)] gap-3 sm:grid-cols-[56px_minmax(0,1fr)_auto]">
         <div className="relative size-14 overflow-hidden rounded-xl border bg-muted">
           {imageUrl ? (
             <img
@@ -3347,124 +4100,128 @@ function CartSummaryLine({
             {item.quantity} x {currencyFormatter.format(basePrice)}
           </p>
           {item.selectedOptions.length > 0 ? (
-            <div className="mt-2 rounded-2xl border border-border/70 bg-muted/20 px-2.5 py-2">
-              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                Selected options
-              </p>
-              <div className="grid gap-1.5">
-                {item.selectedOptions.map((cartOption) => {
-                  const optionDefinition = findPublicMenuOption(menuItem, cartOption.menuItemOptionId)
-                  const selectedOptionIds = getCartItemSelectedOptionIds(item)
-                  const selectedInGroup = optionDefinition
-                    ? getSelectedCountInGroup(selectedOptionIds, optionDefinition.group)
-                    : 0
-                  const optionQuantity = cartOption.quantity ?? 1
-                  const canRemoveOption = Boolean(
-                    optionDefinition &&
-                    !isReadOnly &&
-                    !isUpdating &&
-                    selectedInGroup - optionQuantity >= optionDefinition.group.minSelections,
-                  )
-                  const canAdjustQuantity = Boolean(
-                    optionDefinition &&
-                    optionDefinition.option.maxQuantity > 1 &&
-                    !isReadOnly &&
-                    !isUpdating,
-                  )
-                  const canDecreaseOption = canAdjustQuantity && (optionQuantity > 1 || canRemoveOption)
-                  const canIncreaseOption = Boolean(
-                    optionDefinition &&
-                    canAdjustQuantity &&
-                    optionQuantity < optionDefinition.option.maxQuantity &&
-                    selectedInGroup < optionDefinition.group.maxSelections,
-                  )
+            <div className="mt-2 flex min-w-0 flex-wrap gap-1.5" aria-label="Selected options">
+              {item.selectedOptions.map((cartOption) => {
+                const optionDefinition = findPublicMenuOption(menuItem, cartOption.menuItemOptionId)
+                const selectedOptionIds = getCartItemSelectedOptionIds(item)
+                const selectedInGroup = optionDefinition
+                  ? getSelectedCountInGroup(selectedOptionIds, optionDefinition.group)
+                  : 0
+                const optionQuantity = cartOption.quantity ?? 1
+                const canRemoveOption = Boolean(
+                  optionDefinition &&
+                  !isReadOnly &&
+                  !isUpdating &&
+                  selectedInGroup - 1 >= optionDefinition.group.minSelections,
+                )
+                const canAdjustQuantity = Boolean(
+                  optionDefinition &&
+                  optionDefinition.option.maxQuantity > 1 &&
+                  !isReadOnly &&
+                  !isUpdating,
+                )
+                const canDecreaseOption = canAdjustQuantity && (optionQuantity > 1 || canRemoveOption)
+                // The same two ceilings the item sheet applies. Capped at the recipe rule alone,
+                // this stepper walks straight past a modifier the kitchen has run out of.
+                const optionCeiling = optionDefinition
+                  ? optionPerItemLimit(
+                      optionDefinition.option.maxQuantity,
+                      optionDefinition.option.remainingStock,
+                      optionUnitsElsewhere.get(optionDefinition.option.id) ?? 0,
+                      item.quantity,
+                    )
+                  : 0
+                const canIncreaseOption = Boolean(
+                  optionDefinition &&
+                  canAdjustQuantity &&
+                  optionQuantity < optionCeiling,
+                )
 
-                  return (
-                    <div
-                      key={`${cartOption.menuItemOptionId ?? `${cartOption.groupNameSnapshot}:${cartOption.optionNameSnapshot}`}x${optionQuantity}`}
-                      className="rounded-2xl border bg-background px-2.5 py-2 text-xs shadow-sm"
-                    >
-                      <div className="flex min-w-0 items-center justify-between gap-2">
-                        <span className="min-w-0 truncate font-semibold text-foreground">
-                          {cartOption.optionNameSnapshot}
-                        </span>
-                        {canAdjustQuantity ? (
-                          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border bg-muted/30 p-0.5">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="size-6"
-                              disabled={!canDecreaseOption}
-                              aria-label={`Decrease ${cartOption.optionNameSnapshot}`}
-                              onClick={() => optionDefinition && onOptionQuantityChange(
-                                item,
-                                optionDefinition.group,
-                                optionDefinition.option,
-                                optionQuantity - 1,
-                              )}
-                            >
-                              <Minus className="size-3" />
-                            </Button>
-                            <span className="min-w-5 text-center text-xs font-semibold text-foreground">
-                              {optionQuantity}
-                            </span>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="size-6"
-                              disabled={!canIncreaseOption}
-                              aria-label={`Increase ${cartOption.optionNameSnapshot}`}
-                              onClick={() => optionDefinition && onOptionQuantityChange(
-                                item,
-                                optionDefinition.group,
-                                optionDefinition.option,
-                                optionQuantity + 1,
-                              )}
-                            >
-                              <Plus className="size-3" />
-                            </Button>
-                          </span>
-                        ) : optionQuantity > 1 ? (
-                          <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs font-semibold text-foreground">
-                            x{optionQuantity}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                        <span
-                          className={cn(
-                            'shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold',
-                            cartOption.priceAdjustmentSnapshot === 0
-                              ? 'bg-muted text-muted-foreground'
-                              : 'bg-amber-50 text-amber-900 ring-1 ring-amber-200/80 dark:bg-amber-400/10 dark:text-amber-100 dark:ring-amber-400/25',
+                return (
+                  <div
+                    key={`${cartOption.menuItemOptionId ?? `${cartOption.groupNameSnapshot}:${cartOption.optionNameSnapshot}`}x${optionQuantity}`}
+                    className="inline-flex max-w-full min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 rounded-lg border border-border/70 bg-muted/30 px-2 py-1 text-xs leading-4"
+                  >
+                    <span className="min-w-0 break-words font-medium text-foreground">
+                      <span className="text-muted-foreground">{cartOption.groupNameSnapshot}:</span>{' '}
+                      {cartOption.optionNameSnapshot}
+                    </span>
+
+                    {canAdjustQuantity ? (
+                      <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full border bg-background p-0.5 shadow-sm">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-5 rounded-full"
+                          disabled={!canDecreaseOption}
+                          aria-label={`Decrease ${cartOption.optionNameSnapshot}`}
+                          onClick={() => optionDefinition && onOptionQuantityChange(
+                            item,
+                            optionDefinition.group,
+                            optionDefinition.option,
+                            optionQuantity - 1,
                           )}
                         >
-                          {formatCartOptionPriceAdjustment(cartOption, currencyFormatter)}
+                          <Minus className="size-3" />
+                        </Button>
+                        <span className="min-w-4 text-center text-[11px] font-semibold text-foreground">
+                          {optionQuantity}
                         </span>
-                        {canRemoveOption && optionDefinition ? (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 rounded-full px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
-                            disabled={isUpdating}
-                            onClick={() => onOptionQuantityChange(
-                              item,
-                              optionDefinition.group,
-                              optionDefinition.option,
-                              0,
-                            )}
-                          >
-                            Remove option
-                          </Button>
-                        ) : null}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-5 rounded-full"
+                          disabled={!canIncreaseOption}
+                          aria-label={`Increase ${cartOption.optionNameSnapshot}`}
+                          onClick={() => optionDefinition && onOptionQuantityChange(
+                            item,
+                            optionDefinition.group,
+                            optionDefinition.option,
+                            optionQuantity + 1,
+                          )}
+                        >
+                          <Plus className="size-3" />
+                        </Button>
+                      </span>
+                    ) : optionQuantity > 1 ? (
+                      <span className="shrink-0 font-semibold text-foreground">x{optionQuantity}</span>
+                    ) : null}
+
+                    <span
+                      className={cn(
+                        'shrink-0 text-[11px] font-semibold',
+                        cartOption.priceAdjustmentSnapshot === 0
+                          ? 'text-muted-foreground'
+                          : 'text-amber-800 dark:text-amber-200',
+                      )}
+                    >
+                      {formatCartOptionPriceAdjustment(cartOption, currencyFormatter)}
+                    </span>
+                    {canRemoveOption && optionDefinition ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        // Framed for the same reason as the stepper beside it: a bare glyph on a
+                        // tinted chip reads as decoration, and nobody presses decoration.
+                        className="size-5 shrink-0 rounded-full border border-destructive/40 bg-background text-destructive shadow-sm hover:bg-destructive/10 hover:text-destructive"
+                        aria-label={`Remove ${cartOption.optionNameSnapshot}`}
+                        disabled={isUpdating}
+                        onClick={() => onOptionQuantityChange(
+                          item,
+                          optionDefinition.group,
+                          optionDefinition.option,
+                          0,
+                        )}
+                      >
+                        <X className="size-3" />
+                      </Button>
+                    ) : null}
+                  </div>
+                )
+              })}
             </div>
           ) : null}
           {item.note ? (
@@ -3474,7 +4231,12 @@ function CartSummaryLine({
           ) : null}
         </div>
 
-        <PriceText value={item.lineTotal} currencyFormatter={currencyFormatter} variant="cart" />
+        <PriceText
+          value={item.lineTotal}
+          currencyFormatter={currencyFormatter}
+          variant="cart"
+          className="col-start-2 row-start-2 justify-self-start sm:col-start-3 sm:row-start-1 sm:justify-self-end"
+        />
       </div>
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
@@ -3707,6 +4469,73 @@ function SoldOutImageBadge({ className, compact = false }: { className?: string;
     >
       <span className={cn('rounded-full bg-amber-500 shadow-[0_0_0_3px_rgba(245,158,11,0.18)]', compact ? 'size-1' : 'size-1.5')} />
       Sold out
+    </div>
+  )
+}
+
+/**
+ * How many portions of a limited dish are left.
+ *
+ * <p>
+ * Shaped like the sold-out badge so the two read as the same kind of fact, but never shown beside
+ * it: a sold-out dish has nothing to count. Amber belongs to sold out, so a dish running low takes
+ * rose — the more urgent colour for the more urgent news — and a comfortable count stays neutral,
+ * present but not shouting.
+ * </p>
+ */
+function StockBadge({
+  remainingStock,
+  isSoldOut,
+  alreadyInCart = 0,
+  className,
+  compact = false,
+}: {
+  remainingStock: number | null | undefined
+  isSoldOut: boolean
+  /** Portions this cart already holds, so the count reads as what is still takeable. */
+  alreadyInCart?: number
+  className?: string
+  compact?: boolean
+}) {
+  const stock = describeStock(remainingStock, isSoldOut, alreadyInCart)
+
+  if (!stock) {
+    return null
+  }
+
+  const low = stock.tone === 'low'
+  // Nothing left to take because the customer took it. Their own doing, not a shortage, so it
+  // wears the brand colour rather than the warning one.
+  const held = stock.tone === 'held'
+
+  return (
+    <div
+      className={cn(
+        'pointer-events-none flex w-fit items-center justify-center gap-1.5 whitespace-nowrap rounded-full border px-3 py-1.5 text-xs font-semibold uppercase tracking-wide shadow-lg backdrop-blur',
+        low && 'border-rose-200/80 bg-rose-50/95 text-rose-950 shadow-rose-950/10 dark:border-rose-400/30 dark:bg-rose-400/15 dark:text-rose-100',
+        held && 'border-primary/25 bg-primary/10 text-primary shadow-primary/10 dark:bg-primary/20',
+        !low && !held && 'border-border/70 bg-background/90 text-foreground/80 shadow-foreground/5',
+        compact && 'px-2.5 py-1 text-[10px] leading-none tracking-[0.14em] shadow-md',
+        className,
+      )}
+    >
+      {stock.inCart > 0 ? (
+        <ShoppingBag className={cn('shrink-0', compact ? 'size-2.5' : 'size-3')} />
+      ) : (
+        <span
+          className={cn(
+            'rounded-full',
+            low ? 'bg-rose-500 shadow-[0_0_0_3px_rgba(244,63,94,0.18)]' : 'bg-muted-foreground/50',
+            compact ? 'size-1' : 'size-1.5',
+          )}
+        />
+      )}
+      <span aria-hidden="true">
+        {compact ? stock.shortLabel : stock.label}
+        {/* On a thumbnail there is no room for "· 1 in cart", so the bag icon carries it. */}
+        {compact && stock.inCart > 0 ? ` · ${stock.inCart}` : ''}
+      </span>
+      <span className="sr-only">{stock.srLabel}</span>
     </div>
   )
 }

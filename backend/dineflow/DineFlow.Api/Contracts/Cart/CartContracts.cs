@@ -38,11 +38,35 @@ public sealed class UpdateCartItemRequest
     public string? Note { get; init; }
 
     public IReadOnlyList<Guid>? SelectedOptionIds { get; init; }
+
+    /// <summary>
+    /// The line's version as it stood when the edit began, so an edit built on a stale view can be
+    /// recognised.
+    ///
+    /// <para>
+    /// A dine-in cart is shared: everyone at the table holds the same one. Two people editing the
+    /// same line both set an absolute quantity, so both succeeded and the later write simply
+    /// replaced the earlier — neither was told, and the person whose change vanished had no way to
+    /// know it ever applied.
+    /// </para>
+    ///
+    /// <para>Required: a precondition the caller may omit is one nobody can rely on.</para>
+    /// </summary>
+    public DateTime? ExpectedUpdatedAt { get; init; }
 }
 
 public sealed class UpdateCartNoteRequest
 {
     public string? Note { get; init; }
+}
+
+public sealed class CheckoutCartRequest
+{
+    public string? AcceptedCustomerTermsVersion { get; init; }
+
+    public string? AcknowledgedPrivacyPolicyVersion { get; init; }
+
+    public string? AcknowledgedAllergenNoticeVersion { get; init; }
 }
 
 public sealed class CheckoutCartResponse
@@ -112,7 +136,17 @@ public sealed class CartItemResponse
 
     public required IReadOnlyCollection<CartItemOptionResponse> SelectedOptions { get; init; }
 
+    /// <summary>Mirrors the restaurant's visibility toggle only. See <see cref="IsOrderable"/>.</summary>
     public bool IsAvailable { get; init; }
+
+    /// <summary>
+    /// Whether checkout would accept this line as it stands — the single question worth asking.
+    /// The two flags above each answer part of it and neither answers all of it.
+    /// </summary>
+    public bool IsOrderable { get; init; }
+
+    /// <summary>Why not, in words a customer can act on. Null when the line is fine.</summary>
+    public string? UnavailableReason { get; init; }
 
     public bool IsSoldOut { get; init; }
 
@@ -130,6 +164,13 @@ public sealed class CartItemOptionResponse
     public required string OptionNameSnapshot { get; init; }
 
     public decimal PriceAdjustmentSnapshot { get; init; }
+
+    /// <summary>The modifier's own allergen declaration, so a cart shows what was added.</summary>
+    public string? AllergensSnapshot { get; init; }
+
+    public string? MayContainAllergensSnapshot { get; init; }
+
+    public string? CrossContactStatementSnapshot { get; init; }
 
     public int Quantity { get; init; } = 1;
 }

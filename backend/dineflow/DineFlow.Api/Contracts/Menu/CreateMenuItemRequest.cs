@@ -15,10 +15,19 @@ public class CreateMenuItemRequest
     public bool IsGlutenFree { get; set; }
     public bool IsHalal { get; set; }
     public string? Allergens { get; set; }
+    public string? MayContainAllergens { get; set; }
+    public string? CrossContactStatement { get; set; }
     public int SpiceLevel { get; set; }
     public string? ServingSize { get; set; }
     public int? Calories { get; set; }
     public bool IsPopular { get; set; }
     public bool IsRecommended { get; set; }
     public int DisplayOrder { get; set; }
+
+    /// <summary>
+    /// The person saving has looked at the contradictions between the dietary claims and the
+    /// allergen text and says they are correct. Without it a contradicting item is refused, so the
+    /// claim and the allergen list can never disagree by accident.
+    /// </summary>
+    public bool AcknowledgeDietaryConflicts { get; set; }
 }

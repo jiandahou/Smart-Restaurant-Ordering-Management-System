@@ -24,6 +24,7 @@ public sealed class StaffFrontCounterController(
     UserManager<ApplicationUser> userManager,
     OrderRealtimeNotifier orderRealtimeNotifier,
     CounterPaymentReversalService counterPaymentReversalService,
+    OrderAutoAcceptanceService orderAutoAcceptanceService,
     ReportLogWriter reportLogWriter) : ControllerBase
 {
     private static readonly OrderStatus[] ActiveOrderStatuses =
@@ -95,6 +96,64 @@ public sealed class StaffFrontCounterController(
         {
             GeneratedAt = DateTime.UtcNow,
             BusinessDate = businessDate,
+            TotalOrders = totalOrders,
+            Orders = orders.Select(AdminOrdersController.MapToAdminResponse).ToList()
+        });
+    }
+
+    /// <summary>
+    /// Counter payments taken recently, whether or not the pickup has been finished.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The void and offline-refund endpoints work from a payment id and do not care what state the
+    /// order reached — a finished pickup can still have its counter payment put right. What was
+    /// missing was any way to find it: completing an order drops it out of the working lists, and the
+    /// reversal controls sit on those lists, so a payment became unreachable at exactly the moment
+    /// the customer was most likely to come back about it.
+    /// </para>
+    /// <para>
+    /// Deliberately a window rather than the whole history. This is the counter putting right what it
+    /// just did, not a ledger; the takings report is where the full record belongs.
+    /// </para>
+    /// </remarks>
+    [HttpGet("recent-payments")]
+    public async Task<ActionResult<FrontCounterRecentPaymentsResponse>> GetRecentCounterPayments(
+        [FromQuery] FrontCounterListRequest request,
+        CancellationToken cancellationToken)
+    {
+        var scope = await ResolveRestaurantIdAsync(request.RestaurantId, cancellationToken);
+        if (scope.Error is not null)
+        {
+            return scope.Error;
+        }
+
+        var query = dbContext.Orders
+            .AsNoTracking()
+            .Include(order => order.OrderItems)
+                .ThenInclude(item => item.SelectedOptions)
+            .Include(order => order.Payments)
+                .ThenInclude(payment => payment.Refunds)
+            .Include(order => order.Customer)
+            .Include(order => order.Restaurant)
+            .Include(order => order.Table)
+            .Where(FrontCounterRecentPayments.Predicate(scope.RestaurantId!.Value, DateTime.UtcNow));
+
+        query = ApplyOrderSearch(query, request.Search);
+
+        var totalOrders = await query.CountAsync(cancellationToken);
+
+        var orders = await query
+            .OrderByDescending(FrontCounterRecentPayments.LastTakenAt())
+            .ThenByDescending(order => order.Id)
+            .Take(request.PageSize)
+            .AsSplitQuery()
+            .ToListAsync(cancellationToken);
+
+        return Ok(new FrontCounterRecentPaymentsResponse
+        {
+            GeneratedAt = DateTime.UtcNow,
+            WindowHours = (int)FrontCounterRecentPayments.Window.TotalHours,
             TotalOrders = totalOrders,
             Orders = orders.Select(AdminOrdersController.MapToAdminResponse).ToList()
         });
@@ -429,6 +488,161 @@ public sealed class StaffFrontCounterController(
         });
     }
 
+    /// <summary>
+    /// Moves an order that was going to be paid online onto the till, so cash can be taken for it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The gap this closes. A diner orders, chooses to pay online, and never finishes — the tab is
+    /// closed, the phone is flat, they simply walk to the counter with a note in their hand. The
+    /// order sits unpaid, the kitchen is stopped on purpose because the money is unresolved, and
+    /// until now every screen a member of staff had offered exactly one thing to do about it:
+    /// reject the order and key the whole thing in again. The till showed nothing owing, because
+    /// nothing is owed <em>at the till</em> until the order says that is where it will be paid.
+    /// </para>
+    /// <para>
+    /// The customer could already do this from their own phone; the endpoint behind it just would
+    /// not answer to anybody else. So this is the same change, made by the person the customer is
+    /// standing in front of — the rule that decides whether it is allowed is
+    /// <see cref="OrderPaymentMethodPolicy"/>, unchanged and shared, which is what keeps the two
+    /// doors from drifting apart.
+    /// </para>
+    /// <para>
+    /// One direction only. Sending an order the other way, back to online, would hand the customer
+    /// in front of you a payment link they have already given up on; that choice is theirs to make
+    /// on their own screen, where they can act on it.
+    /// </para>
+    /// </remarks>
+    [HttpPost("orders/{orderId:guid}/pay-at-counter")]
+    public async Task<ActionResult<FrontCounterSettleOrderResponse>> SwitchOrderToCounterPayment(
+        Guid orderId,
+        [FromQuery] Guid? restaurantId,
+        CancellationToken cancellationToken)
+    {
+        var scope = await ResolveRestaurantIdAsync(restaurantId, cancellationToken);
+        if (scope.Error is not null)
+        {
+            return scope.Error;
+        }
+
+        var order = await LoadTrackedOrderQuery(scope.RestaurantId!.Value)
+            .FirstOrDefaultAsync(item => item.Id == orderId, cancellationToken);
+
+        if (order is null)
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
+        // Refusals here are the ones that protect money — an order already paid, or one whose
+        // checkout session is live and may be taking payment at this very second. The customer is
+        // standing at the counter, so the message has to be something the cashier can say out loud.
+        var refusal = OrderPaymentMethodPolicy.Refuse(order, PaymentMethod.PayAtCounter);
+        if (refusal is not null)
+        {
+            return Conflict(new { message = refusal });
+        }
+
+        var previousMethod = order.PaymentMethod;
+        var previousStatus = order.PaymentStatus;
+        var now = DateTime.UtcNow;
+
+        // Nothing to do, and nothing to write. Checked before the claim below rather than after it:
+        // writing first and asking afterwards is how a paid order got reset to unpaid and charged a
+        // second time. See the claim's WHERE clause.
+        if (previousMethod == PaymentMethod.PayAtCounter)
+        {
+            return Ok(new FrontCounterSettleOrderResponse
+            {
+                Order = AdminOrdersController.MapToAdminResponse(order)
+            });
+        }
+
+        // Claimed on the database row, not decided from the copy in memory.
+        //
+        // A till with a touchscreen gets double-tapped, and a busy counter has two of them. Each
+        // request had read the order before any of them wrote, so each saw Online, each believed it
+        // was the one making the change, and each recorded that it had: eight presses in a test
+        // produced one switch and eight audit entries saying so. Nothing was mischarged — the
+        // writes were identical and the payment path has its own guard — but "why is this order
+        // suddenly cash?" is the question this record exists to answer, and answering it eight
+        // times over reads as something having gone wrong when nothing had.
+        //
+        // So exactly one request may replace the method it read. The rest find zero rows, and say
+        // so by staying quiet.
+        //
+        // The payment status is part of the claim, not just the method. A request that read this
+        // order as unpaid, waited behind a busy counter, and then wrote `PaymentStatus = Unpaid`
+        // unconditionally would erase a payment taken in the meantime — and the till, seeing an
+        // unpaid order again, would take the money a second time. A soak test did exactly that:
+        // one switch recorded, two identical charges eight hundred milliseconds apart.
+        var claimed = dbContext.Database.IsRelational()
+            ? await dbContext.Orders
+                .Where(item => item.Id == order.Id
+                    && item.PaymentMethod == previousMethod
+                    && item.PaymentStatus == previousStatus)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(item => item.PaymentMethod, PaymentMethod.PayAtCounter)
+                        .SetProperty(item => item.PaymentStatus, PaymentStatus.Unpaid)
+                        .SetProperty(item => item.UpdatedAt, now),
+                    cancellationToken)
+            : 1;
+
+        // Whoever lost still answers with the order as it now stands: pressing twice is one
+        // intention, not an error to interpret at a counter with somebody waiting.
+        if (claimed == 0 || !OrderPaymentMethodPolicy.Apply(order, PaymentMethod.PayAtCounter, now))
+        {
+            await dbContext.Entry(order).ReloadAsync(cancellationToken);
+            return Ok(new FrontCounterSettleOrderResponse
+            {
+                Order = AdminOrdersController.MapToAdminResponse(order)
+            });
+        }
+
+        // The claim above already wrote those three columns, so the tracker is told they are no
+        // longer pending — by moving the original values up to the new ones, not by clearing
+        // IsModified. Clearing it reverts the property to its original value, which quietly put
+        // Online back on the order in memory and left the kitchen waiting on a payment that was no
+        // longer coming. The tests caught it; the flag reads like a no-op and is not one.
+        if (dbContext.Database.IsRelational())
+        {
+            var entry = dbContext.Entry(order);
+            foreach (var property in new[]
+                     {
+                         entry.Property(item => item.PaymentMethod).Metadata.Name,
+                         entry.Property(item => item.PaymentStatus).Metadata.Name,
+                         entry.Property(item => item.UpdatedAt).Metadata.Name,
+                     })
+            {
+                var tracked = entry.Property(property);
+                tracked.OriginalValue = tracked.CurrentValue;
+            }
+        }
+
+        // Nothing was holding the kitchen back except the money, so it can start now.
+        await orderAutoAcceptanceService.TryAcceptAsync(order, cancellationToken);
+
+        // Audited, unlike the customer's own version of this: here there is a member of staff who
+        // decided it, and "why is this order suddenly cash" is a question the day's takings will
+        // eventually ask.
+        reportLogWriter.AddAudit(
+            "Order.SwitchedToCounterPayment",
+            "Order",
+            order.Id.ToString(),
+            order.RestaurantId,
+            $"{order.OrderNumber} will be paid at the counter instead of online.",
+            before: new { paymentMethod = previousMethod.ToString() },
+            after: new { paymentMethod = order.PaymentMethod.ToString() });
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
+
+        return Ok(new FrontCounterSettleOrderResponse
+        {
+            Order = AdminOrdersController.MapToAdminResponse(order)
+        });
+    }
+
     [HttpPost("orders/{orderId:guid}/record-payment")]
     public async Task<ActionResult<FrontCounterRecordPaymentResponse>> RecordOrderPayment(
         Guid orderId,
@@ -441,6 +655,18 @@ public sealed class StaffFrontCounterController(
         {
             return scope.Error;
         }
+
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+        // Serialise against any other till ringing up this order before reading it. This was a plain
+        // read-check-write: two staff pressing at the same moment both read an unpaid order, both
+        // passed the "payment is due" check, and both recorded one — the same customer charged twice
+        // with nothing on either screen to show it. The table settlement next door had exactly this
+        // hole; this endpoint has it for a single order.
+        _ = await dbContext.Orders
+            .FromSql($"SELECT * FROM \"Orders\" WHERE \"Id\" = {orderId} FOR UPDATE")
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
 
         var order = await LoadTrackedOrderQuery(scope.RestaurantId!.Value)
             .FirstOrDefaultAsync(item => item.Id == orderId, cancellationToken);
@@ -481,6 +707,7 @@ public sealed class StaffFrontCounterController(
             tender.AmountReceived,
             tender.ChangeDue);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         await orderRealtimeNotifier.OrderPaymentUpdatedAsync(order, cancellationToken);
 
         return Ok(new FrontCounterRecordPaymentResponse
@@ -549,6 +776,19 @@ public sealed class StaffFrontCounterController(
         }
 
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+        // Serialise against any other till settling this table before reading anything. A table bill
+        // is several orders charged in one call, and without this lock two staff pressing settle at
+        // the same moment each read an open session, each took payment for every order on it, and both
+        // succeeded: an A$60 table charged A$120, with nothing on either screen to show it. The
+        // transaction alone did not prevent that — both transactions were reading committed data that
+        // was true when they read it.
+        _ = await dbContext.TableSessions
+            .FromSql($"SELECT * FROM \"TableSessions\" WHERE \"Id\" = {sessionId} FOR UPDATE")
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
+
+        // Read after the lock is granted, so this sees whatever the other till committed.
         var session = await LoadOpenTableSessions(scope.RestaurantId!.Value)
             .FirstOrDefaultAsync(item => item.Id == sessionId, cancellationToken);
 
@@ -978,6 +1218,14 @@ public sealed class StaffFrontCounterController(
         {
             RestaurantId = restaurant.Id,
             RestaurantName = restaurant.Name,
+            RestaurantLegalBusinessName = restaurant.LegalBusinessName,
+            RestaurantAbn = restaurant.Abn,
+            RestaurantGstRegistered = restaurant.GstRegistered,
+            RestaurantPricesIncludeGst = restaurant.PricesIncludeGst,
+            RestaurantAddress = restaurant.Address,
+            RestaurantPhone = restaurant.Phone,
+            RestaurantRefundContactEmail = restaurant.RefundContactEmail,
+            RestaurantCustomerSurchargeNotice = restaurant.CustomerSurchargeNotice,
             TableId = table.Id,
             TableNumber = table.TableNumber,
             Capacity = table.Capacity,
@@ -1017,6 +1265,14 @@ public sealed class StaffFrontCounterController(
         {
             RestaurantId = summary.RestaurantId,
             RestaurantName = summary.RestaurantName,
+            RestaurantLegalBusinessName = summary.RestaurantLegalBusinessName,
+            RestaurantAbn = summary.RestaurantAbn,
+            RestaurantGstRegistered = summary.RestaurantGstRegistered,
+            RestaurantPricesIncludeGst = summary.RestaurantPricesIncludeGst,
+            RestaurantAddress = summary.RestaurantAddress,
+            RestaurantPhone = summary.RestaurantPhone,
+            RestaurantRefundContactEmail = summary.RestaurantRefundContactEmail,
+            RestaurantCustomerSurchargeNotice = summary.RestaurantCustomerSurchargeNotice,
             TableId = summary.TableId,
             TableNumber = summary.TableNumber,
             Capacity = summary.Capacity,
@@ -1086,6 +1342,7 @@ public sealed class StaffFrontCounterController(
                 {
                     ItemName = first.MenuItemNameSnapshot,
                     Quantity = group.Sum(item => item.Quantity),
+                    BasePriceSnapshot = first.BasePriceSnapshot,
                     UnitPrice = first.UnitPrice,
                     TotalPrice = group.Sum(item => PricingCalculator.CalculateLineTotal(item.Quantity, item.UnitPrice)),
                     Note = string.IsNullOrWhiteSpace(first.ItemInstructions) ? null : first.ItemInstructions,
@@ -1099,6 +1356,9 @@ public sealed class StaffFrontCounterController(
                             MenuItemOptionId = option.MenuItemOptionId,
                             GroupNameSnapshot = option.GroupNameSnapshot,
                             OptionNameSnapshot = option.OptionNameSnapshot,
+                            AllergensSnapshot = option.AllergensSnapshot,
+                            MayContainAllergensSnapshot = option.MayContainAllergensSnapshot,
+                            CrossContactStatementSnapshot = option.CrossContactStatementSnapshot,
                             PriceAdjustmentSnapshot = option.PriceAdjustmentSnapshot,
                             Quantity = option.Quantity
                         })
@@ -1128,17 +1388,17 @@ public sealed class StaffFrontCounterController(
             return query;
         }
 
-        var pattern = $"%{normalized}%";
+        var pattern = SearchPattern.Contains(normalized);
         var pickupSearch = normalized.TrimStart('#');
         var hasPickupNumber = int.TryParse(pickupSearch, out var pickupNumber);
 
         return query.Where(order =>
-            EF.Functions.ILike(order.OrderNumber, pattern) ||
-            (order.Table != null && EF.Functions.ILike(order.Table.TableNumber, pattern)) ||
+            EF.Functions.ILike(order.OrderNumber, pattern, SearchPattern.EscapeCharacter) ||
+            (order.Table != null && EF.Functions.ILike(order.Table.TableNumber, pattern, SearchPattern.EscapeCharacter)) ||
             (order.Customer != null &&
-                ((order.Customer.FullName != null && EF.Functions.ILike(order.Customer.FullName, pattern)) ||
-                 (order.Customer.Email != null && EF.Functions.ILike(order.Customer.Email, pattern)))) ||
-            order.OrderItems.Any(item => EF.Functions.ILike(item.MenuItemNameSnapshot, pattern)) ||
+                ((order.Customer.FullName != null && EF.Functions.ILike(order.Customer.FullName, pattern, SearchPattern.EscapeCharacter)) ||
+                 (order.Customer.Email != null && EF.Functions.ILike(order.Customer.Email, pattern, SearchPattern.EscapeCharacter)))) ||
+            order.OrderItems.Any(item => EF.Functions.ILike(item.MenuItemNameSnapshot, pattern, SearchPattern.EscapeCharacter)) ||
             (hasPickupNumber && order.PickupNumber == pickupNumber));
     }
 

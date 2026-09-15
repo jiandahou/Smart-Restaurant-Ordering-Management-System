@@ -23,7 +23,21 @@ public class MenuOptionResponse
     public decimal PriceAdjustment { get; set; }
     public int AdjustmentType { get; set; }
     public int MaxQuantity { get; set; }
+
+    /// <summary>
+    /// Units of this modifier left, or null when it is not counted.
+    /// </summary>
+    /// <remarks>
+    /// Published for the same reason a dish's count is: a modifier with one left looked exactly like
+    /// an unlimited one, so a customer could choose it, work through the rest of the order, and only
+    /// be turned away at checkout with nothing having warned them.
+    /// </remarks>
+    public int? RemainingStock { get; set; }
     public int DisplayOrder { get; set; }
+    /// <summary>The modifier's own allergen declaration, separate from the dish's.</summary>
+    public string? Allergens { get; set; }
+    public string? MayContainAllergens { get; set; }
+    public string? CrossContactStatement { get; set; }
     public bool IsAvailable { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime? UpdatedAt { get; set; }

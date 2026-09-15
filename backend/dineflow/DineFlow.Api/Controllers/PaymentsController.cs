@@ -16,6 +16,7 @@ using DineFlow.Infrastructure.Restaurant;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -40,10 +41,12 @@ public class PaymentsController : ControllerBase
     private readonly IStripeClient _stripeClient;
     private readonly StripeOptions _stripeOptions;
     private readonly OrderRealtimeNotifier _orderRealtimeNotifier;
-    private readonly OrderAutoAcceptanceService _orderAutoAcceptanceService;
+    private readonly OrderPaymentLanding _orderPaymentLanding;
     private readonly OrderRefundProcessor _orderRefundProcessor;
     private readonly StripeOrderCheckoutService _stripeOrderCheckoutService;
     private readonly PaymentSyncService _paymentSyncService;
+    private readonly PlatformSubscriptionService _platformSubscriptionService;
+    private readonly RefundedOrderCloser _refundedOrderCloser;
     private readonly PaymentNotificationService _paymentNotificationService;
     private readonly ReportLogWriter _reportLogWriter;
     private readonly ILogger<PaymentsController> _logger;
@@ -54,10 +57,12 @@ public class PaymentsController : ControllerBase
         IStripeClient stripeClient,
         IOptions<StripeOptions> stripeOptions,
         OrderRealtimeNotifier orderRealtimeNotifier,
-        OrderAutoAcceptanceService orderAutoAcceptanceService,
+        OrderPaymentLanding orderPaymentLanding,
         OrderRefundProcessor orderRefundProcessor,
         StripeOrderCheckoutService stripeOrderCheckoutService,
         PaymentSyncService paymentSyncService,
+        PlatformSubscriptionService platformSubscriptionService,
+        RefundedOrderCloser refundedOrderCloser,
         PaymentNotificationService paymentNotificationService,
         ReportLogWriter reportLogWriter,
         ILogger<PaymentsController> logger)
@@ -67,13 +72,112 @@ public class PaymentsController : ControllerBase
         _stripeClient = stripeClient;
         _stripeOptions = stripeOptions.Value;
         _orderRealtimeNotifier = orderRealtimeNotifier;
-        _orderAutoAcceptanceService = orderAutoAcceptanceService;
+        _orderPaymentLanding = orderPaymentLanding;
         _orderRefundProcessor = orderRefundProcessor;
         _stripeOrderCheckoutService = stripeOrderCheckoutService;
         _paymentSyncService = paymentSyncService;
+        _platformSubscriptionService = platformSubscriptionService;
+        _refundedOrderCloser = refundedOrderCloser;
         _paymentNotificationService = paymentNotificationService;
         _reportLogWriter = reportLogWriter;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Customer return-path recovery. The Checkout Session id is an unguessable Stripe identifier,
+    /// and this endpoint can only perform an idempotent state refresh; it returns no order details.
+    /// </summary>
+    [AllowAnonymous]
+    [EnableRateLimiting(RateLimitPolicies.GuestOrderAccess)]
+    [HttpPost("stripe/checkout-session/confirm")]
+    public async Task<ActionResult<ConfirmCheckoutSessionResponse>> ConfirmCheckoutSession(
+        ConfirmCheckoutSessionRequest request,
+        CancellationToken cancellationToken)
+    {
+        var sessionId = request.SessionId.Trim();
+        if (!sessionId.StartsWith("cs_", StringComparison.Ordinal))
+        {
+            return BadRequest(new { message = "Invalid Stripe Checkout Session id." });
+        }
+
+        var payment = await _dbContext.Payments
+            .Include(item => item.Order)
+                .ThenInclude(order => order!.Restaurant)
+            .FirstOrDefaultAsync(
+                item => item.Provider == PaymentProviders.Stripe &&
+                    item.ProviderCheckoutSessionId == sessionId,
+                cancellationToken);
+
+        if (payment is null)
+        {
+            return NotFound(new { message = "Checkout session was not found." });
+        }
+
+        // Already settled and already synced once, so there is nothing left for Stripe to tell us:
+        // the money has stopped moving, the settlement figures are on the row, and the only thing
+        // that can still change is the order's own status, which is ours. The page polls this while
+        // the customer waits — asking Stripe again each time would spend a round trip per open tab
+        // to re-read an answer we hold.
+        if (!NeedsProviderSync(payment))
+        {
+            return Ok(Describe(payment));
+        }
+
+        var result = await _paymentSyncService.SyncCheckoutSessionAsync(
+            payment,
+            actorUserId: null,
+            cancellationToken);
+
+        if (!result.IsSuccess)
+        {
+            return StatusCode(result.StatusCode, new { message = result.Message });
+        }
+
+        return Ok(Describe(payment));
+    }
+
+    /// <summary>
+    /// Whether Stripe still has something to say about this payment.
+    /// </summary>
+    /// <remarks>
+    /// A refunded or partially refunded payment is finished. A paid one is finished too, but only
+    /// once something has read the charge — the webhook records the status without the settlement
+    /// figures, so an unsynced payment still needs the round trip that fills them in.
+    /// </remarks>
+    private static bool NeedsProviderSync(Payment payment) =>
+        payment.Status switch
+        {
+            PaymentStatus.Refunded or PaymentStatus.PartiallyRefunded => false,
+            PaymentStatus.Paid => payment.LastSyncedAt is null,
+            _ => true,
+        };
+
+    private static ConfirmCheckoutSessionResponse Describe(Payment payment)
+    {
+        var confirmed = payment.Status is PaymentStatus.Paid
+            or PaymentStatus.PartiallyRefunded
+            or PaymentStatus.Refunded;
+
+        // The money can arrive for an order that no longer exists — a hosted page the restaurant
+        // could not close, finished by a customer who still had the tab open. The payment really
+        // did succeed, so every check above says confirmed, and saying only that left the customer
+        // reading "your payment and order status are now up to date" about an order the kitchen had
+        // rejected and a refund already on its way back to them.
+        var turnedAway = payment.Order is not null
+            && payment.Order.Status is OrderStatus.Cancelled or OrderStatus.Rejected;
+
+        return new ConfirmCheckoutSessionResponse
+        {
+            PaymentStatus = payment.Status.ToString(),
+            Confirmed = confirmed,
+            OrderTurnedAway = turnedAway,
+            // The same sentence the refund email carries, so the screen and the inbox agree.
+            Message = turnedAway
+                ? TurnedAwayOrderRefund.CustomerExplanation(payment.Order!.Status)
+                : confirmed
+                    ? "Payment confirmed."
+                    : "Payment is still being processed by Stripe."
+        };
     }
 
     /// Manual recovery path: pulls the authoritative state from Stripe for a payment stranded by a
@@ -90,6 +194,7 @@ public class PaymentsController : ControllerBase
             .Include(item => item.Order)
                 .ThenInclude(order => order!.Customer)
             .Include(item => item.Refunds)
+                .ThenInclude(refund => refund.Items)
             .FirstOrDefaultAsync(item => item.Id == paymentId, cancellationToken);
 
         if (payment is null)
@@ -104,12 +209,19 @@ public class PaymentsController : ControllerBase
             return Forbid();
         }
 
-        var result = await _paymentSyncService.SyncAsync(
+        // Through the session, not straight to the payment intent. An expired Checkout session leaves
+        // an intent Stripe reports as canceled, so going directly recorded the payment as Cancelled —
+        // which reads as "somebody cancelled this" when what happened is that the customer walked away
+        // and the session timed out. Only the session itself can tell those apart, and the difference
+        // is what staff act on. Payments with no session fall through to the intent as before.
+        var result = await _paymentSyncService.SyncCheckoutSessionAsync(
             payment,
             User.FindFirstValue(ClaimTypes.NameIdentifier),
             cancellationToken);
 
-        if (!result.IsSuccess)
+        // An expired session is a definite answer, not a failed sync: the state has just been written
+        // and the person who pressed Re-sync should be shown it, not an error over a stale row.
+        if (!result.IsSuccess && !result.StateIsSettled)
         {
             return StatusCode(result.StatusCode, new { message = result.Message });
         }
@@ -210,6 +322,7 @@ public class PaymentsController : ControllerBase
         var query = _dbContext.Payments
             .AsNoTracking()
             .Include(payment => payment.Refunds)
+                .ThenInclude(refund => refund.Items)
             .Include(payment => payment.Order)
                 .ThenInclude(order => order!.Restaurant)
             .Include(payment => payment.Order)
@@ -251,15 +364,15 @@ public class PaymentsController : ControllerBase
         var search = request.Search?.Trim();
         if (!string.IsNullOrWhiteSpace(search))
         {
-            var pattern = $"%{search}%";
+            var pattern = SearchPattern.Contains(search);
             query = query.Where(payment =>
-                EF.Functions.ILike(payment.Id.ToString(), pattern) ||
-                (payment.ProviderCheckoutSessionId != null && EF.Functions.ILike(payment.ProviderCheckoutSessionId, pattern)) ||
-                (payment.ProviderPaymentIntentId != null && EF.Functions.ILike(payment.ProviderPaymentIntentId, pattern)) ||
-                (payment.Order != null && EF.Functions.ILike(payment.Order.OrderNumber, pattern)) ||
-                (payment.Order != null && payment.Order.Restaurant != null && EF.Functions.ILike(payment.Order.Restaurant.Name, pattern)) ||
-                (payment.Order != null && payment.Order.Customer != null && payment.Order.Customer.FullName != null && EF.Functions.ILike(payment.Order.Customer.FullName, pattern)) ||
-                (payment.Order != null && payment.Order.Customer != null && payment.Order.Customer.Email != null && EF.Functions.ILike(payment.Order.Customer.Email, pattern)));
+                EF.Functions.ILike(payment.Id.ToString(), pattern, SearchPattern.EscapeCharacter) ||
+                (payment.ProviderCheckoutSessionId != null && EF.Functions.ILike(payment.ProviderCheckoutSessionId, pattern, SearchPattern.EscapeCharacter)) ||
+                (payment.ProviderPaymentIntentId != null && EF.Functions.ILike(payment.ProviderPaymentIntentId, pattern, SearchPattern.EscapeCharacter)) ||
+                (payment.Order != null && EF.Functions.ILike(payment.Order.OrderNumber, pattern, SearchPattern.EscapeCharacter)) ||
+                (payment.Order != null && payment.Order.Restaurant != null && EF.Functions.ILike(payment.Order.Restaurant.Name, pattern, SearchPattern.EscapeCharacter)) ||
+                (payment.Order != null && payment.Order.Customer != null && payment.Order.Customer.FullName != null && EF.Functions.ILike(payment.Order.Customer.FullName, pattern, SearchPattern.EscapeCharacter)) ||
+                (payment.Order != null && payment.Order.Customer != null && payment.Order.Customer.Email != null && EF.Functions.ILike(payment.Order.Customer.Email, pattern, SearchPattern.EscapeCharacter)));
         }
 
         var sortedQuery = ApplyPaymentSorting(query, request.SortBy, request.IsDescending);
@@ -529,13 +642,61 @@ public class PaymentsController : ControllerBase
             return Conflict(new { message = "Refund request is missing its order." });
         }
 
-        var approvedAmountCents = request?.AmountCents ?? refundRequest.RequestedAmountCents;
-        if (!RefundAmountPolicy.IsWithinRequestedAmount(refundRequest.RequestedAmountCents, approvedAmountCents))
+        var requestedAllocations = refundRequest.Items
+            .Select(item => new RefundItemAllocation(
+                item.OrderItemId,
+                item.MenuItemNameSnapshot,
+                item.Quantity,
+                item.AmountCents,
+                // Carried from the request: staff approve what the customer asked for, and the
+                // extra they asked about must survive the approval that grants it.
+                item.OrderItemOptionId,
+                item.OptionNameSnapshot))
+            .ToList();
+
+        long approvedAmountCents;
+        IReadOnlyList<RefundItemAllocation> approvedAllocations;
+
+        if (request?.Items is { Count: > 0 } chosenItems)
         {
-            return BadRequest(new
+            // Two answers to "how much" is a mistake to surface rather than one to pick a winner for.
+            if (request.AmountCents is not null)
             {
-                message = $"Approved amount must be greater than zero and cannot exceed the requested amount ({refundRequest.RequestedAmountCents} cents)."
-            });
+                return BadRequest(new
+                {
+                    message = "Send either a total or a per-item breakdown, not both."
+                });
+            }
+
+            var chosen = RefundRequestItemPolicy.AllocateStaffChosenRefund(
+                requestedAllocations,
+                chosenItems
+                    .Select(item => (item.OrderItemId, item.OrderItemOptionId, item.AmountCents))
+                    .ToList());
+
+            if (!chosen.IsValid)
+            {
+                return BadRequest(new { message = chosen.Error });
+            }
+
+            approvedAmountCents = chosen.ApprovedAmountCents;
+            approvedAllocations = chosen.Allocations;
+        }
+        else
+        {
+            approvedAmountCents = request?.AmountCents ?? refundRequest.RequestedAmountCents;
+
+            if (!RefundAmountPolicy.IsWithinRequestedAmount(refundRequest.RequestedAmountCents, approvedAmountCents))
+            {
+                return BadRequest(new
+                {
+                    message = $"Approved amount must be greater than zero and cannot exceed the requested amount ({refundRequest.RequestedAmountCents} cents)."
+                });
+            }
+
+            approvedAllocations = RefundRequestItemPolicy.AllocateApprovedRefund(
+                approvedAmountCents,
+                requestedAllocations);
         }
 
         var claimedAt = DateTime.UtcNow;
@@ -577,7 +738,8 @@ public class PaymentsController : ControllerBase
                 cancellationToken,
                 $"refund-request-{refundRequest.Id:N}",
                 approvedAmountCents,
-                refundRequest.Id);
+                refundRequest.Id,
+                approvedAllocations);
         }
         catch
         {
@@ -632,6 +794,12 @@ public class PaymentsController : ControllerBase
                     note
                 });
         }
+        await _refundedOrderCloser.CloseIfFullyRefundedAsync(
+            refundRequest.Order,
+            userId,
+            now,
+            cancellationToken);
+
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(MapToAdminRefundRequestResponse(refundRequest));
@@ -743,7 +911,7 @@ public class PaymentsController : ControllerBase
             return NotFound(new { message = "Order not found." });
         }
 
-        if (!await CanStartCheckoutSessionForOrderAsync(order))
+        if (!await CanStartCheckoutSessionForOrderAsync(order, request.GuestAccessToken))
         {
             if (User.Identity?.IsAuthenticated != true)
             {
@@ -803,7 +971,7 @@ public class PaymentsController : ControllerBase
             return NotFound(new { message = "Order not found." });
         }
 
-        if (!await CanStartCheckoutSessionForOrderAsync(order))
+        if (!await CanStartCheckoutSessionForOrderAsync(order, request.GuestAccessToken))
         {
             if (User.Identity?.IsAuthenticated != true)
             {
@@ -818,22 +986,10 @@ public class PaymentsController : ControllerBase
             return BadRequest(new { message = "Order has no items to pay for." });
         }
 
-        if (order.PaymentStatus is PaymentStatus.Paid
-            or PaymentStatus.Refunded
-            or PaymentStatus.PartiallyRefunded
-            or PaymentStatus.NotRequired)
+        var refusal = OnlineCheckoutEligibility.Refuse(order.Status, order.PaymentStatus, order.PaymentMethod);
+        if (refusal is not null)
         {
-            return Conflict(new { message = "This order cannot be paid online." });
-        }
-
-        if (order.PaymentMethod != PaymentMethod.Online)
-        {
-            return Conflict(new { message = "This order is configured for payment at the counter." });
-        }
-
-        if (order.Status is OrderStatus.Cancelled or OrderStatus.Rejected)
-        {
-            return BadRequest(new { message = "Cancelled or rejected orders cannot be paid." });
+            return Conflict(new { message = refusal });
         }
 
         var menuItemIdsForNameFallback = order.OrderItems
@@ -1014,20 +1170,47 @@ public class PaymentsController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// The signing secrets to try, each tagged with the endpoint it belongs to.
+    /// </summary>
+    /// <remarks>
+    /// Tagged only when the two can actually be told apart. One secret configured, or the same
+    /// string entered for both, leaves nothing to bind against — and refusing every event in that
+    /// case would take a working restaurant's payments offline over a settings page. So those are
+    /// left untagged, which reproduces exactly the behaviour that existed before, for exactly the
+    /// deployments that had no second endpoint anyway.
+    /// </remarks>
+    private static List<(string Secret, StripeWebhookDestination? Destination)> BuildWebhookSecrets(
+        StripeOptions options)
+    {
+        var platform = options.WebhookSecret;
+        var connect = options.ConnectWebhookSecret;
+        var hasPlatform = !string.IsNullOrWhiteSpace(platform);
+        var hasConnect = !string.IsNullOrWhiteSpace(connect);
+        var canDistinguish = hasPlatform && hasConnect && !string.Equals(platform, connect, StringComparison.Ordinal);
+
+        var secrets = new List<(string, StripeWebhookDestination?)>();
+
+        if (hasPlatform)
+        {
+            secrets.Add((platform, canDistinguish ? StripeWebhookDestination.Platform : null));
+        }
+
+        if (hasConnect && !string.Equals(platform, connect, StringComparison.Ordinal))
+        {
+            secrets.Add((connect, canDistinguish ? StripeWebhookDestination.ConnectedAccount : null));
+        }
+
+        return secrets;
+    }
+
     [AllowAnonymous]
     [HttpPost("stripe/webhook")]
     public async Task<IActionResult> StripeWebhook(CancellationToken cancellationToken)
     {
-        var webhookSecrets = new[]
-            {
-                _stripeOptions.WebhookSecret,
-                _stripeOptions.ConnectWebhookSecret
-            }
-            .Where(secret => !string.IsNullOrWhiteSpace(secret))
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
+        var webhookSecrets = BuildWebhookSecrets(_stripeOptions);
 
-        if (webhookSecrets.Length == 0)
+        if (webhookSecrets.Count == 0)
         {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {
@@ -1038,15 +1221,19 @@ public class PaymentsController : ControllerBase
         var payload = await new StreamReader(HttpContext.Request.Body).ReadToEndAsync(cancellationToken);
         var signatureHeader = Request.Headers["Stripe-Signature"].ToString();
         Event? stripeEvent = null;
+        StripeWebhookDestination? verifiedWith = null;
 
-        foreach (var webhookSecret in webhookSecrets)
+        foreach (var candidate in webhookSecrets)
         {
             try
             {
                 stripeEvent = EventUtility.ConstructEvent(
                     payload,
                     signatureHeader,
-                    webhookSecret);
+                    candidate.Secret);
+                // Kept, because which secret verified is half of what says whether this event is
+                // allowed to be acted on at all.
+                verifiedWith = candidate.Destination;
                 break;
             }
             catch (StripeException)
@@ -1058,6 +1245,25 @@ public class PaymentsController : ControllerBase
         if (stripeEvent is null)
         {
             _logger.LogWarning("Rejected Stripe webhook with invalid signature.");
+            return BadRequest(new
+            {
+                message = "Invalid Stripe webhook signature."
+            });
+        }
+
+        // A valid signature proves who sent the payload, not which endpoint they are entitled to
+        // speak for. The event says where it came from and the secret says where it was delivered;
+        // when those disagree the event is not evidence about anything.
+        if (!StripeWebhookRouting.Accepts(verifiedWith, stripeEvent.Account))
+        {
+            _logger.LogWarning(
+                "Rejected Stripe webhook {EventId} ({EventType}): {Reason}.",
+                stripeEvent.Id,
+                stripeEvent.Type,
+                StripeWebhookRouting.ExplainRefusal(verifiedWith!.Value, stripeEvent.Account));
+
+            // The same answer a bad signature gets. A sender probing which endpoint a secret
+            // belongs to learns nothing from the reply.
             return BadRequest(new
             {
                 message = "Invalid Stripe webhook signature."
@@ -1089,7 +1295,8 @@ public class PaymentsController : ControllerBase
                     await UpdateRestaurantFromStripeAccountAsync(stripeEvent, cancellationToken);
                     break;
                 case "checkout.session.completed":
-                    if (!await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, true, cancellationToken))
+                    if (!await UpdateSubscriptionFromCheckoutSessionAsync(stripeEvent, cancellationToken) &&
+                        !await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, true, cancellationToken))
                     {
                         var checkoutStatus = stripeEvent.Data.Object is Session completedSession &&
                             string.Equals(completedSession.PaymentStatus, "paid", StringComparison.OrdinalIgnoreCase)
@@ -1098,20 +1305,32 @@ public class PaymentsController : ControllerBase
                         await UpdatePaymentFromCheckoutSessionAsync(stripeEvent, checkoutStatus, cancellationToken);
                     }
                     break;
+                case "customer.subscription.created":
+                case "customer.subscription.updated":
+                case "customer.subscription.deleted":
+                    await UpdateRestaurantSubscriptionAsync(stripeEvent, cancellationToken);
+                    break;
+                case "invoice.paid":
+                case "invoice.payment_failed":
+                    await UpdateRestaurantSubscriptionFromInvoiceAsync(stripeEvent, cancellationToken);
+                    break;
                 case "checkout.session.async_payment_succeeded":
-                    if (!await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, true, cancellationToken))
+                    if (!await UpdateSubscriptionFromCheckoutSessionAsync(stripeEvent, cancellationToken) &&
+                        !await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, true, cancellationToken))
                     {
                         await UpdatePaymentFromCheckoutSessionAsync(stripeEvent, PaymentStatus.Paid, cancellationToken);
                     }
                     break;
                 case "checkout.session.async_payment_failed":
-                    if (!await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, false, cancellationToken))
+                    if (!await UpdateSubscriptionFromCheckoutSessionAsync(stripeEvent, cancellationToken) &&
+                        !await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, false, cancellationToken))
                     {
                         await UpdatePaymentFromCheckoutSessionAsync(stripeEvent, PaymentStatus.Failed, cancellationToken);
                     }
                     break;
                 case "checkout.session.expired":
-                    if (!await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, false, cancellationToken))
+                    if (!await UpdateSubscriptionFromCheckoutSessionAsync(stripeEvent, cancellationToken) &&
+                        !await UpdatePlatformFeeFromCheckoutSessionAsync(stripeEvent, false, cancellationToken))
                     {
                         await UpdatePaymentFromCheckoutSessionAsync(stripeEvent, PaymentStatus.Expired, cancellationToken);
                     }
@@ -1150,6 +1369,44 @@ public class PaymentsController : ControllerBase
         {
             await transaction.RollbackAsync(cancellationToken);
             return Ok(new { received = true, duplicate = true });
+        }
+        catch (StripeWebhookNotReadyException ex)
+            when (StripeWebhookRetryWindow.ShouldAskStripeToRetry(
+                stripeEvent.Created.ToUniversalTime(), DateTime.UtcNow))
+        {
+            // Abandon the event id along with the work it stood for, so Stripe's retry arrives as a
+            // new event rather than being answered "already seen". Recording it here is what lost
+            // disputes outright: the payment row was simply not written yet, and the retry that would
+            // have caught it was turned away at the door.
+            await transaction.RollbackAsync(cancellationToken);
+            _logger.LogWarning(
+                ex,
+                "Stripe event {EventId} ({EventType}) arrived before its payment existed. Asking Stripe to retry.",
+                stripeEvent.Id,
+                stripeEvent.Type);
+
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                message = "The payment this event refers to is not available yet. Please retry.",
+                eventId = stripeEvent.Id
+            });
+        }
+        catch (StripeWebhookNotReadyException ex)
+        {
+            // Past the retry window this is no longer a race — it is an event that will never match,
+            // and continuing to fail would have Stripe disable the endpoint and stop delivering
+            // everything else. Bank it and make the gap loud instead.
+            _logger.LogError(
+                ex,
+                "Stripe event {EventId} ({EventType}) never found its payment within {Hours}h and has been recorded unmatched.",
+                stripeEvent.Id,
+                stripeEvent.Type,
+                StripeWebhookRetryWindow.Duration.TotalHours);
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            return Ok(new { received = true, unmatched = true });
         }
 
         return Ok(new
@@ -1194,6 +1451,7 @@ public class PaymentsController : ControllerBase
     {
         var query = _dbContext.PaymentRefunds
             .AsNoTracking()
+            .Include(refund => refund.Items)
             .Include(refund => refund.Payment)
                 .ThenInclude(payment => payment!.Order)
                     .ThenInclude(order => order!.Restaurant)
@@ -1231,7 +1489,9 @@ public class PaymentsController : ControllerBase
                 .ThenInclude(order => order!.Customer)
             .Include(request => request.Payment)
                 .ThenInclude(payment => payment!.Refunds)
+                    .ThenInclude(refund => refund.Items)
             .Include(request => request.PaymentRefund)
+                .ThenInclude(refund => refund!.Items)
             .Include(request => request.Items)
             .AsQueryable();
 
@@ -1258,15 +1518,15 @@ public class PaymentsController : ControllerBase
             return query;
         }
 
-        var pattern = $"%{search}%";
+        var pattern = SearchPattern.Contains(search);
         return query.Where(request =>
-            (request.Reason != null && EF.Functions.ILike(request.Reason, pattern)) ||
-            (request.AdminNote != null && EF.Functions.ILike(request.AdminNote, pattern)) ||
-            (request.RequesterName != null && EF.Functions.ILike(request.RequesterName, pattern)) ||
-            (request.RequesterEmail != null && EF.Functions.ILike(request.RequesterEmail, pattern)) ||
-            (request.Order != null && EF.Functions.ILike(request.Order.OrderNumber, pattern)) ||
-            (request.Order != null && request.Order.Restaurant != null && EF.Functions.ILike(request.Order.Restaurant.Name, pattern)) ||
-            (request.Order != null && request.Order.Customer != null && request.Order.Customer.Email != null && EF.Functions.ILike(request.Order.Customer.Email, pattern)));
+            (request.Reason != null && EF.Functions.ILike(request.Reason, pattern, SearchPattern.EscapeCharacter)) ||
+            (request.AdminNote != null && EF.Functions.ILike(request.AdminNote, pattern, SearchPattern.EscapeCharacter)) ||
+            (request.RequesterName != null && EF.Functions.ILike(request.RequesterName, pattern, SearchPattern.EscapeCharacter)) ||
+            (request.RequesterEmail != null && EF.Functions.ILike(request.RequesterEmail, pattern, SearchPattern.EscapeCharacter)) ||
+            (request.Order != null && EF.Functions.ILike(request.Order.OrderNumber, pattern, SearchPattern.EscapeCharacter)) ||
+            (request.Order != null && request.Order.Restaurant != null && EF.Functions.ILike(request.Order.Restaurant.Name, pattern, SearchPattern.EscapeCharacter)) ||
+            (request.Order != null && request.Order.Customer != null && request.Order.Customer.Email != null && EF.Functions.ILike(request.Order.Customer.Email, pattern, SearchPattern.EscapeCharacter)));
     }
 
     private static IOrderedQueryable<PaymentRefundRequest>? ApplyRefundRequestSorting(
@@ -1305,15 +1565,15 @@ public class PaymentsController : ControllerBase
             return query;
         }
 
-        var pattern = $"%{search}%";
+        var pattern = SearchPattern.Contains(search);
         return query.Where(refund =>
-            (refund.ProviderRefundId != null && EF.Functions.ILike(refund.ProviderRefundId, pattern)) ||
-            (refund.ProviderPaymentIntentId != null && EF.Functions.ILike(refund.ProviderPaymentIntentId, pattern)) ||
-            (refund.Reason != null && EF.Functions.ILike(refund.Reason, pattern)) ||
-            (refund.FailureReason != null && EF.Functions.ILike(refund.FailureReason, pattern)) ||
-            (refund.Payment != null && refund.Payment.Order != null && EF.Functions.ILike(refund.Payment.Order.OrderNumber, pattern)) ||
-            (refund.Payment != null && refund.Payment.Order != null && refund.Payment.Order.Restaurant != null && EF.Functions.ILike(refund.Payment.Order.Restaurant.Name, pattern)) ||
-            (refund.Payment != null && refund.Payment.Order != null && refund.Payment.Order.Customer != null && refund.Payment.Order.Customer.Email != null && EF.Functions.ILike(refund.Payment.Order.Customer.Email, pattern)));
+            (refund.ProviderRefundId != null && EF.Functions.ILike(refund.ProviderRefundId, pattern, SearchPattern.EscapeCharacter)) ||
+            (refund.ProviderPaymentIntentId != null && EF.Functions.ILike(refund.ProviderPaymentIntentId, pattern, SearchPattern.EscapeCharacter)) ||
+            (refund.Reason != null && EF.Functions.ILike(refund.Reason, pattern, SearchPattern.EscapeCharacter)) ||
+            (refund.FailureReason != null && EF.Functions.ILike(refund.FailureReason, pattern, SearchPattern.EscapeCharacter)) ||
+            (refund.Payment != null && refund.Payment.Order != null && EF.Functions.ILike(refund.Payment.Order.OrderNumber, pattern, SearchPattern.EscapeCharacter)) ||
+            (refund.Payment != null && refund.Payment.Order != null && refund.Payment.Order.Restaurant != null && EF.Functions.ILike(refund.Payment.Order.Restaurant.Name, pattern, SearchPattern.EscapeCharacter)) ||
+            (refund.Payment != null && refund.Payment.Order != null && refund.Payment.Order.Customer != null && refund.Payment.Order.Customer.Email != null && EF.Functions.ILike(refund.Payment.Order.Customer.Email, pattern, SearchPattern.EscapeCharacter)));
     }
 
     private static IOrderedQueryable<PaymentRefund>? ApplyRefundSorting(
@@ -1361,6 +1621,19 @@ public class PaymentsController : ControllerBase
             Reason = refund.Reason,
             FailureReason = refund.FailureReason,
             RequestedByUserId = refund.RequestedByUserId,
+            UnattributedAmountCents = Math.Max(0, refund.AmountCents - refund.Items.Sum(item => item.AmountCents)),
+            Items = refund.Items
+                .OrderBy(item => item.MenuItemNameSnapshot)
+                .ThenBy(item => item.OrderItemId)
+                .Select(item => new AdminPaymentRefundItemResponse
+                {
+                    OrderItemId = item.OrderItemId,
+                    OptionNameSnapshot = item.OptionNameSnapshot,
+                    MenuItemNameSnapshot = item.MenuItemNameSnapshot,
+                    Quantity = item.Quantity,
+                    AmountCents = item.AmountCents
+                })
+                .ToList(),
             CreatedAt = refund.CreatedAt,
             UpdatedAt = refund.UpdatedAt,
             RefundedAt = refund.RefundedAt,
@@ -1403,6 +1676,9 @@ public class PaymentsController : ControllerBase
             Items = request.Items
                 .Select(item => new AdminRefundRequestItemResponse
                 {
+                    OrderItemId = item.OrderItemId,
+                    OrderItemOptionId = item.OrderItemOptionId,
+                    OptionNameSnapshot = item.OptionNameSnapshot,
                     MenuItemNameSnapshot = item.MenuItemNameSnapshot,
                     Quantity = item.Quantity,
                     AmountCents = item.AmountCents
@@ -1457,6 +1733,210 @@ public class PaymentsController : ControllerBase
             correlationId: stripeEvent.Id);
     }
 
+    /// <summary>
+    /// Attaches a subscription to the restaurant that just checked out for it.
+    /// </summary>
+    /// <remarks>
+    /// Claimed ahead of the order-payment handler by the same metadata sniff the activation fee
+    /// uses, so a restaurant paying the platform is never mistaken for a diner paying a restaurant.
+    /// </remarks>
+    private async Task<bool> UpdateSubscriptionFromCheckoutSessionAsync(
+        Event stripeEvent,
+        CancellationToken cancellationToken)
+    {
+        if (stripeEvent.Data.Object is not Session session ||
+            !session.Metadata.TryGetValue("mode", out var mode) ||
+            !string.Equals(mode, PlatformSubscriptionService.SessionMode, StringComparison.Ordinal) ||
+            !session.Metadata.TryGetValue("restaurantId", out var restaurantId) ||
+            !Guid.TryParse(restaurantId, out var parsedRestaurantId))
+        {
+            return false;
+        }
+
+        // Charged on the platform account, so its events carry no connected account.
+        if (stripeEvent.Account is not null)
+        {
+            _logger.LogWarning(
+                "Ignored subscription checkout event {EventId} on connected account {StripeAccount}.",
+                stripeEvent.Id,
+                stripeEvent.Account);
+            return true;
+        }
+
+        var restaurant = await _dbContext.Restaurants
+            .FirstOrDefaultAsync(item => item.Id == parsedRestaurantId, cancellationToken);
+
+        if (restaurant is null)
+        {
+            _logger.LogWarning("No restaurant for subscription session {SessionId}.", session.Id);
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(session.CustomerId))
+        {
+            restaurant.PlatformStripeCustomerId = session.CustomerId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(session.SubscriptionId))
+        {
+            restaurant.PlatformSubscriptionId = session.SubscriptionId;
+        }
+
+        // The link has been used; a fresh one is minted if it is ever needed again.
+        restaurant.PlatformSubscriptionCheckoutUrl = null;
+        restaurant.PlatformSubscriptionIdempotencyKey = null;
+        restaurant.PlatformBillingSyncedAt = DateTime.UtcNow;
+        restaurant.UpdatedAt = DateTime.UtcNow;
+
+        _reportLogWriter.AddAudit(
+            "Restaurant.SubscriptionStarted",
+            "Restaurant",
+            restaurant.Id.ToString(),
+            restaurant.Id,
+            $"{restaurant.Name} started a platform subscription.",
+            after: new { sessionId = session.Id, session.SubscriptionId },
+            actorOverride: ReportActor.Provider(PaymentProviders.Stripe),
+            correlationId: stripeEvent.Id);
+        return true;
+    }
+
+    /// <summary>
+    /// Records what Stripe says about a subscription. Facts only — the sweep decides what they mean.
+    /// </summary>
+    private async Task UpdateRestaurantSubscriptionAsync(
+        Event stripeEvent,
+        CancellationToken cancellationToken)
+    {
+        if (stripeEvent.Data.Object is not Subscription subscription)
+        {
+            return;
+        }
+
+        var restaurant = await FindBillingRestaurantAsync(
+            subscription.Metadata,
+            subscription.CustomerId,
+            subscription.Id,
+            cancellationToken);
+
+        if (restaurant is null)
+        {
+            _logger.LogWarning("No restaurant for Stripe subscription {SubscriptionId}.", subscription.Id);
+            return;
+        }
+
+        // A subscription this restaurant has moved on from says nothing about where it stands now.
+        if (!string.IsNullOrWhiteSpace(restaurant.PlatformSubscriptionId) &&
+            !string.Equals(restaurant.PlatformSubscriptionId, subscription.Id, StringComparison.Ordinal))
+        {
+            _logger.LogWarning(
+                "Ignored stale subscription {SubscriptionId} for restaurant {RestaurantId}.",
+                subscription.Id,
+                restaurant.Id);
+            return;
+        }
+
+        PlatformSubscriptionService.ApplySubscription(restaurant, subscription, DateTime.UtcNow);
+
+        _reportLogWriter.AddAudit(
+            "Restaurant.SubscriptionUpdated",
+            "Restaurant",
+            restaurant.Id.ToString(),
+            restaurant.Id,
+            $"{restaurant.Name}'s platform subscription is {subscription.Status}.",
+            after: new { subscription.Id, subscription.Status, subscription.CancelAtPeriodEnd },
+            actorOverride: ReportActor.Provider(PaymentProviders.Stripe),
+            correlationId: stripeEvent.Id);
+    }
+
+    /// <summary>
+    /// An invoice paid or failed. Re-reads the subscription rather than inferring from the invoice.
+    /// </summary>
+    /// <remarks>
+    /// The invoice says an attempt succeeded or failed; the subscription says what that left behind,
+    /// and it is the subscription the rule reads. Asking Stripe for it costs one call and removes a
+    /// whole class of "the invoice failed but the subscription had already recovered" disagreement.
+    /// </remarks>
+    private async Task UpdateRestaurantSubscriptionFromInvoiceAsync(
+        Event stripeEvent,
+        CancellationToken cancellationToken)
+    {
+        if (stripeEvent.Data.Object is not Invoice invoice)
+        {
+            return;
+        }
+
+        var restaurant = await FindBillingRestaurantAsync(
+            invoice.Metadata,
+            invoice.CustomerId,
+            subscriptionId: null,
+            cancellationToken);
+
+        if (restaurant?.PlatformSubscriptionId is null)
+        {
+            return;
+        }
+
+        var subscription = await _platformSubscriptionService.FetchSubscriptionAsync(
+            restaurant.PlatformSubscriptionId,
+            cancellationToken);
+
+        if (subscription is null)
+        {
+            return;
+        }
+
+        PlatformSubscriptionService.ApplySubscription(restaurant, subscription, DateTime.UtcNow);
+
+        _reportLogWriter.AddAudit(
+            stripeEvent.Type == "invoice.paid"
+                ? "Restaurant.SubscriptionInvoicePaid"
+                : "Restaurant.SubscriptionInvoiceFailed",
+            "Restaurant",
+            restaurant.Id.ToString(),
+            restaurant.Id,
+            stripeEvent.Type == "invoice.paid"
+                ? $"{restaurant.Name} paid a platform subscription invoice."
+                : $"A platform subscription payment failed for {restaurant.Name}.",
+            after: new { invoiceId = invoice.Id, subscriptionStatus = subscription.Status },
+            actorOverride: ReportActor.Provider(PaymentProviders.Stripe),
+            correlationId: stripeEvent.Id);
+    }
+
+    /// <summary>
+    /// The restaurant a billing event belongs to: by the id we put on it, else by the customer or
+    /// subscription it names.
+    /// </summary>
+    private async Task<DineFlow.Infrastructure.Restaurant.Restaurant?> FindBillingRestaurantAsync(
+        IDictionary<string, string>? metadata,
+        string? customerId,
+        string? subscriptionId,
+        CancellationToken cancellationToken)
+    {
+        if (metadata is not null &&
+            metadata.TryGetValue("restaurantId", out var restaurantId) &&
+            Guid.TryParse(restaurantId, out var parsed))
+        {
+            return await _dbContext.Restaurants
+                .FirstOrDefaultAsync(item => item.Id == parsed, cancellationToken);
+        }
+
+        if (!string.IsNullOrWhiteSpace(subscriptionId))
+        {
+            var bySubscription = await _dbContext.Restaurants
+                .FirstOrDefaultAsync(item => item.PlatformSubscriptionId == subscriptionId, cancellationToken);
+
+            if (bySubscription is not null)
+            {
+                return bySubscription;
+            }
+        }
+
+        return string.IsNullOrWhiteSpace(customerId)
+            ? null
+            : await _dbContext.Restaurants
+                .FirstOrDefaultAsync(item => item.PlatformStripeCustomerId == customerId, cancellationToken);
+    }
+
     private async Task<bool> UpdatePlatformFeeFromCheckoutSessionAsync(
         Event stripeEvent,
         bool completed,
@@ -1464,11 +1944,23 @@ public class PaymentsController : ControllerBase
     {
         if (stripeEvent.Data.Object is not Session session ||
             !session.Metadata.TryGetValue("mode", out var mode) ||
-            !string.Equals(mode, "restaurant_platform_setup_fee", StringComparison.Ordinal) ||
+            !string.Equals(mode, PlatformFeeSessionApplier.SessionMode, StringComparison.Ordinal) ||
             !session.Metadata.TryGetValue("restaurantId", out var restaurantId) ||
             !Guid.TryParse(restaurantId, out var parsedRestaurantId))
         {
             return false;
+        }
+
+        // The activation fee is charged on the platform account, so its events carry no connected
+        // account. One arriving with one is either a connected account replaying metadata it should
+        // not have, or a misrouted destination; either way it is not evidence about who has paid.
+        if (stripeEvent.Account is not null)
+        {
+            _logger.LogWarning(
+                "Ignored platform fee event {EventId} arriving on connected account {StripeAccount}.",
+                stripeEvent.Id,
+                stripeEvent.Account);
+            return true;
         }
 
         var restaurant = await _dbContext.Restaurants
@@ -1482,10 +1974,17 @@ public class PaymentsController : ControllerBase
             return true;
         }
 
-        if (!string.Equals(
-            restaurant.OneTimePlatformFeeCheckoutSessionId,
+        // Shared with the reconciliation sweep, so a fact learned from a webhook and the same fact
+        // learned by asking Stripe directly cannot be recorded two different ways.
+        var outcome = PlatformFeeSessionApplier.Apply(
+            restaurant,
             session.Id,
-            StringComparison.Ordinal))
+            completed,
+            session.PaymentStatus,
+            session.PaymentIntentId,
+            DateTime.UtcNow);
+
+        if (outcome == PlatformFeeSessionOutcome.Ignored)
         {
             _logger.LogWarning(
                 "Ignored stale platform fee session {SessionId} for restaurant {RestaurantId}.",
@@ -1494,37 +1993,12 @@ public class PaymentsController : ControllerBase
             return true;
         }
 
-        var wasPaid = completed &&
-            string.Equals(session.PaymentStatus, "paid", StringComparison.OrdinalIgnoreCase);
-
-        if (wasPaid)
-        {
-            restaurant.OneTimePlatformFeeStatus = PlatformSetupFeeStatus.Paid;
-            restaurant.OneTimePlatformFeePaidAt ??= DateTime.UtcNow;
-            restaurant.OneTimePlatformFeePaymentIntentId = session.PaymentIntentId;
-        }
-        else if (!completed && !restaurant.OneTimePlatformFeePaidAt.HasValue)
-        {
-            restaurant.OneTimePlatformFeeStatus = PlatformSetupFeeStatus.Failed;
-            restaurant.OneTimePlatformFeeCheckoutUrl = null;
-            restaurant.OneTimePlatformFeeIdempotencyKey = null;
-        }
-
-        restaurant.UpdatedAt = DateTime.UtcNow;
         _reportLogWriter.AddAudit(
-            wasPaid
-                ? "Restaurant.PlatformFeePaid"
-                : completed
-                    ? "Restaurant.PlatformFeeCheckoutAwaitingPayment"
-                    : "Restaurant.PlatformFeeCheckoutFailed",
+            PlatformFeeSessionApplier.AuditEvent(outcome),
             "Restaurant",
             restaurant.Id.ToString(),
             restaurant.Id,
-            wasPaid
-                ? $"One-time platform fee paid by {restaurant.Name}."
-                : completed
-                    ? $"One-time platform fee checkout completed for {restaurant.Name} and is awaiting payment confirmation."
-                    : $"One-time platform fee checkout failed or expired for {restaurant.Name}.",
+            PlatformFeeSessionApplier.Describe(outcome, restaurant.Name),
             after: new
             {
                 stripeEventId = stripeEvent.Id,
@@ -1609,6 +2083,19 @@ public class PaymentsController : ControllerBase
             Reason = refund.Reason,
             FailureReason = refund.FailureReason,
             RequestedByUserId = refund.RequestedByUserId,
+            UnattributedAmountCents = Math.Max(0, refund.AmountCents - refund.Items.Sum(item => item.AmountCents)),
+            Items = refund.Items
+                .OrderBy(item => item.MenuItemNameSnapshot)
+                .ThenBy(item => item.OrderItemId)
+                .Select(item => new AdminPaymentRefundItemResponse
+                {
+                    OrderItemId = item.OrderItemId,
+                    OptionNameSnapshot = item.OptionNameSnapshot,
+                    MenuItemNameSnapshot = item.MenuItemNameSnapshot,
+                    Quantity = item.Quantity,
+                    AmountCents = item.AmountCents
+                })
+                .ToList(),
             CreatedAt = refund.CreatedAt,
             UpdatedAt = refund.UpdatedAt,
             RefundedAt = refund.RefundedAt,
@@ -1664,19 +2151,8 @@ public class PaymentsController : ControllerBase
         return "Menu item";
     }
 
-    private static string AddCheckoutSessionId(string url)
-    {
-        if (string.IsNullOrWhiteSpace(url))
-        {
-            return "http://localhost:5173/payment/success?session_id={CHECKOUT_SESSION_ID}";
-        }
-
-        var separator = url.Contains('?') ? '&' : '?';
-
-        return url.Contains("{CHECKOUT_SESSION_ID}", StringComparison.Ordinal)
-            ? url
-            : $"{url}{separator}session_id={{CHECKOUT_SESSION_ID}}";
-    }
+    private static string AddCheckoutSessionId(string url) =>
+        StripeCheckoutReturnUrl.WithSessionId(url);
 
     private static string AddReturnToUrl(string url, string? returnTo)
     {
@@ -1747,8 +2223,8 @@ public class PaymentsController : ControllerBase
 
         if (payment is null)
         {
-            _logger.LogWarning("No payment found for Stripe checkout session {SessionId}.", session.Id);
-            return;
+            throw new StripeWebhookNotReadyException(
+                $"No payment found for Stripe checkout session {session.Id}.");
         }
 
         if (!IsStripeEventForPayment(payment, stripeEvent))
@@ -1807,7 +2283,9 @@ public class PaymentsController : ControllerBase
             payment.Order.UpdatedAt = DateTime.UtcNow;
             if (status == PaymentStatus.Paid)
             {
-                await _orderAutoAcceptanceService.TryAcceptAsync(payment.Order, cancellationToken);
+                // Not TryAccept directly: a payment can land on an order the restaurant already
+                // turned away, and that money has to go back rather than be quietly kept.
+                await _orderPaymentLanding.OnPaidAsync(payment.Order, actorUserId: null, cancellationToken);
             }
         }
 
@@ -1889,8 +2367,8 @@ public class PaymentsController : ControllerBase
 
         if (payment is null)
         {
-            _logger.LogWarning("No payment found for Stripe payment intent {PaymentIntentId}.", paymentIntent.Id);
-            return;
+            throw new StripeWebhookNotReadyException(
+                $"No payment found for Stripe payment intent {paymentIntent.Id}.");
         }
 
         if (!IsStripeEventForPayment(payment, stripeEvent))
@@ -1944,7 +2422,9 @@ public class PaymentsController : ControllerBase
             payment.Order.UpdatedAt = DateTime.UtcNow;
             if (status == PaymentStatus.Paid)
             {
-                await _orderAutoAcceptanceService.TryAcceptAsync(payment.Order, cancellationToken);
+                // Not TryAccept directly: a payment can land on an order the restaurant already
+                // turned away, and that money has to go back rather than be quietly kept.
+                await _orderPaymentLanding.OnPaidAsync(payment.Order, actorUserId: null, cancellationToken);
             }
         }
 
@@ -2025,11 +2505,8 @@ public class PaymentsController : ControllerBase
         var payment = await FindPaymentForRefundAsync(stripeRefund, cancellationToken);
         if (payment is null)
         {
-            _logger.LogWarning(
-                "No payment found for Stripe refund {RefundId} with payment intent {PaymentIntentId}.",
-                stripeRefund.Id,
-                stripeRefund.PaymentIntentId);
-            return;
+            throw new StripeWebhookNotReadyException(
+                $"No payment found for Stripe refund {stripeRefund.Id} with payment intent {stripeRefund.PaymentIntentId}.");
         }
 
         if (!IsStripeEventForPayment(payment, stripeEvent))
@@ -2204,11 +2681,8 @@ public class PaymentsController : ControllerBase
 
         if (payment is null)
         {
-            _logger.LogWarning(
-                "No payment found for refunded Stripe charge {ChargeId} with payment intent {PaymentIntentId}.",
-                charge.Id,
-                charge.PaymentIntentId);
-            return;
+            throw new StripeWebhookNotReadyException(
+                $"No payment found for refunded Stripe charge {charge.Id} with payment intent {charge.PaymentIntentId}.");
         }
 
         if (!IsStripeEventForPayment(payment, stripeEvent))
@@ -2278,10 +2752,8 @@ public class PaymentsController : ControllerBase
 
         if (payment is null)
         {
-            _logger.LogWarning(
-                "No payment found for Stripe dispute {DisputeId}.",
-                dispute.Id);
-            return;
+            throw new StripeWebhookNotReadyException(
+                $"No payment found for Stripe dispute {dispute.Id}.");
         }
 
         if (!IsStripeEventForPayment(payment, stripeEvent))
@@ -2411,7 +2883,11 @@ public class PaymentsController : ControllerBase
         Refund stripeRefund,
         CancellationToken cancellationToken)
     {
-        if (stripeRefund.Metadata.TryGetValue(PaymentIdMetadataKey, out var paymentId) &&
+        // Defensive: a webhook that throws is answered with a 500, and Stripe then retries it for
+        // days without ever getting anywhere. Real events always carry a metadata object, but a
+        // refund event that reaches us without one must be handled, not thrown at.
+        if (stripeRefund.Metadata is not null &&
+            stripeRefund.Metadata.TryGetValue(PaymentIdMetadataKey, out var paymentId) &&
             Guid.TryParse(paymentId, out var parsedPaymentId))
         {
             var paymentById = await _dbContext.Payments
@@ -2443,7 +2919,8 @@ public class PaymentsController : ControllerBase
         Refund stripeRefund,
         CancellationToken cancellationToken)
     {
-        if (stripeRefund.Metadata.TryGetValue(RefundIdMetadataKey, out var refundId) &&
+        if (stripeRefund.Metadata is not null &&
+            stripeRefund.Metadata.TryGetValue(RefundIdMetadataKey, out var refundId) &&
             Guid.TryParse(refundId, out var parsedRefundId))
         {
             var refundById = payment.Refunds.FirstOrDefault(refund => refund.Id == parsedRefundId)
@@ -2463,7 +2940,8 @@ public class PaymentsController : ControllerBase
 
     private static string? ResolveRefundReason(Refund stripeRefund)
     {
-        if (stripeRefund.Metadata.TryGetValue("reason", out var metadataReason) &&
+        if (stripeRefund.Metadata is not null &&
+            stripeRefund.Metadata.TryGetValue("reason", out var metadataReason) &&
             !string.IsNullOrWhiteSpace(metadataReason))
         {
             return metadataReason.Trim();
@@ -2482,21 +2960,10 @@ public class PaymentsController : ControllerBase
 
     private static void ReconcilePaymentRefundStatus(Payment payment, DateTime now)
     {
-        var refundedAmountCents = GetSucceededRefundedAmount(payment);
-        var nextStatus = payment.Status;
-
-        if (refundedAmountCents >= payment.AmountCents && payment.AmountCents > 0)
-        {
-            nextStatus = PaymentStatus.Refunded;
-        }
-        else if (refundedAmountCents > 0)
-        {
-            // Never walk a fully refunded payment back down: with out-of-order webhooks the
-            // succeeded total can be observed low momentarily, and Refunded is terminal.
-            nextStatus = payment.Status == PaymentStatus.Refunded
-                ? PaymentStatus.Refunded
-                : PaymentStatus.PartiallyRefunded;
-        }
+        var nextStatus = RefundAggregateStatus.Resolve(
+            payment.Status,
+            payment.AmountCents,
+            GetSucceededRefundedAmount(payment));
 
         if (payment.Status != nextStatus)
         {
@@ -2565,6 +3032,12 @@ public class PaymentsController : ControllerBase
                 .ThenInclude(order => order!.Restaurant)
             .Include(request => request.Order)
                 .ThenInclude(order => order!.Customer)
+            .Include(request => request.Order)
+                .ThenInclude(order => order!.OrderItems)
+                    // Approving a refund prices what it is for, and an extra's price lives on the
+                    // line's own option rows. Without them every extra reads as no longer
+                    // refundable, which is a refusal the customer can do nothing about.
+                    .ThenInclude(orderItem => orderItem.SelectedOptions)
             .Include(request => request.Payment)
             .Include(request => request.PaymentRefund)
             .Include(request => request.Items)
@@ -2593,6 +3066,17 @@ public class PaymentsController : ControllerBase
                     .SetProperty(item => item.UpdatedAt, DateTime.UtcNow),
                 cancellationToken);
 
+    /// <summary>
+    /// Calls an order off once the customer has been paid back in full and nothing has been handed
+    /// over yet.
+    /// </summary>
+    /// <remarks>
+    /// Refunding and closing were separate acts, so a fully refunded order could sit in the kitchen
+    /// still reading as Accepted: the pass is told to cook it, the customer is told they have their
+    /// money back, and neither side can see the other. <see cref="RefundedOrderClosure"/> holds the
+    /// line about when this applies — an order already ready or completed keeps its history, because
+    /// the food exists and rewriting it as cancelled would record a day that did not happen.
+    /// </remarks>
     private static string? BuildApprovalRefundReason(string? customerReason, string? adminNote)
     {
         var parts = new List<string>();
@@ -2619,7 +3103,7 @@ public class PaymentsController : ControllerBase
         return value.Trim();
     }
 
-    private async Task<bool> CanStartCheckoutSessionForOrderAsync(Order order)
+    private async Task<bool> CanStartCheckoutSessionForOrderAsync(Order order, string? guestAccessToken)
     {
         if (await CanAccessRestaurantAsync(order.RestaurantId))
         {
@@ -2633,7 +3117,12 @@ public class PaymentsController : ControllerBase
             return string.Equals(order.CustomerId, currentUserId, StringComparison.Ordinal);
         }
 
-        return true;
+        // A guest order used to end here on an unconditional "yes": knowing the order id was enough
+        // to mint a Stripe session for somebody else's order, which both discloses what they ordered
+        // and leaves the order marked as having a payment in flight — locking its real owner out of
+        // changing how they pay. Orders placed before tokens existed carry no hash and stay
+        // reachable, which is the same allowance every other guest route makes.
+        return GuestAccessTokenService.IsAuthorized(order.GuestAccessTokenHash, guestAccessToken);
     }
 
     private async Task<bool> CanAccessRestaurantAsync(Guid? restaurantId)

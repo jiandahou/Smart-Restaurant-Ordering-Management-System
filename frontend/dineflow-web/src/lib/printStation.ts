@@ -1,3 +1,5 @@
+import { createUuid } from './uuid'
+
 const stationKeyStorageKey = 'dineflow.printStationKey.v1'
 const clientInstanceStorageKey = 'dineflow.printClientInstance.v1'
 const fallbackLeasePrefix = 'dineflow.printLeader.v1.'
@@ -5,9 +7,7 @@ const acceptedJobsStorageKey = 'dineflow.printAcceptedJobs.v1'
 const maximumAcceptedJobReceipts = 500
 
 function randomId(): string {
-  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return createUuid()
 }
 
 function readOrCreate(storage: Storage, key: string): string {

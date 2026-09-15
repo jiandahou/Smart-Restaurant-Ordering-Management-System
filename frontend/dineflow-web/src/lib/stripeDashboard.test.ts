@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { buildStripeDashboardUrl } from './stripeDashboard'
 
 describe('buildStripeDashboardUrl', () => {
-  it('puts the connected account in the path', () => {
+  it('PAY-DETAIL-10 keeps the connected account and test mode in the payment path', () => {
     // Without this the operator lands on an empty platform view for Connect direct charges.
     expect(buildStripeDashboardUrl('pi_123', 'acct_456', false))
       .toBe('https://dashboard.stripe.com/acct_456/test/payments/pi_123')
