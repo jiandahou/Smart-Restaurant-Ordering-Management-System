@@ -164,8 +164,9 @@ services:
       args:
         VITE_API_BASE_URL: ""
         VITE_PUBLIC_APP_BASE_URL: https://demo-dineflow.theunknownfish.com
-        VITE_ENABLE_DEMO_LOGIN: ${VITE_ENABLE_DEMO_LOGIN:-false}
-        VITE_DEMO_SEED_PASSWORD: ${VITE_DEMO_SEED_PASSWORD:-}
+        # Prefill the seeded owner on this internal demo build. Production (EC2)
+        # never sets this, so its login page ships empty with no credentials.
+        VITE_DEMO_LOGIN: ${VITE_DEMO_LOGIN:-on}
     image: dineflow-frontend:stage-prod
     container_name: dineflow-frontend
     restart: unless-stopped

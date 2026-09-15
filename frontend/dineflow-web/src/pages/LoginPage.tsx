@@ -5,7 +5,6 @@ import { useForm } from 'react-hook-form'
 import { Link, Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { z } from 'zod'
-import facebookLogo from '../assets/facebook-f.svg'
 import googleLogo from '../assets/google-g.svg'
 import {
   describeError,
@@ -14,6 +13,7 @@ import {
   isPasskeySupported,
   requestMagicLink,
   requestPasskeyLoginOptions,
+  setRememberSession,
   startPasskeyAssertion,
   type PasskeyAssertionAttempt,
   type PublicKeyCredentialRequestOptionsJson,
@@ -39,7 +39,6 @@ const passkeyOptionsRefreshMs = 4 * 60 * 1000
 const oauthErrorToastId = 'oauth-error'
 
 const googleLoginUrl = '/api/auth/google/login'
-const facebookLoginUrl = '/api/auth/facebook/login'
 
 const passwordLoginSchema = z.object({
   email: z.email('Enter a valid email address.'),
@@ -115,6 +114,7 @@ export function LoginPage() {
   }, [prefetchPasskeyOptions])
   const [socialLegalAccepted, setSocialLegalAccepted] = useState(false)
   const [showSocialLegalError, setShowSocialLegalError] = useState(false)
+  const [rememberMe, setRememberMe] = useState(true)
   const [mfaChallenge, setMfaChallenge] = useState<LoginMfaChallenge | null>(forwardedMfaChallenge)
   const [selectedMfaMethod, setSelectedMfaMethod] = useState(
     forwardedMfaChallenge?.methods.includes(forwardedMfaChallenge.preferredMethod)
@@ -164,6 +164,8 @@ export function LoginPage() {
 
   const handlePasswordSubmit = async (values: PasswordLoginFormValues) => {
     try {
+      // Decide where the tokens are stored before the login response writes them.
+      setRememberSession(rememberMe)
       const response = await loginUser(values.email.trim(), values.password)
 
       if ('mfaRequired' in response) {
@@ -296,14 +298,6 @@ export function LoginPage() {
       return
     }
     window.location.assign(buildSocialLoginUrl(googleLoginUrl))
-  }
-
-  const handleFacebookLogin = () => {
-    if (!socialLegalAccepted) {
-      setShowSocialLegalError(true)
-      return
-    }
-    window.location.assign(buildSocialLoginUrl(facebookLoginUrl))
   }
 
   const handlePasskeyLogin = () => {
@@ -484,6 +478,16 @@ export function LoginPage() {
                     )}
                   />
 
+                  <label className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      className="size-4"
+                      checked={rememberMe}
+                      onChange={(event) => setRememberMe(event.target.checked)}
+                    />
+                    <span>Remember me on this device</span>
+                  </label>
+
                   {passwordForm.formState.errors.root && (
                     <p className="form-error">{passwordForm.formState.errors.root.message}</p>
                   )}
@@ -499,15 +503,11 @@ export function LoginPage() {
                   </div>
                   <div className={showSocialLegalError && !socialLegalAccepted ? 'rounded-lg border border-destructive bg-destructive/5 p-2' : ''}>
                     <label className="flex items-start gap-2 text-xs leading-5 text-muted-foreground"><input type="checkbox" className="mt-1 size-4" checked={socialLegalAccepted} onChange={(event) => { setSocialLegalAccepted(event.target.checked); if (event.target.checked) setShowSocialLegalError(false) }} /><span>For first-time social registration, I accept the <Link className="underline" to="/terms/customer" target="_blank">Customer Terms</Link> and acknowledge the <Link className="underline" to="/privacy" target="_blank">Privacy Policy</Link>.</span></label>
-                    {showSocialLegalError && !socialLegalAccepted ? <p className="mt-1 text-xs font-medium text-destructive">Tick this box before continuing with Google or Facebook.</p> : null}
+                    {showSocialLegalError && !socialLegalAccepted ? <p className="mt-1 text-xs font-medium text-destructive">Tick this box before continuing with Google.</p> : null}
                   </div>
                   <Button type="button" variant="outline" className="google-login-button" onClick={handleGoogleLogin}>
                     <img aria-hidden="true" className="google-mark" src={googleLogo} alt="" />
                     Continue with Google
-                  </Button>
-                  <Button type="button" variant="outline" onClick={handleFacebookLogin}>
-                    <img aria-hidden="true" src={facebookLogo} alt="" width={18} height={18} />
-                    Continue with Facebook
                   </Button>
                   <Button
                     type="button"

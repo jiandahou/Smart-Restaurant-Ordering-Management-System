@@ -1735,29 +1735,68 @@ export type UpdateMfaSettingsResponse = {
 
 const tokenKey = 'dineflow.auth.token'
 const refreshTokenKey = 'dineflow.auth.refreshToken'
+const rememberKey = 'dineflow.auth.remember'
+
+// "Remember me" decides where the tokens live. localStorage persists across browser restarts;
+// sessionStorage is dropped when the tab/window closes. The preference itself is a plain flag in
+// localStorage. Default (no flag, or '1') persists — backwards compatible with sessions created
+// before the checkbox existed.
+export function setRememberSession(remember: boolean) {
+  try {
+    localStorage.setItem(rememberKey, remember ? '1' : '0')
+  } catch {
+    // Storage unavailable (private mode, blocked): fall through to the default persistence below.
+  }
+}
+
+function shouldPersistSession() {
+  try {
+    return localStorage.getItem(rememberKey) !== '0'
+  } catch {
+    return true
+  }
+}
+
+function activeAuthStorage(): Storage {
+  return shouldPersistSession() ? localStorage : sessionStorage
+}
+
+function writeAuthValue(key: string, value: string) {
+  const active = activeAuthStorage()
+  active.setItem(key, value)
+  // Keep a single copy so a later read cannot pick up a stale token from the other store.
+  const other = active === localStorage ? sessionStorage : localStorage
+  try {
+    other.removeItem(key)
+  } catch {
+    // ignore
+  }
+}
 
 export function getStoredToken() {
-  return localStorage.getItem(tokenKey)
+  return localStorage.getItem(tokenKey) ?? sessionStorage.getItem(tokenKey)
 }
 
 export function storeToken(token: string) {
-  localStorage.setItem(tokenKey, token)
+  writeAuthValue(tokenKey, token)
 }
 
 export function clearStoredToken() {
   localStorage.removeItem(tokenKey)
+  sessionStorage.removeItem(tokenKey)
 }
 
 export function getStoredRefreshToken() {
-  return localStorage.getItem(refreshTokenKey)
+  return localStorage.getItem(refreshTokenKey) ?? sessionStorage.getItem(refreshTokenKey)
 }
 
 export function storeRefreshToken(refreshToken: string) {
-  localStorage.setItem(refreshTokenKey, refreshToken)
+  writeAuthValue(refreshTokenKey, refreshToken)
 }
 
 export function clearStoredRefreshToken() {
   localStorage.removeItem(refreshTokenKey)
+  sessionStorage.removeItem(refreshTokenKey)
 }
 
 // Single-flight guard: many requests can 401 around the same moment (e.g. a

@@ -12,8 +12,14 @@
  * Override the values with VITE_DEMO_LOGIN_EMAIL / VITE_DEMO_LOGIN_PASSWORD, or turn the autofill
  * off entirely with VITE_DEMO_LOGIN=off (useful for testing the real sign-in flow locally).
  */
+// Prefill happens in two cases, both decided at build time so the credential strings below are
+// dropped from any bundle that will not use them (production ships empty fields and no password):
+//   - the Vite dev server, unless explicitly turned off, and
+//   - a build that opts in with VITE_DEMO_LOGIN=on (e.g. the internal stage/demo deployment).
+// A real production build sets neither, so `isDemoLoginAutofilled` folds to a constant `false`.
 export const isDemoLoginAutofilled =
-  import.meta.env.DEV && import.meta.env.VITE_DEMO_LOGIN !== 'off'
+  import.meta.env.VITE_DEMO_LOGIN === 'on' ||
+  (import.meta.env.DEV && import.meta.env.VITE_DEMO_LOGIN !== 'off')
 
 export const demoLoginDefaults: { email: string; password: string } = isDemoLoginAutofilled
   ? {
