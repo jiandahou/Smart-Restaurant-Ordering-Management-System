@@ -39,13 +39,20 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_ENVIRONMENT: Staging
       ASPNETCORE_URLS: http://+:8080
       ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=dineflow_db;Username=dineflow_user;Password=${POSTGRES_PASSWORD}
 
       # --- Public URLs (behind Cloudflare Tunnel) ---
       FRONTEND_BASE_URL: ${FRONTEND_BASE_URL}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+
+      # Legal operator identity (required in Production; shown on receipts/emails)
+      Compliance__OperatorName: ${COMPLIANCE_OPERATOR_NAME:-DineFlow}
+      Compliance__OperatorAbn: ${COMPLIANCE_OPERATOR_ABN:-12345678901}
+      Compliance__OperatorAddress: ${COMPLIANCE_OPERATOR_ADDRESS:-Adelaide SA 5000, Australia}
+      Compliance__PrivacyEmail: ${COMPLIANCE_PRIVACY_EMAIL:-privacy@theunknownfish.com}
+      Compliance__SupportEmail: ${COMPLIANCE_SUPPORT_EMAIL:-support@theunknownfish.com}
 
       # --- Auth / JWT ---
       Jwt__Issuer: ${JWT_ISSUER:-DineFlow.Api}
