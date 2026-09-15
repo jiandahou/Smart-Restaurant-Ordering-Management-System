@@ -63,6 +63,30 @@
 | DEVICE-* | real-device | — | NOT RUN | 需真机浏览器/读屏 |
 | OPS-* | operations | — | NOT RUN | 迁移/备份恢复/多实例/告警，需专用环境 |
 
+## 模块专项覆盖进度（docs/testing 各模块用例）
+
+> 本轮为**代表性抽测 + 权限/核心流程**(纯软件、可对生产跑的部分)。UI 点击型细分用例数量庞大(14 个模块 ~2,449 条),逐条执行需浏览器逐页驱动,标记如下便于后续接力。
+
+| 模块 | 用例数 | 本轮状态 | 已验证要点 |
+|---|---:|---|---|
+| login-registration | 89 | 🟢 较全 | 登录/错误提示/**锁定/限流/密码≥8**/条款校验/生产不预填 |
+| 权限与租户隔离(C) | — | 🟢 完成 | 多角色 RBAC 矩阵、**跨餐厅 403**、静默重定向 |
+| admin-menu | 182 | 🟡 抽测 | 菜品列表读取、**售罄开关(admin 200 / staff 403)**、权限 |
+| admin-orders | 169 | 🟡 抽测 | 列表/summary、**状态筛选**、流转校验、**"未付在线单不能进厨房流程"业务门槛**、status-history |
+| admin-reports | 176 | 🟡 抽测 | activity 读取、**activity 导出 200**、权限;audit/orders/payments 需正确日期参数 |
+| admin-restaurants | 161 | 🟡 抽测 | 餐厅列表/详情读取、跨租户隔离、权限 |
+| admin-users | 150 | 🟡 抽测 | 全域用户仅 Platform Owner 可读、其余 403;scoped 端点/锁定解锁待补 |
+| dashboard | 150 | 🟡 抽测 | 页面读取(UI);无单一 dashboard API(前端聚合) |
+| staff-orders | 212 | 🟡 抽测 | staff 可读 admin/orders、越权读 reports/restaurant → 403 |
+| cart | 294 | 🟡 抽测 | Guest 下单→购物车→结账→下单(浏览器),共享购物车实时同步 |
+| notifications(SignalR) | — | 🟢 抽测 | Live 徽章、实时连接、共享购物车同步 |
+| front-counter | 182 | 🔴 未跑 | 待浏览器逐页(取餐队列/桌台结算) |
+| profile-security | 157 | 🔴 未跑 | 需真实邮箱/TOTP/Passkey |
+| payment-system | 223 | ⛔ BLOCKED | 需 Stripe Connect 入驻 |
+| real-device | 69 | 🔴 未跑 | 需真机/读屏 |
+
+图例:🟢 完成/较全 · 🟡 代表性抽测(核心+权限已过) · 🔴 未跑(需条件/待接力) · ⛔ BLOCKED
+
 ## 问题 / 待办
 
 1. **在线支付未启用（配置缺口，非缺陷）**：需给至少一家餐厅完成 **Stripe Connect（test 模式）入驻**，才能验证 G01/G07/G08 与 payment-system 包。
