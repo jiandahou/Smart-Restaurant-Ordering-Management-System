@@ -22,10 +22,12 @@ TOTP 验证码由执行者按 RFC 6238 自行计算，未使用手机 App。
 
 ## 1. 结论
 
-- **40 项检查：39 PASS / 1 部分完成。** 其中只读面 17 项、TOTP 完整生命周期 23 项。
+- **77 项检查：74 PASS / 2 FAIL / 1 部分完成 / 1 待隔离。**
+  只读面 17 · TOTP 全生命周期 23 · 邮件相关 37。
 - **TOTP 这条链路非常扎实**：setup → enable → 登录闸门 → 关闭，23 项全绿，
   没有一处出现「已启用但零保护」或「关不掉 / 关不干净」的状态。
-- **1 个投递问题**：注册确认信进了 Gmail 垃圾箱，见第 3 节。
+- **3 条 P0 全部通过**：Magic Link **不绕过** MFA；敏感操作（改密码）**在有效 MFA 之前不写库**；改密码后**旧 token 立即失效**。
+- **2 个 FAIL**：已鉴权的两个发信端点**完全没有限流**（可轰炸邮箱），以及注册确认信**进垃圾箱**。
 - **认证边界干净**：7 个 MFA 端点对匿名和伪造 token 一律 401；Passkey 的越权删除/重命名 → 404；
   两个枚举探针都没有 oracle。
 - **MFA 的两个 P1 安全语义都站得住**：零方法时打开保护范围会被规范化为 false；
@@ -100,6 +102,69 @@ TOTP 验证码由执行者按 RFC 6238 自行计算，未使用手机 App。
 | **PROF-MFA-42c** | PASS | **用关闭前的旧 secret 再启用 → 400「Start TOTP setup before enabling it.」—— secret 是真的清掉了**，不是留在库里不用 |
 | PROF-MFA-43 | PASS | 全关后登录不再出现 challenge，无残留的假 enabled/scope |
 
+## 2ter. 邮件相关用例（31 项，29 PASS / 2 FAIL）
+
+用户当场授权并自行登录邮箱后执行。邮箱内**只打开 DineFlow 自己发的邮件**。
+
+### Magic Link（P0 + 4 项）
+
+| 用例 | 结果 | 观察 |
+|---|---|---|
+| **PROF-MFA-29 (P0)** | PASS | **开启 MFA 后用 Magic Link 登录 → 不签发 access/refresh token，只返回 challengeId**，与密码登录同一形状（`mfaRequired` + `methods` + `preferredMethod`）。**Magic Link 绕不过 MFA** |
+| PROF-MFA-29b | PASS | 在 Magic Link 产生的 challenge 上完成 TOTP → 正常签发 token |
+| PROF-ML-01 | PASS | **同一链接重放 → 400「Sign-in link is invalid or expired.」**，单次消费（与邮件正文「can only be used once」一致） |
+| PROF-ML-02 | PASS | 改最后一位 / 截断 / 空 / 垃圾 token —— 4 种全拒 |
+| **PROF-ML-03** | PASS | **同一 token 换一个 userId → 400**，token 与用户绑定 |
+| PROF-ML-04 | PASS | 未知 vs 已知邮箱 → 状态码与响应体**逐字节相同**，无枚举 oracle |
+
+### 敏感操作与密码（P0 + 6 项）
+
+| 用例 | 结果 | 观察 |
+|---|---|---|
+| **PROF-MFA-37 (P0)** | PASS | 开启 sensitiveActions 后改密码：**不给 verification / 空码 / 错码 / 过期码 / 方法写成 email —— 5 种全拒** |
+| **PROF-MFA-37c** | PASS | **5 次被拒之后新密码完全不能登录**，证明**有效 MFA 之前没有发生任何写入** |
+| PROF-PWD-03 | PASS | 带有效 TOTP 码改密码 → 200「Password updated.」 |
+| PROF-PWD-07a/b | PASS | 新密码可登录；**旧密码 → 401** |
+| **PROF-PWD-08** | PASS | **改密码之前签发的 access token 立刻变 401** —— AUDIT-01/02 的 security stamp 修复确实在生效，被盗会话不会苟活 |
+
+### Email MFA 生命周期（10.3，11 项）
+
+| 用例 | 结果 | 观察 |
+|---|---|---|
+| PROF-MFA-17 | PASS | 未发码就 enable、空码、字母码 → 全 400，且**措辞统一**为「invalid or expired」，不区分「没发过」与「发错了」 |
+| **PROF-MFA-19** | PASS | **连发 7 个码后逐个试：前 6 个全部 400，只有最新的 1 个 200。** 旧码确实被作废 |
+| **PROF-MFA-18** | PASS | 启用成功的那个码**再用一次 → 400**，单次消费 |
+| PROF-MFA-23 | PASS | 两种方法都启用后，登录 challenge 返回 `methods=['totp','email']` 且标出 `preferredMethod` |
+| **PROF-MFA-36** | PASS | **用邮件验证码完成登录 challenge → 签发 token** |
+| PROF-MFA-36b | PASS | 同一 challenge + 同一码重放 → 400 |
+| **PROF-MFA-36c** | PASS | **旧 challenge 的码拿到新 challenge 上用 → 400**，验证码与 challenge 绑定，不可串用 |
+| PROF-MFA-38 | PASS | 用**最旧**的敏感操作码关 MFA → 400 |
+| **PROF-MFA-41** | PASS | 用一个方法的码关掉**首选**方法 → 剩下的方法**自动成为 preferred**，`requiredFor.login` **保持开启**，保护没被顺手削掉 |
+| **PROF-MFA-42d/e** | PASS | 关掉**最后一个**方法 → 全部归零、无残留；之后登录不再挑战 |
+| PROF-MFA-15 | PASS | 邮件正文说明了用途、**十分钟有效期**、以及「**DineFlow will never ask you to share this code**」 |
+
+### 密码重置链路（PROF-PWD-09，6 项）
+
+| 用例 | 结果 | 观察 |
+|---|---|---|
+| PROF-PWD-09a | PASS | 改最后一位 / 截断 / 空 / 垃圾 reset token —— 4 种全拒 |
+| **PROF-PWD-09b** | PASS | **有效 token 换一个 userId → 400**，与用户绑定 |
+| **PROF-PWD-09d** | PASS | 全新链接**首次使用 → 200**「Password updated.」，新密码随即可登录 |
+| **PROF-PWD-09e** | PASS | **同一链接再用一次 → 400**，单次消费 |
+| PROF-PWD-09 邮件 | PASS | 正文写明**一小时有效期**（与后端 `DataProtectionTokenProviderOptions.TokenLifespan = 1h` 一致） |
+| **PROF-PWD-09x** | **待隔离** | 见第 3bis 节 #3 |
+
+### 发信限流（PROF-MFA-20）
+
+| 端点 | 鉴权 | 连发 6 次的结果 |
+|---|---|---|
+| `POST /api/auth/request-password-reset` | 匿名 | **429**（限流生效） |
+| `POST /api/auth/request-magic-link` | 匿名 | 200×5 → **429**（限流生效） |
+| `POST /api/auth/mfa/email/setup` | **已登录** | **200 × 6 —— 无任何限流** |
+| `POST /api/auth/mfa/sensitive/email-code` | **已登录** | **200 × 6 —— 无任何限流** |
+
+**FAIL。** 详见第 3bis 节 #2。
+
 ## 3. 顺带观察到的限流
 
 注册接口在**约 4 次连续请求后返回 429**「Too many attempts. Wait a moment and try again.」，
@@ -126,6 +191,62 @@ SPF / DKIM / DMARC 记录是否为 Resend 正确配置，以及该域是否已�
 
 **顺带的正面观察**：邮件正文本身是合格的——说明了账号用途、**24 小时有效期**、
 过期后未确认账号会被自动清理、以及「若非本人操作则无需处理」。没有泄露任何多余信息。
+
+**投递是不一致的**，这一点值得记下来：同一收件地址、同一发信域，
+「Sign in to DineFlow」进了**收件箱**，而「Confirm your email address」、
+「Enable DineFlow email MFA」、「Your DineFlow verification code」、
+「Your DineFlow sensitive action code」都进了**垃圾箱**。
+这种时好时坏的模式通常指向域名信誉/认证配置，而不是单封邮件的内容问题。
+
+### #2 两个已鉴权的发信端点完全没有限流（中，可轰炸邮箱）
+
+`POST /api/auth/mfa/email/setup` 与 `POST /api/auth/mfa/sensitive/email-code`
+**连发 6 次全部返回 200**，没有 429、没有 `Retry-After`、没有任何按用户或收件人的节流。
+
+**已实测证实不是理论问题**：本轮对 `email/setup` 连发 7 次，
+**7 封邮件全部投递到了收件人邮箱**（同一会话线程里能数出 7 个不同验证码）。
+
+**对比**：匿名的两个发信端点**是有限流的**——`request-password-reset` 直接 429，
+`request-magic-link` 在第 6 次 429。也就是说防护写了，只是**没有覆盖到登录后的这两个端点**。
+
+**为什么要紧**：这两个端点只需要一个有效登录态就能调用，收件人固定是账号自己的邮箱。
+影响有三层——被盗号者可以用邮件洪水淹掉受害者收件箱里的安全告警；
+任何一个账号都能无限消耗 Resend 发信额度；
+大量重复邮件本身会**拉低发信域的信誉**，而域名信誉正是问题 #1 的成因。
+
+**建议**：把匿名端点上已有的那套限流套到这两个端点上，按 userId + 收件地址计数，
+并返回 `Retry-After`。
+
+PROF-MFA-21（内存验证码存储在重启/多副本下的行为）仍未验证——
+`MemoryMfaEmailSetupCodeStore` 是进程内存储，多实例部署时验证码不会跨副本共享。
+
+### #3 【待隔离】失败尝试之后，合法的密码重置链接失效了
+
+**观察到的现象**，按发生顺序：
+
+| 轮次 | 做了什么 | 结果 |
+|---|---|---|
+| 第一轮 | 取到新链接 → 先做 4 次**篡改 token** 尝试 → 1 次 userId 不符 → 1 次**有效 token + 弱密码** | 弱密码那次返回的是「**链接无效或已过期**」而不是「密码不合要求」，说明 token **在此之前就已失效**；随后的正常使用也 400 |
+| 第二轮 | 取到新链接 → **直接走正常路径，不做任何篡改** | **200，成功**；再次使用 → 400（单次消费正常） |
+
+两轮唯一的差别就是第一轮先做了失败尝试。
+
+**为什么值得追**：如果失败尝试真的会作废一条合法的重置链接，那么**任何知道 userId 的人**
+（userId 出现在重置链接里、也可能从别处泄露）都可以通过反复 POST 垃圾 token
+让受害者的重置链接持续失效 —— 这是**账号找回的可用性攻击**。
+
+**为什么还不能下结论**：读过 `AuthController.ResetPassword` 与自定义 token provider，
+**应用层没有任何自定义的作废逻辑**，走的是标准 `UserManager.ResetPasswordAsync`，
+而标准 Identity 在 token 校验失败时并不会更新 security stamp。
+也存在一个平庸得多的解释：第一轮从 Gmail 会话里抽链接时，
+**可能抽到的是同一会话中较早一封邮件的链接**（该线程里混有多封历史重置邮件，
+包括用户早期测试留下的 `localhost:5173` 链接）。执行者未能排除这一可能。
+
+**下一棒的精确复现步骤**：
+1. 请求一条新的重置链接，**从邮件正文逐字复制**（不要用脚本从会话里抓，避免抓到旧邮件）；
+2. 只做 **1 次**篡改 token 的 POST；
+3. 立刻用真链接走正常路径。
+4. 若失败 → 确认为可用性缺陷，并二分出触发阈值；若成功 → 增加失败次数直到复现，或判定第一轮为取错链接。
 
 ## 4. 未跑（需要授权或设备）
 
@@ -158,7 +279,11 @@ SPF / DKIM / DMARC 记录是否为 Resend 正确配置，以及该域是否已�
 | 账号 | 状态 |
 |---|---|
 | `qa.sec.20260916@dineflow.test` | **未确认**（邮箱域不存在，无法登录），处于惰性状态，24 小时后按产品逻辑自动清理 |
-| `burnmydread4+dineflowqa20260916@gmail.com` | 已确认、可登录、**MFA 已全部关闭**，状态干净。用户的真实邮箱别名，需要时可随时删除 |
+| `burnmydread4+dineflowqa20260916@gmail.com` | 已确认、可登录、**MFA 已全部关闭**，状态干净。密码在测试中被改过数次，当前值记录在执行者的临时目录，**不写入本报告**。用户的真实邮箱别名，需要时可随时删除 |
+
+**发往用户邮箱的测试邮件约 25 封**（确认信 1、Magic Link 7、Email MFA 设置码 7、
+敏感操作码 6、登录验证码 2、密码重置 3），其中**大部分进了垃圾箱**。
+这个数量本身就是问题 #2 的实测证据。
 
 另有若干次被口令策略 400 拒绝的注册尝试（未创建账号）。
 
