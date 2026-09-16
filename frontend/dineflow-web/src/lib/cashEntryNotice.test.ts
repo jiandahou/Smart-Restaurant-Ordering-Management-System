@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getCashEntryNotice } from './cashEntryNotice'
+import { getCashEntryNotice, maximumChangeFor } from './cashEntryNotice'
 
 const money = (amount: number) => `A$${amount.toFixed(2)}`
 
@@ -36,5 +36,35 @@ describe('getCashEntryNotice', () => {
   /** The wording is the server's own, so the screen and a refused request cannot disagree. */
   it('reads the way the server would have answered', () => {
     expect(getCashEntryNotice('1', 25.5, money)).toBe('Cash received must be at least A$25.50.')
+  })
+
+  /**
+   * A digit too many is the ordinary slip, and the change is what leaves the drawer. A$5000 keyed
+   * against a A$24 order used to be accepted, with A$4976 offered back.
+   */
+  it('refuses a tender that would hand back more change than the order can owe', () => {
+    expect(getCashEntryNotice('5000', 24, money)).toBe(
+      'That would give back A$4976.00 in change. '
+      + 'Check the amount — this order can give back at most A$500.00.',
+    )
+    expect(getCashEntryNotice('1000000000000000', 24, money)).not.toBeNull()
+  })
+
+  /** Handing over a round note is not a slip, whatever multiple of the bill it happens to be. */
+  it('still accepts the ordinary way people pay cash', () => {
+    expect(getCashEntryNotice('100', 5, money)).toBeNull()     // a note for a coffee
+    expect(getCashEntryNotice('100', 24, money)).toBeNull()
+    expect(getCashEntryNotice('524', 24, money)).toBeNull()    // exactly at the ceiling
+  })
+
+  /** A big table settling a big bill is still plainly real, so the bill raises its own ceiling. */
+  it('lets a larger bill give back proportionally more', () => {
+    expect(getCashEntryNotice('1500', 800, money)).toBeNull()  // A$700 change on an A$800 bill
+    expect(getCashEntryNotice('1601', 800, money)).not.toBeNull()
+  })
+
+  it('reports the ceiling an order actually has', () => {
+    expect(maximumChangeFor(24)).toBe(500)
+    expect(maximumChangeFor(800)).toBe(800)
   })
 })

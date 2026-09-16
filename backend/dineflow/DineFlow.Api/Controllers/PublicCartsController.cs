@@ -903,9 +903,25 @@ public class PublicCartsController(
 
             if (reissued is not null)
             {
-                existingOrder.GuestAccessTokenHash = reissued.Value.Hash;
-                existingOrder.UpdatedAt = DateTime.UtcNow;
-                await dbContext.SaveChangesAsync(cancellationToken);
+                // Written straight at the row. LoadOrderAsync reads AsNoTracking, which every other
+                // caller of it wants, so assigning to the entity and calling SaveChangesAsync
+                // changed nothing at all: the response handed out a token whose hash was never
+                // stored. The guest then held a credential that could not read its own order —
+                // could not cancel it either — while the first token, the one this branch exists
+                // to replace, quietly kept working.
+                var reissuedHash = reissued.Value.Hash;
+                var reissuedAt = DateTime.UtcNow;
+                await dbContext.Orders
+                    .Where(order => order.Id == existingOrder.Id)
+                    .ExecuteUpdateAsync(
+                        setters => setters
+                            .SetProperty(order => order.GuestAccessTokenHash, reissuedHash)
+                            .SetProperty(order => order.UpdatedAt, reissuedAt),
+                        cancellationToken);
+
+                // Keep the instance being mapped in step with the row it came from.
+                existingOrder.GuestAccessTokenHash = reissuedHash;
+                existingOrder.UpdatedAt = reissuedAt;
             }
 
             await transaction.CommitAsync(cancellationToken);

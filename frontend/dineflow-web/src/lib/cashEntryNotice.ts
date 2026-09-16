@@ -16,10 +16,27 @@
  * </p>
  *
  * <p>
+ * The ceiling matters as much as the floor. Only "at least the bill" was ever checked, so A$5000
+ * keyed against a A$24 order was accepted and the dialog offered A$4976 in change — a digit too
+ * many is the ordinary slip, and the change is what leaves the drawer. The bound is on the change
+ * rather than the tender, because A$100 for a A$5 coffee is ordinary and a flat cap cannot tell
+ * the two apart. Kept in step with <code>CounterCashTenderPolicy</code> on the server, which
+ * refuses the same figures; this is the half that stops the cashier before they hand it over.
+ * </p>
+ *
+ * <p>
  * An empty field is not an error. Nothing has been typed yet, and telling somebody they are wrong
  * before they have started is how a form nags.
  * </p>
  */
+/** Generous next to any single serving, and well under a digit slip on one. */
+export const MAXIMUM_CHANGE_DUE = 500
+
+/** The most an order may hand back, given what is owed on it. */
+export function maximumChangeFor(amountDue: number): number {
+  return Math.max(MAXIMUM_CHANGE_DUE, amountDue)
+}
+
 export function getCashEntryNotice(
   cashReceived: string,
   amountDue: number,
@@ -41,6 +58,12 @@ export function getCashEntryNotice(
 
   if (parsed < amountDue) {
     return `Cash received must be at least ${formatAmount(amountDue)}.`
+  }
+
+  const maximumChange = maximumChangeFor(amountDue)
+  if (parsed - amountDue > maximumChange) {
+    return `That would give back ${formatAmount(parsed - amountDue)} in change. `
+      + `Check the amount — this order can give back at most ${formatAmount(maximumChange)}.`
   }
 
   return null

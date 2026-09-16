@@ -62,9 +62,9 @@
 | staff-orders | 212 | 🟡 抽测 | staff 可读订单、越权→403 |
 | cart | 294 | 🟡 抽测 | 下单→购物车→结账→下单、共享同步 |
 | notifications(SignalR) | — | 🟢 抽测 | Live 徽章、实时同步 |
-| front-counter | 182 | 🔴 未跑 | 需浏览器逐页 |
+| front-counter | 182 | 🟡 API 面已深跑 | 2026-09-16，见 [front-counter-test-run-2026-09-16.md](front-counter-test-run-2026-09-16.md)；59/60 PASS，1 个现金上限缺陷 |
 | profile-security | 157 | 🔴 未跑 | 需邮箱/TOTP/Passkey |
-| payment-system | 223 | ⛔ BLOCKED | 需 Stripe Connect 入驻 |
+| payment-system | 223 | 🟡 主链路已跑 | 2026-09-16 入驻完成后解锁，见 [payment-system-test-run-2026-09-16.md](payment-system-test-run-2026-09-16.md) |
 | real-device | 69 | 🔴 未跑 | 需真机/读屏 |
 
 图例:🟢 完成/较全 · 🟡 代表性抽测 · 🔴 未跑 · ⛔ BLOCKED
@@ -90,8 +90,8 @@
 
 | # | 严重度 | 问题 | 位置/修法 |
 |---|---|---|---|
-| 1 | 低（校验缺失） | **选项组名接受空白/纯空格且不 trim**(MENU-OPT-02/21) | `MenuOptionGroupController` 名称校验补 `Trim()`+非空，与菜品/分类一致 |
-| 2 | 配置缺口 | **在线支付不可用**：无餐厅完成 Stripe Connect 入驻 → G 类/payment-system BLOCKED | 按 `docs/stripe-connect.md` 给测试餐厅走 test 模式入驻 |
+| 1 | ~~低（校验缺失）~~ 已修 | ~~**选项组名接受空白/纯空格且不 trim**(MENU-OPT-02/21)~~ | 已在 `3f66128` 修复并合入 `main` |
+| 2 | ~~配置缺口~~ 已解除 | ~~**在线支付不可用**~~ | 餐厅 A 已于 2026-09-16 完成 test 模式入驻；主链路已验证。**新问题**：该账户业务名填成了「Central Market Table」，见 09-16 报告问题 #1 |
 | 3 | 说明 | owner@dineflow.com 密码已被改动（`SEED_OWNER_PASSWORD`） | Platform Owner 专属项需新密码后补测 |
 | 4 | 待确认 | MENU-ALG-04 核验时间戳 | 浏览器复核 |
 
@@ -114,7 +114,10 @@
 - 改数据类用例允许跑（当前为演示数据）；跑完请**清理临时数据**（本轮已清）。
 - 单元测试**不要**对生产库跑（会建/删测试库）。
 
-**优先接力项**
-1. 修 #1 选项组空名校验(小改动)
-2. Stripe Connect 入驻后跑 payment-system(223) + admin-payments 在线付款/退款
+**优先接力项**（2026-09-16 更新）
+1. ~~修 #1 选项组空名校验~~ 已修 (`3f66128`)
+2. ~~Stripe Connect 入驻后跑 payment-system~~ 主链路已跑；**剩 3DS/Radar/争议、Klarna 异步、其余成功卡矩阵**
 3. admin-menu 浏览器组(PAGE/IMG/REC/PUB) 与其余模块的浏览器逐页
+4. ~~front-counter(182)~~ API 面已跑；剩浏览器/打印/无障碍/并发双会话
+5. profile-security(157) / real-device(69) 仍未跑
+6. **修现金收款上限**（front-counter 报告问题 #1，前后端各一处）

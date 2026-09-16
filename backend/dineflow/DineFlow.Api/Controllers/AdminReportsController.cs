@@ -492,6 +492,8 @@ public class AdminReportsController : ControllerBase
             "Provider",
             "ProviderEventId",
             "Status",
+            "AmountCents",
+            "Currency",
             "OrderNumber",
             "OrderId",
             "PaymentId",
@@ -521,6 +523,8 @@ public class AdminReportsController : ControllerBase
                     log.Provider,
                     log.ProviderEventId,
                     log.Status,
+                    log.AmountCents,
+                    log.Currency,
                     log.OrderNumber,
                     log.OrderId,
                     log.PaymentId,
@@ -778,7 +782,11 @@ public class AdminReportsController : ControllerBase
 
     private static IOrderedQueryable<AuditLog>? ApplyAuditSorting(IQueryable<AuditLog> query, string? sortBy, bool descending)
     {
-        var normalizedSort = string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy.Trim().ToLowerInvariant();
+        // Lower-cased after the default is chosen, not before it: the default used to be the
+        // camel-cased "createdAt", which no branch of an ordinal string switch matches, so a
+        // caller who omitted sortBy fell through to null and was answered 400 "Unsupported
+        // sortBy value" for a value they never sent.
+        var normalizedSort = (string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy).Trim().ToLowerInvariant();
         IOrderedQueryable<AuditLog>? sorted = normalizedSort switch
         {
             "createdat" => descending ? query.OrderByDescending(log => log.CreatedAt) : query.OrderBy(log => log.CreatedAt),
@@ -793,7 +801,11 @@ public class AdminReportsController : ControllerBase
 
     private static IOrderedQueryable<OrderEventLog>? ApplyOrderEventSorting(IQueryable<OrderEventLog> query, string? sortBy, bool descending)
     {
-        var normalizedSort = string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy.Trim().ToLowerInvariant();
+        // Lower-cased after the default is chosen, not before it: the default used to be the
+        // camel-cased "createdAt", which no branch of an ordinal string switch matches, so a
+        // caller who omitted sortBy fell through to null and was answered 400 "Unsupported
+        // sortBy value" for a value they never sent.
+        var normalizedSort = (string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy).Trim().ToLowerInvariant();
         IOrderedQueryable<OrderEventLog>? sorted = normalizedSort switch
         {
             "createdat" => descending ? query.OrderByDescending(log => log.CreatedAt) : query.OrderBy(log => log.CreatedAt),
@@ -808,7 +820,11 @@ public class AdminReportsController : ControllerBase
 
     private static IOrderedQueryable<PaymentEventLog>? ApplyPaymentEventSorting(IQueryable<PaymentEventLog> query, string? sortBy, bool descending)
     {
-        var normalizedSort = string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy.Trim().ToLowerInvariant();
+        // Lower-cased after the default is chosen, not before it: the default used to be the
+        // camel-cased "createdAt", which no branch of an ordinal string switch matches, so a
+        // caller who omitted sortBy fell through to null and was answered 400 "Unsupported
+        // sortBy value" for a value they never sent.
+        var normalizedSort = (string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy).Trim().ToLowerInvariant();
         IOrderedQueryable<PaymentEventLog>? sorted = normalizedSort switch
         {
             "createdat" => descending ? query.OrderByDescending(log => log.CreatedAt) : query.OrderBy(log => log.CreatedAt),
@@ -888,6 +904,10 @@ public class AdminReportsController : ControllerBase
             EventType = log.EventType,
             ProviderEventId = log.ProviderEventId,
             Status = log.Status,
+            // Not gated: what a payment was worth is the business fact a restaurant reconciles on,
+            // not a technical detail like an IP or a raw provider payload.
+            AmountCents = log.AmountCents,
+            Currency = log.Currency,
             Message = log.Message,
             DataJson = includeTechnicalDetails ? log.DataJson : null,
             ActorUserId = log.ActorUserId,

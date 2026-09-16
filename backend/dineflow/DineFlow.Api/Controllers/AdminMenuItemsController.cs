@@ -8,6 +8,7 @@ using DineFlow.Api.Options;
 using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Identity;
+using DineFlow.Infrastructure.Carts;
 using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
@@ -772,6 +773,24 @@ public class AdminMenuItemsController : ControllerBase
             return BadRequest(new { message = "stockQuantity cannot be negative." });
         }
 
+        if (request.StockQuantity is { } requested && !MenuStockPolicy.IsValidQuantity(requested))
+        {
+            return BadRequest(new
+            {
+                message = $"stockQuantity cannot exceed {MenuStockPolicy.MaximumStockQuantity}.",
+                maximumStockQuantity = MenuStockPolicy.MaximumStockQuantity
+            });
+        }
+
+        if (request.AdjustBy is { } step && !MenuStockPolicy.IsValidAdjustment(step))
+        {
+            return BadRequest(new
+            {
+                message = $"adjustBy cannot move stock by more than {MenuStockPolicy.MaximumStockQuantity} at once.",
+                maximumStockQuantity = MenuStockPolicy.MaximumStockQuantity
+            });
+        }
+
         if (request.AdjustBy is not null && request.StockQuantity is not null)
         {
             return BadRequest(new { message = "Send either stockQuantity or adjustBy, not both." });
@@ -799,6 +818,19 @@ public class AdminMenuItemsController : ControllerBase
                 return BadRequest(new { message = "This item does not track stock, so there is nothing to adjust." });
             }
 
+            // Running out is ordinary and clamps to zero below. Running past the ceiling is not, and
+            // is refused rather than quietly capped, so an operator who meant something else finds
+            // out. Checked in long, so the check cannot overflow the way the old SQL addition did.
+            if (MenuStockPolicy.WouldExceedMaximum(item.StockQuantity.Value, delta))
+            {
+                return BadRequest(new
+                {
+                    message = $"That adjustment would take stock past {MenuStockPolicy.MaximumStockQuantity}.",
+                    currentStockQuantity = item.StockQuantity.Value,
+                    maximumStockQuantity = MenuStockPolicy.MaximumStockQuantity
+                });
+            }
+
             // One statement, so the database adds to whatever the row holds right now. Reading the
             // count and writing the result back would lose an increment whenever two people pressed
             // the button at once, and both requests would report success.
@@ -808,7 +840,9 @@ public class AdminMenuItemsController : ControllerBase
                     setters => setters
                         .SetProperty(
                             menuItem => menuItem.StockQuantity,
-                            menuItem => Math.Max(0, menuItem.StockQuantity!.Value + delta))
+                            menuItem => Math.Min(
+                                MenuStockPolicy.MaximumStockQuantity,
+                                Math.Max(0, menuItem.StockQuantity!.Value + delta)))
                         .SetProperty(
                             menuItem => menuItem.IsSoldOut,
                             menuItem => Math.Max(0, menuItem.StockQuantity!.Value + delta) == 0)
@@ -1021,6 +1055,41 @@ public class AdminMenuItemsController : ControllerBase
         {
             return Forbid();
         }
+
+        // Past orders keep their own snapshots of name, price and allergens and hold MenuItemId
+        // nullable, so history survives this. Carts do not: CartItem restricts the delete, and the
+        // row simply raised a foreign-key violation the caller saw as a 500.
+        //
+        // Refusing whenever any cart row points at the dish would be worse than the crash, because
+        // submitted and expired carts stay in the table — one order would make an item undeletable
+        // for good. The line worth protecting is a customer holding the dish right now.
+        var now = DateTime.UtcNow;
+        var liveCarts = await _dbContext.CartItems
+            .AsNoTracking()
+            .Where(cartItem => cartItem.MenuItemId == id
+                && cartItem.Cart!.Status == CartStatus.Active
+                && cartItem.Cart.ExpiresAt > now)
+            .Select(cartItem => cartItem.CartId)
+            .Distinct()
+            .CountAsync(cancellationToken);
+
+        if (liveCarts > 0)
+        {
+            return Conflict(new
+            {
+                message = liveCarts == 1
+                    ? "A customer has this item in their cart right now. Mark it sold out or deactivate it instead, and delete it once the cart is gone."
+                    : $"{liveCarts} customers have this item in their carts right now. Mark it sold out or deactivate it instead, and delete it once those carts are gone.",
+                code = "menu_item_in_active_cart",
+                activeCartCount = liveCarts
+            });
+        }
+
+        // Nobody is looking at these: the carts are checked out or timed out, and what was ordered
+        // is recorded on the order, not here.
+        await _dbContext.CartItems
+            .Where(cartItem => cartItem.MenuItemId == id)
+            .ExecuteDeleteAsync(cancellationToken);
 
         var imageUrl = item.ImageUrl;
         var restaurantId = item.RestaurantId;

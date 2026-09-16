@@ -22,6 +22,24 @@ public class PaymentEventLog
 
     public string? Status { get; set; }
 
+    /// <summary>
+    /// What this event was worth, in the smallest unit of <see cref="Currency"/>: the refund's
+    /// amount for a refund event, otherwise the payment's.
+    /// </summary>
+    /// <remarks>
+    /// The log carried no money at all. Payment events are kept for seven years, which is a
+    /// retention period chosen for financial evidence, yet a restaurant owner exporting their own
+    /// seven years could read what happened — a counter tender recorded, a checkout session
+    /// created, who did it — and never how much. The amount lived only inside DataJson, which is
+    /// PlatformOwner-only, so the people who actually reconcile takings had to join back to the
+    /// Payments table, which is not covered by this log's immutability or retention.
+    /// </remarks>
+    public long? AmountCents { get; set; }
+
+    /// Alongside the amount, because cents mean nothing without it and this platform is
+    /// deliberately multi-currency.
+    public string? Currency { get; set; }
+
     public string Message { get; set; } = string.Empty;
 
     public string? DataJson { get; set; }

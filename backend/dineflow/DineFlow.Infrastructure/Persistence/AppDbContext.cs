@@ -864,6 +864,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(log => log.EventType).HasMaxLength(120).IsRequired();
             entity.Property(log => log.ProviderEventId).HasMaxLength(255);
             entity.Property(log => log.Status).HasMaxLength(80);
+            entity.Property(log => log.Currency).HasMaxLength(8);
             entity.Property(log => log.Message).HasMaxLength(700).IsRequired();
             entity.Property(log => log.ActorUserId).HasMaxLength(450);
             entity.Property(log => log.ActorDisplayName).HasMaxLength(256);
