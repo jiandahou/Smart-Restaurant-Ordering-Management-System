@@ -64,7 +64,7 @@
 | **front-counter** | 182 | 🟡 **API 面已深跑** | **09-16 新**；剩浏览器/打印/无障碍/并发 |
 | admin-menu | 182 | 🟡 Auto 已深跑 | 09-15：24 PASS/1 FAIL(已修)/1 未确认；剩 PAGE/IMG/REC/PUB |
 | admin-orders | 169 | 🟡 抽测 | 筛选/流转校验/支付门槛/status-history |
-| admin-reports | 176 | 🟡 抽测 | activity 读取+导出、权限 |
+| **admin-reports** | 176 | 🟡 **权限/隐私/导出面已深跑** | **09-16 新**，见 [admin-reports-test-run-2026-09-16.md](admin-reports-test-run-2026-09-16.md)；32 PASS / 2 FAIL / 1 NOT RUN |
 | admin-restaurants | 161 | 🟡 抽测 | 列表/详情/跨租户隔离 |
 | admin-users | 150 | 🟡 抽测 | 全域仅 Platform Owner 可读 |
 | admin-payments | 166 | 🟡 抽测 | 在线付款/退款已随 payment-system 覆盖一部分 |
@@ -72,7 +72,7 @@
 | staff-orders | 212 | 🟡 抽测 | staff 可读订单、越权 → 403 |
 | cart | 294 | 🟡 抽测 | 下单→购物车→结账→下单、共享同步 |
 | notifications(SignalR) | — | 🟢 抽测 | Live 徽章、实时同步 |
-| **profile-security** | 157 | 🔴 **未跑** | 需邮箱/TOTP/Passkey |
+| **profile-security** | 157 | 🟠 **只读面已跑** | **09-16 新**，见 [profile-security-test-run-2026-09-16.md](profile-security-test-run-2026-09-16.md)；16/17 PASS，变更类用例待授权 |
 | **real-device** | 69 | 🔴 **未跑** | 需真机/读屏 |
 
 图例：🟢 完成/较全 · 🟡 代表性抽测或单面深跑 · 🔴 未跑
@@ -84,9 +84,11 @@
 | 1 | **确认缺陷** | **现金收款金额没有上限**：应收 A$24.00 的单，输入现金 `5000.00` 被接受且提示应找 **A$4976.00**；整桌结算同样路径。前后端都只校验「不少于应收」 | 后端 `StaffFrontCounterController.ValidateTender`（约 L1115），前端 `FrontCounterPage.tsx` 的 `cashEntryValid`（约 L974）与 `<Input min>` 无 `max`。**两处都要改**。账目未受污染（Payment 仍记账单金额），属操作风险 |
 | 2 | **上线前必须改** | **connected account 的 business name 与餐厅名不一致**：Stripe 上是「Central Market Table」，餐厅是「The DineFlow Kitchen」。Checkout 页与卡账单都显示前者 | 系统自身的 `merchant_identity_mismatch` 校验报得没错，是入驻时填错。改 Stripe 连接账户上的业务名 |
 | 3 | **上线前必须补** | **餐厅主数据缺失**：`legalBusinessName` 为空、`abn` 与 `refundContactEmail` 为空/null。**会直接打在小票和收据上** | seed 数据缺口，非代码缺陷。Admin → Restaurants 补齐 |
-| 4 | 提示 | Klarna 在连接账户上是启用的，但异步支付路径（`checkout.session.async_payment_*`）零覆盖 | 要么正式环境关掉，要么补测 |
-| 5 | 待确认（承接 09-15） | MENU-ALG-04 的 `allergenInfoLastVerifiedAt` | 浏览器复核 |
-| 6 | 说明（承接 09-15） | `owner@dineflow.com` 密码已被改动 | Platform Owner 专属用例需新密码后补测 |
+| 4 | **中（对账/合规）** | **payments 报表导出不含金额与币种**：`PaymentEventLog` 实体本身没有金额字段，唯一可能装金额的 `DataJson` 只对 PlatformOwner 导出。保留期 2555 天（7 年）的支付证据，餐厅 Owner/Admin 导出来**看不到多少钱** | 给 `PaymentEventLog` 加 `AmountCents`+`Currency` 并在写入时填充 |
+| 5 | 低（API 契约） | **不传 `sortBy` 时 audit/orders/payments 返回 400，activity 却正常**：`PagedRequest.SortBy` 默认 null 而排序无默认值。前端写死了 `createdAt` 所以 UI 碰不到，但直接调 API 会踩。**这也更正了 09-15 报告「需正确日期参数」的误判——与日期无关** | `ApplyAuditSorting` 给 `createdAt` 默认值 |
+| 6 | 提示 | Klarna 在连接账户上是启用的，但异步支付路径（`checkout.session.async_payment_*`）零覆盖 | 要么正式环境关掉，要么补测 |
+| 7 | 待确认（承接 09-15） | MENU-ALG-04 的 `allergenInfoLastVerifiedAt` | 浏览器复核 |
+| 8 | 说明（承接 09-15） | `owner@dineflow.com` 密码已被改动 | Platform Owner 专属用例需新密码后补测 |
 
 ## 5. 本轮产生的测试数据（**未清理**）
 
@@ -114,7 +116,7 @@
 **优先接力项**
 
 1. **修问题 #1 现金上限**（前后端各一处 + 回归测试）
-2. profile-security(157) 与 real-device(69) —— 两个完全没跑的模块
+2. **授权 TOTP 变更类用例**（约 26 条含 4 条 P0 登录闸门），见 profile-security 报告第 5 节
 3. payment-system 剩余：3DS / 争议 / Klarna 异步
 4. front-counter 剩余：浏览器逐页、收据与打印路由
 5. admin-orders / admin-reports / cart / staff-orders 从抽测升级为深跑
