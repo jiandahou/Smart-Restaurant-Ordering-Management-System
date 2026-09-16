@@ -1120,6 +1120,21 @@ public sealed class StaffFrontCounterController(
                 }));
             }
 
+            // The upper bound matters as much as the lower one: the change is what the cashier
+            // counts out of the drawer, so a keyed digit too many leaves as cash.
+            if (!CounterCashTenderPolicy.IsAcceptableTender(amountReceived.Value, amountDue))
+            {
+                var maximumChange = CounterCashTenderPolicy.MaximumChangeFor(amountDue);
+                return (null, 0m, 0m, BadRequest(new
+                {
+                    message = $"Cash received of {amountReceived.Value:0.00} would give back "
+                        + $"{amountReceived.Value - amountDue:0.00} in change. Check the amount — "
+                        + $"this order can give back at most {maximumChange:0.00}.",
+                    amountDue,
+                    maximumChangeDue = maximumChange
+                }));
+            }
+
             return (PaymentProviders.CounterCash, amountReceived.Value, amountReceived.Value - amountDue, null);
         }
 

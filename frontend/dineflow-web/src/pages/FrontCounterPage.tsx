@@ -73,7 +73,7 @@ import {
   resolveReceiptTitle,
   type ReceiptDocument,
 } from '@/lib/receipt'
-import { getCashEntryNotice } from '@/lib/cashEntryNotice'
+import { getCashEntryNotice, maximumChangeFor } from '@/lib/cashEntryNotice'
 import { formatServiceCode } from '@/lib/serviceCode'
 import {
   getFrontCounterActionLabel,
@@ -972,7 +972,10 @@ export function FrontCounterPage() {
     : pendingSettlement?.table.amountDue ?? 0
   const parsedCashReceived = Number.parseFloat(cashReceived)
   const cashEntryValid = tender !== 'Cash'
-    || (Number.isFinite(parsedCashReceived) && parsedCashReceived >= pendingAmountDue)
+    || (Number.isFinite(parsedCashReceived)
+      && parsedCashReceived >= pendingAmountDue
+      // Upper bound as well as lower: the change is what the cashier counts out of the drawer.
+      && parsedCashReceived - pendingAmountDue <= maximumChangeFor(pendingAmountDue))
   const changeDue = tender === 'Cash' && cashEntryValid
     ? Math.max(0, parsedCashReceived - pendingAmountDue)
     : 0
@@ -1679,6 +1682,7 @@ export function FrontCounterPage() {
                         id="front-counter-cash-received"
                         type="number"
                         min={pendingAmountDue}
+                        max={pendingAmountDue + maximumChangeFor(pendingAmountDue)}
                         step="0.01"
                         inputMode="decimal"
                         value={cashReceived}
