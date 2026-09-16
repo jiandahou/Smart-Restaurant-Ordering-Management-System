@@ -17,6 +17,13 @@ public class MenuController : ControllerBase
     }
 
     /// <summary>
+    /// Whether a restaurant exists and is open for ordering. These anonymous endpoints must hide the
+    /// menus of deactivated restaurants, the same way <c>PublicMenuController</c> does.
+    /// </summary>
+    private Task<bool> RestaurantIsActiveAsync(Guid restaurantId) =>
+        _dbContext.Restaurants.AnyAsync(restaurant => restaurant.Id == restaurantId && restaurant.IsActive);
+
+    /// <summary>
     /// List all active categories for a restaurant.
     /// GET /api/menu/categories?restaurantId={id}
     /// </summary>
@@ -25,6 +32,9 @@ public class MenuController : ControllerBase
     {
         if (restaurantId == Guid.Empty)
             return BadRequest(new { message = "restaurantId is required." });
+
+        if (!await RestaurantIsActiveAsync(restaurantId))
+            return NotFound(new { message = "Restaurant is not available for ordering." });
 
         var categories = await _dbContext.MenuCategories
             .Where(c => c.RestaurantId == restaurantId && c.IsActive)
@@ -56,11 +66,20 @@ public class MenuController : ControllerBase
         if (restaurantId == Guid.Empty)
             return BadRequest(new { message = "restaurantId is required." });
 
+        if (!await RestaurantIsActiveAsync(restaurantId))
+            return NotFound(new { message = "Restaurant is not available for ordering." });
+
+        // Only items whose category is still active are public. Without this an item under a
+        // deactivated category stayed reachable through this list and the search below, even though
+        // the category (and the customer-facing menu) had hidden it (AUDIT-06).
         var query = _dbContext.MenuItems
             .Include(i => i.Category)
             .Include(i => i.OptionGroups.Where(g => g.IsActive))
                 .ThenInclude(g => g.Options.Where(o => o.IsAvailable))
-            .Where(i => i.RestaurantId == restaurantId && i.IsAvailable);
+            .Where(i => i.RestaurantId == restaurantId
+                && i.IsAvailable
+                && i.Category != null
+                && i.Category.IsActive);
 
         if (categoryId.HasValue && categoryId.Value != Guid.Empty)
             query = query.Where(i => i.CategoryId == categoryId.Value);
@@ -86,6 +105,9 @@ public class MenuController : ControllerBase
         if (string.IsNullOrWhiteSpace(q))
             return BadRequest(new { message = "Search query 'q' is required." });
 
+        if (!await RestaurantIsActiveAsync(restaurantId))
+            return NotFound(new { message = "Restaurant is not available for ordering." });
+
         var term = q.Trim().ToLower();
 
         var items = await _dbContext.MenuItems
@@ -95,6 +117,8 @@ public class MenuController : ControllerBase
             .Where(i =>
                 i.RestaurantId == restaurantId &&
                 i.IsAvailable &&
+                i.Category != null &&
+                i.Category.IsActive &&
                 (i.Name.ToLower().Contains(term) || (i.Description != null && i.Description.ToLower().Contains(term))))
             .OrderBy(i => i.DisplayOrder)
             .ThenBy(i => i.Name)

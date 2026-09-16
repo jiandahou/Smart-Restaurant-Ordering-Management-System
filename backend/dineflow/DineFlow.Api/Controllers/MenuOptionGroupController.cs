@@ -97,6 +97,10 @@ public class MenuOptionGroupController : ControllerBase
         var item = await LoadItemForTenantAsync(itemId);
         if (item is null) return NotFound(new { message = "Menu item not found." });
 
+        var name = request.Name?.Trim();
+        if (string.IsNullOrEmpty(name))
+            return BadRequest(new { message = "Option group name is required." });
+
         if (request.MaxSelections < 1)
             return BadRequest(new { message = "MaxSelections must be at least 1." });
 
@@ -110,7 +114,7 @@ public class MenuOptionGroupController : ControllerBase
         {
             MenuItemId = itemId,
             RestaurantId = item.RestaurantId,
-            Name = request.Name,
+            Name = name,
             IsRequired = request.IsRequired,
             MinSelections = request.MinSelections,
             MaxSelections = request.MaxSelections,
@@ -189,6 +193,10 @@ public class MenuOptionGroupController : ControllerBase
         var item = await LoadItemForTenantAsync(itemId);
         if (item is null) return Forbid();
 
+        var name = request.Name?.Trim();
+        if (string.IsNullOrEmpty(name))
+            return BadRequest(new { message = "Option group name is required." });
+
         if (request.MaxSelections < 1)
             return BadRequest(new { message = "MaxSelections must be at least 1." });
 
@@ -200,7 +208,7 @@ public class MenuOptionGroupController : ControllerBase
 
         var beforeGroup = SnapshotGroup(group, item.Name);
 
-        group.Name = request.Name;
+        group.Name = name;
         group.IsRequired = request.IsRequired;
         group.MinSelections = request.MinSelections;
         group.MaxSelections = request.MaxSelections;

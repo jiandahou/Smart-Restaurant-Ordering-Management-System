@@ -457,6 +457,43 @@ var authenticationBuilder = builder.Services
                 }
 
                 return Task.CompletedTask;
+            },
+            // The signature and expiry are valid at this point, but that only proves the token was
+            // once issued to this user — not that the account is still allowed to act. Re-read the
+            // stored security stamp on every request so disabling an account, or changing its role
+            // or tenant (both bump the stamp), rejects tokens already handed out instead of letting
+            // them keep their old powers until natural expiry (up to an hour later).
+            OnTokenValidated = async context =>
+            {
+                var principal = context.Principal;
+                var userId = principal?.FindFirstValue(ClaimTypes.NameIdentifier);
+
+                if (string.IsNullOrEmpty(userId))
+                {
+                    context.Fail("Token is missing a subject.");
+                    return;
+                }
+
+                var userManager = context.HttpContext.RequestServices
+                    .GetRequiredService<UserManager<ApplicationUser>>();
+                var user = await userManager.FindByIdAsync(userId);
+
+                if (user is null)
+                {
+                    context.Fail("The account no longer exists.");
+                    return;
+                }
+
+                if (userManager.SupportsUserSecurityStamp)
+                {
+                    var tokenStamp = principal?.FindFirstValue(DineFlowJwtClaims.SecurityStamp);
+                    var currentStamp = await userManager.GetSecurityStampAsync(user);
+
+                    if (!string.Equals(tokenStamp, currentStamp, StringComparison.Ordinal))
+                    {
+                        context.Fail("The session is no longer valid.");
+                    }
+                }
             }
         };
     });

@@ -788,7 +788,20 @@ public sealed class StaffFrontCounterController(
             .AsNoTracking()
             .ToListAsync(cancellationToken);
 
-        // Read after the lock is granted, so this sees whatever the other till committed.
+        // The session lock alone stops two settlements of the same table, but not a single-order
+        // record-payment running against one of the table's orders: that endpoint locks the order
+        // row, not the session, and a plain read here would not block on it — so a table order could
+        // be charged once by the till settling the table and again by the till ringing up that one
+        // order (AUDIT-03). Lock every order on the session too, in a fixed id order, before reading
+        // their payment state. record-payment holds a single order and needs nothing further, so a
+        // settlement that waits on it cannot deadlock; two settlements of the same table serialise on
+        // the session lock they both take first.
+        _ = await dbContext.Orders
+            .FromSql($"SELECT * FROM \"Orders\" WHERE \"TableSessionId\" = {sessionId} ORDER BY \"Id\" FOR UPDATE")
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
+
+        // Read after the locks are granted, so this sees whatever the other till committed.
         var session = await LoadOpenTableSessions(scope.RestaurantId!.Value)
             .FirstOrDefaultAsync(item => item.Id == sessionId, cancellationToken);
 

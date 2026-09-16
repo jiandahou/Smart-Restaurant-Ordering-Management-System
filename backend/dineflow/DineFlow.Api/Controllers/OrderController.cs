@@ -2,12 +2,15 @@ using System.Security.Claims;
 using DineFlow.Api.Authorization;
 using DineFlow.Api.Contracts.Order;
 using DineFlow.Api.Services;
+using DineFlow.Application.Authorization;
+using DineFlow.Infrastructure.Identity;
 using DineFlow.Infrastructure.Menu;
 using DineFlow.Infrastructure.Orders;
 using DineFlow.Infrastructure.Payments;
 using DineFlow.Infrastructure.Persistence;
 using DineFlow.Infrastructure.Restaurant;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -36,6 +39,7 @@ public class OrderController : ControllerBase
     private readonly StripeCheckoutSessionExpiry _checkoutSessionExpiry;
     private readonly ReportLogWriter _reportLogWriter;
     private readonly TableSessionService _tableSessionService;
+    private readonly UserManager<ApplicationUser> _userManager;
     private readonly ILogger<OrderController> _logger;
 
     public OrderController(
@@ -49,6 +53,7 @@ public class OrderController : ControllerBase
         StripeCheckoutSessionExpiry checkoutSessionExpiry,
         ReportLogWriter reportLogWriter,
         TableSessionService tableSessionService,
+        UserManager<ApplicationUser> userManager,
         ILogger<OrderController> logger)
     {
         _dbContext = dbContext;
@@ -61,7 +66,43 @@ public class OrderController : ControllerBase
         _checkoutSessionExpiry = checkoutSessionExpiry;
         _reportLogWriter = reportLogWriter;
         _tableSessionService = tableSessionService;
+        _userManager = userManager;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// The restaurant the signed-in staff/admin caller belongs to, or null for a PlatformOwner (who
+    /// spans tenants) or an unresolved principal.
+    /// </summary>
+    private async Task<Guid?> GetCurrentRestaurantIdAsync()
+    {
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        if (string.IsNullOrEmpty(currentUserId))
+        {
+            return null;
+        }
+
+        var currentUser = await _userManager.FindByIdAsync(currentUserId);
+        return currentUser?.RestaurantId;
+    }
+
+    /// <summary>
+    /// Whether the caller is allowed to read or mutate an order in the given restaurant. A
+    /// PlatformOwner may act across tenants; every other admin/staff role is confined to their own
+    /// restaurant. These legacy /api/order admin endpoints predate the per-tenant scoping the modern
+    /// AdminOrdersController applies, so without this an Admin who learns another restaurant's order
+    /// id could read or change it (AUDIT-07).
+    /// </summary>
+    private async Task<bool> CanAccessRestaurantOrderAsync(Guid? orderRestaurantId)
+    {
+        if (User.IsInRole(ApplicationRoles.PlatformOwner))
+        {
+            return true;
+        }
+
+        var currentRestaurantId = await GetCurrentRestaurantIdAsync();
+        return currentRestaurantId is not null && orderRestaurantId == currentRestaurantId;
     }
 
     [Authorize(Policy = AuthorizationPolicies.PlatformOwnerOnly)]
@@ -206,6 +247,14 @@ public class OrderController : ControllerBase
             return NotFound(new { message = "Order not found." });
         }
 
+        // Confine non-PlatformOwner admins to their own restaurant. Answer cross-tenant reads as
+        // "not found" rather than 403 so this endpoint cannot be used to confirm an order id exists
+        // in another restaurant (AUDIT-07).
+        if (!await CanAccessRestaurantOrderAsync(order.RestaurantId))
+        {
+            return NotFound(new { message = "Order not found." });
+        }
+
         return Ok(MapToResponse(order));
     }
 
@@ -296,6 +345,19 @@ public class OrderController : ControllerBase
 
         await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
         var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        // Lock the order row before reading its status. A customer cancel and a kitchen accept can
+        // arrive together: the accept guards itself with a conditional update, but this path read the
+        // status and then wrote Cancelled over whatever committed in between — accepting an order and
+        // then cancelling it, handing back stock the kitchen had already committed (AUDIT-05). Taking
+        // the row lock first serialises the two. If the accept won, the tracked read below sees
+        // Accepted and the cancellable checks return 409; if the cancel won, the accept's conditional
+        // update matches zero rows and it is the one that 409s.
+        _ = await _dbContext.Orders
+            .FromSql($"SELECT * FROM \"Orders\" WHERE \"Id\" = {id} FOR UPDATE")
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
+
         var order = await _dbContext.Orders
             .Include(item => item.OrderItems)
                 .ThenInclude(item => item.SelectedOptions)
@@ -784,211 +846,41 @@ public class OrderController : ControllerBase
         return Ok(MapToCustomerRefundRequestResponse(refundRequest));
     }
 
+    // The raw admin order write endpoints below (create / replace / status / delete) predate the
+    // per-tenant AdminOrdersController and its transition policy. As shipped they wrote across
+    // tenants (an Admin who knew another restaurant's order id could change or delete it, AUDIT-07),
+    // skipped the payment gate, stock release and status-change rules the modern API enforces, and
+    // the PUT could not even persist a valid same-tenant edit (it threw on save, AUDIT-08). Nothing
+    // in the web app or the test suite calls them. Rather than keep a second, weaker write path,
+    // they are retired: callers are pointed at /api/admin/orders and its transition endpoints.
+    private IActionResult LegacyOrderWriteRetired() =>
+        StatusCode(StatusCodes.Status410Gone, new
+        {
+            message = "This endpoint has been retired. Manage orders through /api/admin/orders "
+                + "and its transition endpoints."
+        });
+
     [HttpPost]
     [Authorize(Policy = AuthorizationPolicies.AdminApi)]
-    public async Task<IActionResult> CreateOrder(
-        [FromBody] CreateOrderRequest request,
-        CancellationToken cancellationToken)
-    {
-        if (request is null)
-        {
-            return BadRequest(new { message = "Order data is required." });
-        }
+    public IActionResult CreateOrder([FromBody] CreateOrderRequest request) =>
+        LegacyOrderWriteRetired();
 
-        if (request.RestaurantId == Guid.Empty)
-        {
-            return BadRequest(new { message = "restaurantId is required." });
-        }
+    [HttpPut("{id:guid}")]
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    public IActionResult UpdateOrder(Guid id, [FromBody] CreateOrderRequest request) =>
+        LegacyOrderWriteRetired();
 
-        if (request.Items is null || request.Items.Count == 0)
-        {
-            return BadRequest(new { message = "Order must contain at least one item." });
-        }
+    [HttpPut("{id:guid}/status")]
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    public IActionResult UpdateStatus(Guid id, [FromBody] UpdateOrderStatusRequest request) =>
+        LegacyOrderWriteRetired();
 
-        if (!Enum.TryParse<PaymentMethod>(request.PaymentMethod, true, out var paymentMethod) ||
-            !Enum.IsDefined(paymentMethod))
-        {
-            return BadRequest(new { message = "Invalid payment method." });
-        }
+    [HttpDelete("{id:guid}")]
+    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
+    public IActionResult DeleteOrder(Guid id) =>
+        LegacyOrderWriteRetired();
 
-        var buildResult = await BuildOrderItemsAsync(request, cancellationToken);
-
-        if (buildResult.ValidationErrors.Count > 0)
-        {
-            return BadRequest(new { message = "Order validation failed.", errors = buildResult.ValidationErrors });
-        }
-
-        var now = DateTime.UtcNow;
-        var orderNumber = string.IsNullOrWhiteSpace(request.OrderNumber)
-            ? GenerateOrderNumber()
-            : request.OrderNumber.Trim();
-
-        var restaurant = await _dbContext.Restaurants
-            .AsNoTracking()
-            .FirstOrDefaultAsync(
-                item => item.Id == request.RestaurantId && item.IsActive,
-                cancellationToken);
-
-        if (restaurant is null)
-        {
-            return NotFound(new { message = "Restaurant is not available." });
-        }
-
-        TableSession? tableSession = null;
-        if (request.TableId.HasValue)
-        {
-            var tableIsActive = await _dbContext.RestaurantTables
-                .AsNoTracking()
-                .AnyAsync(
-                    table =>
-                        table.Id == request.TableId.Value &&
-                        table.RestaurantId == request.RestaurantId &&
-                        table.IsActive,
-                    cancellationToken);
-
-            if (!tableIsActive)
-            {
-                return Conflict(new { message = "Table is not available for this restaurant." });
-            }
-
-            tableSession = await _tableSessionService.GetOrCreateOpenSessionAsync(
-                request.RestaurantId,
-                request.TableId.Value,
-                now,
-                cancellationToken);
-        }
-
-        var order = new Order
-        {
-            Id = Guid.NewGuid(),
-            RestaurantId = request.RestaurantId,
-            TableId = request.TableId,
-            TableSessionId = tableSession?.Id,
-            CustomerId = request.CustomerId,
-            OrderNumber = orderNumber,
-            OrderType = (OrderType)request.OrderType,
-            Status = OrderStatus.Pending,
-            PaymentStatus = PaymentStatus.Unpaid,
-            PaymentMethod = paymentMethod,
-            TotalAmount = PricingCalculator.CalculateTotal(buildResult.OrderItems.Select(item => (item.Quantity, item.UnitPrice))),
-            CustomerNote = request.CustomerNote,
-            ScheduledTime = request.ScheduledTime,
-            CreatedAt = now
-        };
-
-        // The reservation must commit with the order, so both live in one transaction. It also
-        // covers the pickup-number allocation below.
-        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
-
-        var unavailableItemIds = await _menuItemStockService.TryReserveAsync(
-            BuildRequestedQuantities(buildResult.OrderItems),
-            cancellationToken);
-
-        if (unavailableItemIds.Count > 0)
-        {
-            await transaction.RollbackAsync(cancellationToken);
-            return Conflict(new
-            {
-                message = "Some items sold out while the order was being placed.",
-                items = DescribeUnavailableItems(unavailableItemIds, buildResult.OrderItems)
-            });
-        }
-
-        // In the same transaction as the dish: an order that takes the last portion of a dish and
-        // finds its tracked extra gone must take neither, or the kitchen owes a plate it cannot make.
-        var unavailableOptionIds = await _menuItemStockService.TryReserveOptionsAsync(
-            OrderOptionStock.RequestedQuantities(buildResult.OrderItems),
-            cancellationToken);
-
-        if (unavailableOptionIds.Count > 0)
-        {
-            await transaction.RollbackAsync(cancellationToken);
-            return Conflict(new
-            {
-                message = "Some options sold out while the order was being placed.",
-                options = DescribeUnavailableOptions(unavailableOptionIds, buildResult.OrderItems)
-            });
-        }
-
-        await _orderPickupNumberService.AssignPickupNumberAsync(order, restaurant, now, cancellationToken);
-
-        foreach (var orderItem in buildResult.OrderItems)
-        {
-            orderItem.OrderId = order.Id;
-            order.OrderItems.Add(orderItem);
-        }
-
-        await _orderAutoAcceptanceService.TryAcceptAsync(order, cancellationToken);
-        await _dbContext.Orders.AddAsync(order, cancellationToken);
-        _reportLogWriter.AddAudit(
-            "Order.Created",
-            "Order",
-            order.Id.ToString(),
-            order.RestaurantId,
-            $"Order {order.OrderNumber} created.",
-            after: new
-            {
-                order.Id,
-                order.OrderNumber,
-                order.RestaurantId,
-                order.TableId,
-                order.CustomerId,
-                order.OrderType,
-                order.Status,
-                order.PaymentStatus,
-                order.PaymentMethod,
-                order.TotalAmount
-            });
-        _reportLogWriter.AddOrderEvent(
-            order,
-            "order.created",
-            $"Order {order.OrderNumber} created.",
-            new
-            {
-                order.OrderType,
-                order.Status,
-                order.PaymentStatus,
-                order.PaymentMethod,
-                order.TotalAmount
-            });
-        await _dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-
-        await _dbContext.Entry(order).Reference(item => item.Restaurant).LoadAsync(cancellationToken);
-
-        if (order.TableId.HasValue)
-        {
-            await _dbContext.Entry(order).Reference(item => item.Table).LoadAsync(cancellationToken);
-        }
-
-        _logger.LogInformation("Order {OrderNumber} created for restaurant {RestaurantId}", orderNumber, request.RestaurantId);
-        await _orderRealtimeNotifier.OrderCreatedAsync(order, cancellationToken);
-
-        return CreatedAtAction(nameof(GetOrder), new { id = order.Id }, MapToResponse(order));
-    }
-
-    /// <summary>
-    /// Totals per menu item, since the same item can appear on several order lines. Lines whose
-    /// menu item has since been deleted carry no id and cannot be stock-tracked, so they are
-    /// skipped.
-    /// </summary>
-    /// <summary>
-    /// Whether one extra on a line may be refunded for the amount asked, or why not.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Three questions in order, because a later one is meaningless if an earlier one fails. Is
-    /// this extra on this line at all; can an extra of this kind be refunded on its own — a
-    /// <c>Replace</c> became the price rather than adding to it, a <c>Remove</c> was a discount, a
-    /// free extra cost nothing, and an order that predates the type snapshot cannot be split; and
-    /// is the amount within what this extra actually contributed, less whatever has already gone
-    /// back for it.
-    /// </para>
-    /// <para>
-    /// The line's own balance is not checked here and does not need to be. A line refunded by its
-    /// parts is never also refunded whole, so the parts can never add up to more than the line.
-    /// </para>
-    /// </remarks>
+    // Refund-line helpers used by the customer refund flow above and by PublicCartsController.
     /// <returns>The message to refuse with, or null when the selection is good.</returns>
     private static string? ValidateModifierSelection(
         OrderItem orderItem,
@@ -1059,152 +951,6 @@ public class OrderController : ControllerBase
                 .FirstOrDefault(option => option.MenuItemOptionId == id)?.OptionNameSnapshot ?? "Unknown option")
             .Distinct()
             .ToList();
-
-    [HttpPut("{id:guid}")]
-    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
-    public async Task<IActionResult> UpdateOrder(
-        Guid id,
-        [FromBody] CreateOrderRequest request,
-        CancellationToken cancellationToken)
-    {
-        if (request is null)
-        {
-            return BadRequest(new { message = "Order data is required." });
-        }
-
-        if (!Enum.IsDefined(typeof(OrderStatus), request.Status))
-        {
-            return BadRequest(new { message = "Invalid order status." });
-        }
-
-        if (!Enum.TryParse<PaymentMethod>(request.PaymentMethod, true, out var paymentMethod) ||
-            !Enum.IsDefined(paymentMethod))
-        {
-            return BadRequest(new { message = "Invalid payment method." });
-        }
-
-        var existingOrder = await _dbContext.Orders
-            .Include(order => order.OrderItems)
-                .ThenInclude(item => item.SelectedOptions)
-            .Include(order => order.Table)
-            .FirstOrDefaultAsync(order => order.Id == id, cancellationToken);
-
-        if (existingOrder is null)
-        {
-            return NotFound(new { message = "Order not found." });
-        }
-
-        if ((OrderStatus)request.Status != existingOrder.Status)
-        {
-            return Conflict(new { message = "Use the admin order transition API to change order status." });
-        }
-
-        if (request.RestaurantId == Guid.Empty)
-        {
-            return BadRequest(new { message = "restaurantId is required." });
-        }
-
-        if (request.Items is null || request.Items.Count == 0)
-        {
-            return BadRequest(new { message = "Order must contain at least one item." });
-        }
-
-        var buildResult = await BuildOrderItemsAsync(request, cancellationToken);
-
-        if (buildResult.ValidationErrors.Count > 0)
-        {
-            return BadRequest(new { message = "Order validation failed.", errors = buildResult.ValidationErrors });
-        }
-
-        _dbContext.OrderItems.RemoveRange(existingOrder.OrderItems);
-        existingOrder.OrderItems.Clear();
-
-        existingOrder.RestaurantId = request.RestaurantId;
-        existingOrder.TableId = request.TableId;
-        existingOrder.CustomerId = request.CustomerId;
-        existingOrder.OrderNumber = string.IsNullOrWhiteSpace(request.OrderNumber)
-            ? existingOrder.OrderNumber
-            : request.OrderNumber.Trim();
-        existingOrder.OrderType = (OrderType)request.OrderType;
-        existingOrder.PaymentMethod = paymentMethod;
-        existingOrder.TotalAmount = PricingCalculator.CalculateTotal(buildResult.OrderItems.Select(item => (item.Quantity, item.UnitPrice)));
-        existingOrder.CustomerNote = request.CustomerNote;
-        existingOrder.ScheduledTime = request.ScheduledTime;
-        existingOrder.TicketRevision += 1;
-        existingOrder.UpdatedAt = DateTime.UtcNow;
-
-        foreach (var orderItem in buildResult.OrderItems)
-        {
-            orderItem.OrderId = existingOrder.Id;
-            existingOrder.OrderItems.Add(orderItem);
-        }
-
-        await _dbContext.SaveChangesAsync(cancellationToken);
-        await _orderRealtimeNotifier.OrderUpdatedAsync(existingOrder, cancellationToken);
-
-        return NoContent();
-    }
-
-    [HttpPut("{id:guid}/status")]
-    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
-    public async Task<IActionResult> UpdateStatus(
-        Guid id,
-        [FromBody] UpdateOrderStatusRequest request,
-        CancellationToken cancellationToken)
-    {
-        if (!Enum.IsDefined(typeof(OrderStatus), request.NewStatus))
-        {
-            return BadRequest(new { message = "Invalid order status." });
-        }
-
-        var order = await _dbContext.Orders.FindAsync(new object?[] { id }, cancellationToken);
-
-        if (order is null)
-        {
-            return NotFound(new { message = "Order not found." });
-        }
-
-        var nextStatus = (OrderStatus)request.NewStatus;
-        var history = new OrderStatusHistory
-        {
-            OrderId = order.Id,
-            PreviousStatus = order.Status,
-            NewStatus = nextStatus,
-            Action = "StatusChanged",
-            ChangedByUserId = User.FindFirstValue(ClaimTypes.NameIdentifier),
-            CreatedAt = DateTime.UtcNow
-        };
-
-        order.Status = nextStatus;
-        order.UpdatedAt = DateTime.UtcNow;
-
-        _dbContext.OrderStatusHistories.Add(history);
-        await _dbContext.SaveChangesAsync(cancellationToken);
-        await _orderRealtimeNotifier.OrderUpdatedAsync(order, cancellationToken);
-
-        return NoContent();
-    }
-
-    [HttpDelete("{id:guid}")]
-    [Authorize(Policy = AuthorizationPolicies.AdminApi)]
-    public async Task<IActionResult> DeleteOrder(Guid id, CancellationToken cancellationToken)
-    {
-        var order = await _dbContext.Orders
-            .Include(item => item.OrderItems)
-            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
-
-        if (order is null)
-        {
-            return NotFound(new { message = "Order not found." });
-        }
-
-        _dbContext.OrderItems.RemoveRange(order.OrderItems);
-        _dbContext.Orders.Remove(order);
-        await _dbContext.SaveChangesAsync(cancellationToken);
-        await _orderRealtimeNotifier.OrderDeletedAsync(order, cancellationToken);
-
-        return NoContent();
-    }
 
     private async Task<OrderItemBuildResult> BuildOrderItemsAsync(
         CreateOrderRequest request,

@@ -628,9 +628,23 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Session expired. Please log in again." });
         }
 
+        // A disabled or locked-out account must not be able to mint a fresh access token from a
+        // still-valid refresh token. Disabling also revokes the refresh family, so this is a second
+        // line of defence for any token that slipped through before that ran.
+        if (await _userManager.IsLockedOutAsync(user))
+        {
+            await _refreshTokenService.RevokeAllForUserAsync(user.Id, GetClientIpAddress());
+            return Unauthorized(new { message = "You have been signed out. Please log in again." });
+        }
+
         var roles = await _userManager.GetRolesAsync(user);
         var userPayload = await BuildUserPayloadAsync(user, roles);
-        var token = _jwtTokenService.GenerateToken(user.Id, user.Email, user.UserName, roles);
+        var token = _jwtTokenService.GenerateToken(
+            user.Id,
+            user.Email,
+            user.UserName,
+            roles,
+            await _userManager.GetSecurityStampAsync(user));
 
         _reportLogWriter.AddAudit(
             "Auth.TokenRefreshed",
@@ -2211,7 +2225,8 @@ public class AuthController : ControllerBase
             user.Id,
             user.Email,
             user.UserName,
-            roles);
+            roles,
+            await _userManager.GetSecurityStampAsync(user));
         var refreshToken = await _refreshTokenService.IssueAsync(user.Id, GetClientIpAddress());
 
         _reportLogWriter.AddAudit(
