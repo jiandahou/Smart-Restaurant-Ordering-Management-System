@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using DineFlow.Api.Services;
 using DineFlow.Application.Authorization;
 using DineFlow.Infrastructure.Carts;
 using DineFlow.Infrastructure.Identity;
@@ -18,9 +19,45 @@ public sealed class LocalRandomFindingsRegressionTests : IAsyncLifetime
 {
     private readonly DineFlowApiFactory _api = new();
 
+    /// Midnight to midnight on every day, which the hours service reads as a full day.
+    private const string AlwaysOpenHoursJson =
+        "[{\"dayOfWeek\":0,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]},{\"dayOfWeek\":1,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]},{\"dayOfWeek\":2,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]},{\"dayOfWeek\":3,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]},{\"dayOfWeek\":4,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]},{\"dayOfWeek\":5,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]},{\"dayOfWeek\":6,\"isOpen\":true,\"windows\":[{\"opensAt\":\"00:00\",\"closesAt\":\"00:00\"}]}]";
+
     public Task InitializeAsync() => _api.InitializeAsync();
 
     public Task DisposeAsync() => _api.DisposeAsync();
+
+    /// <summary>
+    /// Guards the fixture rather than the product. Every cart in this file needs its restaurant to
+    /// be taking orders, and the entity default is 09:00-21:00 — so the first CI run answered 409
+    /// "outside opening hours" on four tests that had passed locally, purely because the runner was
+    /// at 22:08 in the seeded timezone. Runs without PostgreSQL, so the constant cannot rot
+    /// unnoticed on a machine that skips the rest of this class.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    [InlineData(9)]
+    [InlineData(13)]
+    [InlineData(22)]
+    [InlineData(23)]
+    public void TheSeededRestaurantIsOpenAtEveryHour(int hourOfDay)
+    {
+        var restaurant = new RestaurantEntity
+        {
+            Id = Guid.NewGuid(),
+            Name = "Fixture Kitchen",
+            Timezone = "Australia/Adelaide",
+            IsActive = true,
+            OpeningHoursJson = AlwaysOpenHoursJson
+        };
+
+        // Walked in UTC across a whole day, so every local hour in that timezone is covered.
+        var midnightUtc = new DateTime(2026, 9, 16, 0, 0, 0, DateTimeKind.Utc);
+        Assert.True(
+            RestaurantOperatingHoursService.IsAcceptingOrders(restaurant, midnightUtc.AddHours(hourOfDay)),
+            $"the fixture restaurant refused orders {hourOfDay}h into the day");
+    }
 
     // ---- #12 · Guest checkout retry handed back an unusable credential ------------------------
 
@@ -111,6 +148,8 @@ public sealed class LocalRandomFindingsRegressionTests : IAsyncLifetime
         var guest = _api.CreateClient();
         var join = await guest.PostAsJsonAsync("/api/public/carts/join",
             new { restaurantId, orderType = "Takeaway" });
+        if (!join.IsSuccessStatusCode)
+            Assert.Fail($"Cart fixture join failed: {(int)join.StatusCode} {await join.Content.ReadAsStringAsync()}");
         var joined = await join.Content.ReadFromJsonAsync<JoinPayload>();
         guest.DefaultRequestHeaders.Add("X-Cart-Participant-Token", joined!.ParticipantToken);
         await guest.PostAsJsonAsync($"/api/public/carts/{joined.Cart.Id}/items",
@@ -137,6 +176,8 @@ public sealed class LocalRandomFindingsRegressionTests : IAsyncLifetime
         var guest = _api.CreateClient();
         var join = await guest.PostAsJsonAsync("/api/public/carts/join",
             new { restaurantId, orderType = "Takeaway" });
+        if (!join.IsSuccessStatusCode)
+            Assert.Fail($"Cart fixture join failed: {(int)join.StatusCode} {await join.Content.ReadAsStringAsync()}");
         var joined = await join.Content.ReadFromJsonAsync<JoinPayload>();
         guest.DefaultRequestHeaders.Add("X-Cart-Participant-Token", joined!.ParticipantToken);
         await guest.PostAsJsonAsync($"/api/public/carts/{joined.Cart.Id}/items",
@@ -224,7 +265,12 @@ public sealed class LocalRandomFindingsRegressionTests : IAsyncLifetime
                 Id = restaurantId,
                 Name = restaurantName,
                 Timezone = "Australia/Adelaide",
-                IsActive = true
+                IsActive = true,
+                // Open around the clock. The entity default is 09:00-21:00, which made every cart
+                // in this file depend on what time the suite happened to run: locally it passed in
+                // the afternoon and CI answered 409 "outside opening hours" at 22:08 Adelaide. None
+                // of these tests are about trading hours.
+                OpeningHoursJson = AlwaysOpenHoursJson
             });
             db.MenuCategories.Add(new MenuCategory
             {
