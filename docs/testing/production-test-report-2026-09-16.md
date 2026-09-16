@@ -65,6 +65,39 @@
 
 详情：[本地随机测试报告](local-random-test-report-2026-09-16.md)。本地可重跑脚本与 JSON 证据位于 `test-results/20260916-130254/`（该目录被 gitignore 忽略，不随共享仓库传递；本总报告已包含全部缺陷复现步骤）。未修改业务代码。
 
+### 2.4 本地邮箱测试
+
+用户已登录两个测试 Gmail；当前实际执行账号为 `burnmydread8@gmail.com`。使用本地邮件配置回跳 `http://10.118.160.10:5173`；已确认地址可用且浏览器权限获批。未操作生产账号。
+
+| 用例 | 状态 | 实际观察 |
+|---|---|---|
+| Magic Link 请求 UI | PASS | Email link 输入测试邮箱，显示通用发送提示；发送时按钮禁用 |
+| Magic Link 邮件送达 | PASS | 09-16 16:35 邮件收到，后端记录发信成功；但在 Spam，见下一行 |
+| 邮件进入正常收件箱 | FAIL（关联 #6，非新缺陷） | 本地 Magic Link 和 16:36 密码重置信都进 Gmail Spam；Gmail 提示类似过去被识别为垃圾邮件的消息。不能仅据此断定 SPF/DKIM/DMARC 失败 |
+| Magic Link 首次登录 | PASS | 打开本轮新邮件链接后进入 `/me`，显示正确邮箱与 Customer 角色。此行在 MFA 未启用时执行，本身不构成防绕过证据——防绕过见下方 EMAIL-04 |
+| Magic Link 同一链接重放 | PASS | 再点击同一邮件按钮，显示 `Magic link sign-in failed`，没有再次成功登录 |
+| 密码重置请求与送达 | PASS | User Center → Reset my password；收到新重置信，链接指向本地 `/reset-password` |
+| 密码重置表单 | PASS | 显示 Set new password、确认框、8 字符及大小写/数字/符号要求 |
+| 密码重置提交 | PASS | 用户完成提交；本地审计 `Auth.PasswordResetCompleted`，2026-09-16 07:09:38 UTC。未读取新密码 |
+| 重置链接重放、新密码登录恢复 | 本地 NOT RUN，**已由生产轮覆盖** | 本地未跑：当时 `/me` 仍有旧会话，不能据此判断新密码登录成功。生产轮已验证：重放同一重置链接 → 400「invalid or expired」，新密码可登录、旧密码 401（PROF-PWD-09d/e/f，见 [profile-security 报告](profile-security-test-run-2026-09-16.md)） |
+| 邮箱 MFA 设置请求 UI | PASS | User Center → MFA → Email code，显示 Email MFA code sent 与六位验证码设置弹窗 |
+| 邮箱 MFA 启用 | PASS | 用户完成设置；界面确认 Email code ON、Login ON，Sensitive actions OFF |
+| Magic Link 不绕过 MFA（EMAIL-04） | PASS | 退出 LAN 本地会话后使用 16:44 新邮件，进入 Verify it is you 六位验证码挑战，没有直接进入账户 |
+| MFA 完成前受保护页面 | PASS | 同浏览器另开 `/me`，加载后跳转 `/login`，未显示账户资料 |
+| MFA 错误验证码 | PASS | 提交一次错误六位码，显示 That code is not right，仍停留挑战页 |
+| MFA 正确验证码及登录恢复 | PASS | 用户输入正确验证码并提交；浏览器核验进入 `/me`，邮箱为指定测试账号、角色 Customer，显示 Protected Login |
+| MFA 登录后刷新会话 | PASS | 刷新 `/me` 后仍显示相同测试账号、Customer 与 Protected Login，未丢失会话 |
+
+统计：14 PASS / 1 FAIL（已有投递问题）/ 0 BLOCKED / 1 本地未跑但已由生产轮覆盖。没有保存邮件 token、验证码或新密码到报告。
+
+**与生产轮的关系**：本节在**本地**环境走 UI 逐页验证，生产轮（[profile-security 报告](profile-security-test-run-2026-09-16.md)）走 API 验证同一批语义。两边在 Magic Link 不绕过 MFA、链接单次消费、邮箱验证码单次消费上**独立得到一致结论**，互为交叉验证而非重复计数——**两处统计不相加**。生产轮另外覆盖了本地没做的：旧验证码批量失效（连发 7 个只有最新有效）、验证码与 challenge 绑定不可串用、四种方式都关不掉 MFA、关闭后 secret 确实清除。
+
+**仍未完成**：第二邮箱交叉验证、邮箱变更流程。Passkey 需真实硬件手势，两边都做不了。
+
+> **遗留待处理**：本地测试账号的 **Email MFA 与 Login protection 仍处于启用状态**，未关闭。
+> 生产轮的测试账号（`burnmydread4+dineflowqa20260916@gmail.com`）已确认关闭并恢复干净。
+> 本地这个账号若还要复用，需要先用邮件验证码关掉，或直接废弃。
+
 ## 3. 各模块覆盖进度矩阵
 
 | 模块 | 用例数 | 状态 | 说明 |
