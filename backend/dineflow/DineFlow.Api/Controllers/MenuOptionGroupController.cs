@@ -104,6 +104,12 @@ public class MenuOptionGroupController : ControllerBase
         if (request.MaxSelections < 1)
             return BadRequest(new { message = "MaxSelections must be at least 1." });
 
+        // A required group is already held at 1 or more below. An optional one had no floor at all,
+        // so minSelections: -2 was stored as written — a group asking for a negative number of
+        // choices, which no rule downstream is built to read.
+        if (request.MinSelections < 0)
+            return BadRequest(new { message = "MinSelections cannot be negative." });
+
         if (request.IsRequired && request.MinSelections < 1)
             return BadRequest(new { message = "Required groups must have MinSelections >= 1." });
 
@@ -199,6 +205,12 @@ public class MenuOptionGroupController : ControllerBase
 
         if (request.MaxSelections < 1)
             return BadRequest(new { message = "MaxSelections must be at least 1." });
+
+        // A required group is already held at 1 or more below. An optional one had no floor at all,
+        // so minSelections: -2 was stored as written — a group asking for a negative number of
+        // choices, which no rule downstream is built to read.
+        if (request.MinSelections < 0)
+            return BadRequest(new { message = "MinSelections cannot be negative." });
 
         if (request.IsRequired && request.MinSelections < 1)
             return BadRequest(new { message = "Required groups must have MinSelections >= 1." });
