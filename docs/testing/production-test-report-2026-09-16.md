@@ -87,9 +87,11 @@
 | 4 | **中（对账/合规）** | **payments 报表导出不含金额与币种**：`PaymentEventLog` 实体本身没有金额字段，唯一可能装金额的 `DataJson` 只对 PlatformOwner 导出。保留期 2555 天（7 年）的支付证据，餐厅 Owner/Admin 导出来**看不到多少钱** | 给 `PaymentEventLog` 加 `AmountCents`+`Currency` 并在写入时填充 |
 | 5 | 低（API 契约） | **不传 `sortBy` 时 audit/orders/payments 返回 400，activity 却正常**：`PagedRequest.SortBy` 默认 null 而排序无默认值。前端写死了 `createdAt` 所以 UI 碰不到，但直接调 API 会踩。**这也更正了 09-15 报告「需正确日期参数」的误判——与日期无关** | `ApplyAuditSorting` 给 `createdAt` 默认值 |
 | 6 | **中（影响注册漏斗）** | **注册确认信进 Gmail 垃圾箱**（「与过去被判定为垃圾邮件的消息相似」，发信域 `noreply@theunknownfish.com`）。不点确认信就无法登录，等于新顾客注册在最后一步断掉，而接口返回的是 `confirmationEmailSent: true`，用户侧看不出原因 | **非代码缺陷**——邮件确实发出且被 Resend 接受。查 `theunknownfish.com` 的 SPF/DKIM/DMARC 是否为 Resend 正确配置、该域是否已在 Resend 完成验证 |
-| 7 | 提示 | Klarna 在连接账户上是启用的，但异步支付路径（`checkout.session.async_payment_*`）零覆盖 | 要么正式环境关掉，要么补测 |
-| 8 | 待确认（承接 09-15） | MENU-ALG-04 的 `allergenInfoLastVerifiedAt` | 浏览器复核 |
-| 9 | 说明（承接 09-15） | `owner@dineflow.com` 密码已被改动 | Platform Owner 专属用例需新密码后补测 |
+| 7 | **中（可轰炸邮箱）** | **两个已鉴权的发信端点完全没有限流**：`POST /api/auth/mfa/email/setup` 与 `POST /api/auth/mfa/sensitive/email-code` 连发 6 次全部 200，无 429、无 `Retry-After`。**实测连发 7 次 → 7 封全部送达**。对比：匿名的 `request-password-reset` / `request-magic-link` **是有限流的** | 把匿名端点已有的限流套到这两个上，按 userId + 收件地址计数并返回 `Retry-After`。影响：盗号者可用邮件洪水淹掉安全告警、无限消耗 Resend 额度、拉低发信域信誉（正是问题 #6 的成因） |
+| 8 | **待隔离**（非结论） | **失败尝试之后合法的密码重置链接失效**：先做几次篡改 token 的尝试，之后真链接也 400；而全新链接直接走正常路径则成功。若成立则是**账号找回的可用性攻击**（userId 就在链接里）。但应用层无自定义作废逻辑，也可能只是从 Gmail 会话里抓到了旧邮件的链接 | 复现步骤见 [profile-security 报告 #3](profile-security-test-run-2026-09-16.md)。**未确认，不要当缺陷处理** |
+| 9 | 提示 | Klarna 在连接账户上是启用的，但异步支付路径（`checkout.session.async_payment_*`）零覆盖 | 要么正式环境关掉，要么补测 |
+| 10 | 待确认（承接 09-15） | MENU-ALG-04 的 `allergenInfoLastVerifiedAt` | 浏览器复核 |
+| 11 | 说明（承接 09-15） | `owner@dineflow.com` 密码已被改动 | Platform Owner 专属用例需新密码后补测 |
 
 ## 5. 本轮产生的测试数据（**未清理**）
 
