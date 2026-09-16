@@ -205,6 +205,23 @@ builder.Services.AddRateLimiter(options =>
                 QueueLimit = 0
             }));
 
+    // Same budget as AuthenticationEmail, partitioned by user id. These endpoints require a signed-in
+    // caller and always mail that account's own address, so the account is the thing to count — an
+    // IP partition would let one stolen session rotate addresses, and would make a shared office
+    // connection share a single allowance. Falls back to the remote address only if the claim is
+    // somehow absent, which for an [Authorize]d endpoint should not happen.
+    options.AddPolicy(RateLimitPolicies.SignedInEmail, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.User.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 5,
+                Window = TimeSpan.FromMinutes(5),
+                QueueLimit = 0
+            }));
+
     options.OnRejected = async (context, cancellationToken) =>
     {
         context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;

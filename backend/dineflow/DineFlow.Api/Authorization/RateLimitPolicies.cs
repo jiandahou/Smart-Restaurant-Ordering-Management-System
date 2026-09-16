@@ -27,4 +27,10 @@ public static class RateLimitPolicies
     /// confirmation resends. Throttled harder because the abuse here is using DineFlow to
     /// deliver unwanted mail, not guessing a secret.
     public const string AuthenticationEmail = "authentication-email";
+
+    /// Endpoints that send mail to the signed-in account's own address — the MFA setup code and the
+    /// sensitive-action code. Same abuse as <see cref="AuthenticationEmail"/>, so the same ceiling,
+    /// but partitioned by user rather than by address: the recipient is decided by the account, and
+    /// a restaurant whose staff share one outbound IP should not share one mail budget.
+    public const string SignedInEmail = "signed-in-email";
 }

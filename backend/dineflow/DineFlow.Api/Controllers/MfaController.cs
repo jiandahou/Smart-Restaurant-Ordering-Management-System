@@ -119,6 +119,7 @@ public sealed class MfaController : ControllerBase
         });
     }
 
+    [EnableRateLimiting(RateLimitPolicies.SignedInEmail)]
     [HttpPost("sensitive/email-code")]
     public async Task<IActionResult> SendSensitiveActionEmailCode(CancellationToken cancellationToken)
     {
@@ -267,6 +268,7 @@ public sealed class MfaController : ControllerBase
         });
     }
 
+    [EnableRateLimiting(RateLimitPolicies.SignedInEmail)]
     [HttpPost("email/setup")]
     public async Task<IActionResult> SetupEmail(CancellationToken cancellationToken)
     {
