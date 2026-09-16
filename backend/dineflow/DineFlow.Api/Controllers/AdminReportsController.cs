@@ -778,7 +778,11 @@ public class AdminReportsController : ControllerBase
 
     private static IOrderedQueryable<AuditLog>? ApplyAuditSorting(IQueryable<AuditLog> query, string? sortBy, bool descending)
     {
-        var normalizedSort = string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy.Trim().ToLowerInvariant();
+        // Lower-cased after the default is chosen, not before it: the default used to be the
+        // camel-cased "createdAt", which no branch of an ordinal string switch matches, so a
+        // caller who omitted sortBy fell through to null and was answered 400 "Unsupported
+        // sortBy value" for a value they never sent.
+        var normalizedSort = (string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy).Trim().ToLowerInvariant();
         IOrderedQueryable<AuditLog>? sorted = normalizedSort switch
         {
             "createdat" => descending ? query.OrderByDescending(log => log.CreatedAt) : query.OrderBy(log => log.CreatedAt),
@@ -793,7 +797,11 @@ public class AdminReportsController : ControllerBase
 
     private static IOrderedQueryable<OrderEventLog>? ApplyOrderEventSorting(IQueryable<OrderEventLog> query, string? sortBy, bool descending)
     {
-        var normalizedSort = string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy.Trim().ToLowerInvariant();
+        // Lower-cased after the default is chosen, not before it: the default used to be the
+        // camel-cased "createdAt", which no branch of an ordinal string switch matches, so a
+        // caller who omitted sortBy fell through to null and was answered 400 "Unsupported
+        // sortBy value" for a value they never sent.
+        var normalizedSort = (string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy).Trim().ToLowerInvariant();
         IOrderedQueryable<OrderEventLog>? sorted = normalizedSort switch
         {
             "createdat" => descending ? query.OrderByDescending(log => log.CreatedAt) : query.OrderBy(log => log.CreatedAt),
@@ -808,7 +816,11 @@ public class AdminReportsController : ControllerBase
 
     private static IOrderedQueryable<PaymentEventLog>? ApplyPaymentEventSorting(IQueryable<PaymentEventLog> query, string? sortBy, bool descending)
     {
-        var normalizedSort = string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy.Trim().ToLowerInvariant();
+        // Lower-cased after the default is chosen, not before it: the default used to be the
+        // camel-cased "createdAt", which no branch of an ordinal string switch matches, so a
+        // caller who omitted sortBy fell through to null and was answered 400 "Unsupported
+        // sortBy value" for a value they never sent.
+        var normalizedSort = (string.IsNullOrWhiteSpace(sortBy) ? "createdAt" : sortBy).Trim().ToLowerInvariant();
         IOrderedQueryable<PaymentEventLog>? sorted = normalizedSort switch
         {
             "createdat" => descending ? query.OrderByDescending(log => log.CreatedAt) : query.OrderBy(log => log.CreatedAt),
