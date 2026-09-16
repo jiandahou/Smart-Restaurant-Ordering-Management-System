@@ -62,7 +62,7 @@
 | staff-orders | 212 | 🟡 抽测 | staff 可读订单、越权→403 |
 | cart | 294 | 🟡 抽测 | 下单→购物车→结账→下单、共享同步 |
 | notifications(SignalR) | — | 🟢 抽测 | Live 徽章、实时同步 |
-| front-counter | 182 | 🔴 未跑 | 需浏览器逐页 |
+| front-counter | 182 | 🟡 API 面已深跑 | 2026-09-16，见 [front-counter-test-run-2026-09-16.md](front-counter-test-run-2026-09-16.md)；59/60 PASS，1 个现金上限缺陷 |
 | profile-security | 157 | 🔴 未跑 | 需邮箱/TOTP/Passkey |
 | payment-system | 223 | 🟡 主链路已跑 | 2026-09-16 入驻完成后解锁，见 [payment-system-test-run-2026-09-16.md](payment-system-test-run-2026-09-16.md) |
 | real-device | 69 | 🔴 未跑 | 需真机/读屏 |
@@ -118,4 +118,6 @@
 1. ~~修 #1 选项组空名校验~~ 已修 (`3f66128`)
 2. ~~Stripe Connect 入驻后跑 payment-system~~ 主链路已跑；**剩 3DS/Radar/争议、Klarna 异步、其余成功卡矩阵**
 3. admin-menu 浏览器组(PAGE/IMG/REC/PUB) 与其余模块的浏览器逐页
-4. front-counter(182) / profile-security(157) / real-device(69) 仍未跑
+4. ~~front-counter(182)~~ API 面已跑；剩浏览器/打印/无障碍/并发双会话
+5. profile-security(157) / real-device(69) 仍未跑
+6. **修现金收款上限**（front-counter 报告问题 #1，前后端各一处）
