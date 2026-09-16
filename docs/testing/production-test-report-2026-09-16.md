@@ -1,6 +1,6 @@
 # DineFlow 生产测试总报告 — 2026-09-16
 
-> **一份自包含报告，供跨 session 接力。** 汇总 2026-09-16 对**生产环境**的测试结果。
+> **一份自包含报告，供跨 session 接力。** 汇总 2026-09-16 的生产测试，并合并本地分支随机测试。第 2.3 节及问题 #12–15 仅在本地复现，不能视为生产已验证。
 > 上一轮是 [production-test-report-2026-09-15.md](production-test-report-2026-09-15.md)，本轮在它的基础上推进。
 > 单元/集成测试（后端 730+ 前端 vitest）随 CI 每次 push 运行，不在此重复；本报告只覆盖**对活体系统的黑盒/E2E 校验**。
 
@@ -20,7 +20,8 @@
 - **09-15 的两个阻塞项都已解除**：选项组空名校验在 `3f66128` 修掉了；餐厅 A 完成 Stripe Connect 入驻，`payment-system` 从 ⛔ 变成可跑。
 - 本轮跑完两个模块的可自动化面：**payment-system** 与 **front-counter**，合计 **101 项断言，100 PASS / 1 FAIL**。
 - **在线支付主链路端到端打通**：下单 → Checkout → 支付 → 回跳 → webhook 对账 → 厨房接单 → 退款。
-- **1 个确认的代码缺陷**（现金收款无上限）、**2 个上线前必须处理的配置/数据问题**。见第 4 节。
+- payment-system/front-counter 阶段发现现金上限缺陷和 2 个配置/数据问题；后续 reports/profile-security 发现见第 4 节。
+- **本地随机测试新增 51 PASS / 4 FAIL（4 个独立缺陷，#12–15）**：Guest 重试凭证无效、删除购物车引用菜品 500、选项组负数下界、库存整数溢出。生产与本地统计分开，不累计为一次生产验收。
 
 ## 2. 本轮结果
 
@@ -53,6 +54,16 @@
 | 队列与线上线下边界 | 13/13 | **Stripe session 活着时禁止切柜台收款** → 挡住重复收款 |
 
 未跑：页面加载与实时恢复、搜索/分组细节、订单卡片内容、收据与打印路由、无障碍、并发双会话。
+
+### 2.3 本地分支随机测试（合并补充）
+
+环境：本地 Docker，`localhost:5173` / `localhost:5000`；分支 `jianda-payment-test-2026-09-16` @ `b383b05cb564c2e7b59005974990e703b4f0232b`，初始工作区干净。后端起初还是 09-12 镜像，已用当前分支重建；以下只计重建后的结果。**51 PASS / 4 FAIL**，固定随机种子 `9162026`。
+
+通过：25 次随机加菜逐次核对行数量、总数与金额（最终 71 份 / 230.75）；8 次相同幂等键并发只加 1 份；5 轮减数量/删除竞争均收敛为空、无 500；8 请求竞争库存 3 恰好 3 成功；两个独立购物车争最后一份 checkout 得到 200/409；用有效原始凭证并发取消得到 200/409/409、库存只归还一次。数量边界、备注 4000/4001 字边界、Guest Unicode/RTL 文本存取、购物车凭证隔离和法律确认拒绝均通过；空白选项组名修复回归通过。
+
+未执行：本轮浏览器/打印、Stripe 退款、addon 库存专项、同桌多身份所有权和时间专项。**取消归还库存不等于退款归还库存通过**。HTML-like 备注存取通过不等于 UI/打印渲染安全通过。
+
+详情：[本地随机测试报告](local-random-test-report-2026-09-16.md)。本地可重跑脚本与 JSON 证据位于 `test-results/20260916-130254/`（该目录被 gitignore 忽略，不随共享仓库传递；本总报告已包含全部缺陷复现步骤）。未修改业务代码。
 
 ## 3. 各模块覆盖进度矩阵
 
@@ -92,6 +103,20 @@
 | 9 | 提示 | Klarna 在连接账户上是启用的，但异步支付路径（`checkout.session.async_payment_*`）零覆盖 | 要么正式环境关掉，要么补测 |
 | 10 | 待确认（承接 09-15） | MENU-ALG-04 的 `allergenInfoLastVerifiedAt` | 浏览器复核 |
 | 11 | 说明（承接 09-15） | `owner@dineflow.com` 密码已被改动 | Platform Owner 专属用例需新密码后补测 |
+| 12 | **P1 · 本地确认** | **Guest checkout 重试返回不可用新凭证**；同 orderId，但新凭证读不到订单、取消 403，旧凭证仍有效 | `PublicCartsController` 重试分支修改 `AsNoTracking` 实体，哈希未持久化；详见下方复现 |
+| 13 | **P1 · 本地确认** | **删除购物车引用的菜品返回 500** | `AdminMenuItemsController.DeleteItem` 未处理 `CartItems` 外键引用；需明确归档/下架或受控 409 策略 |
+| 14 | **P2 · 本地确认** | **可选选项组允许 `minSelections=-2`** | `MenuOptionGroupController.CreateGroup` 缺少非负下界；Update 同时检查 |
+| 15 | **P2 · 本地确认** | **库存 int.MaxValue 再加 1 返回 500** | `AdminMenuItemsController.UpdateStock` 数据库整数加法溢出，需上限校验 |
+
+### 本地新增缺陷的复现与验收
+
+**#12 / LOCAL-0916-01（独立复现三轮）**：Guest join → 加菜 → checkout，保存首次 `guestAccessToken` → 相同 cart 再 checkout。两次均 200 且 orderId 相同；分别调用 `POST /api/order/guest`，原凭证返回 1 单，新凭证返回 0 单；新凭证取消返回 403。重试响应确实含非空 token。源码重试分支约 884–915 行修改 hash 后 SaveChanges，但 `LoadOrderAsync` 约 1671 行 `AsNoTracking()`，修改未保存。首次响应丢失或客户端覆盖旧 token 后会失去订单访问。验收：重试新凭证能查询/取消；同时明确并测试多设备凭证更新行为。
+
+**#13 / LOCAL-0916-02**：创建临时菜品 → 加入购物车 → Admin `DELETE /api/admin/menu/items/{id}`，500 / PostgreSQL `23503` / `FK_CartItems_MenuItems_MenuItemId`。源码 DeleteItem 约 1009–1037 行直接 Remove/SaveChanges。验收：活跃/历史购物车引用都不会触发 500，顾客侧显示正确不可用提示或服务端给出可操作冲突信息。Development 堆栈不据此推定生产泄漏。
+
+**#14 / LOCAL-0916-03**：`POST /api/menu/items/{itemId}/option-groups`，传 `{name:"Negative bounds",minSelections:-2,maxSelections:1}`，返回 201 并保存 -2。验收：创建/更新均拒绝负数，0 和合法必选规则通过。
+
+**#15 / LOCAL-0916-04**：`PATCH /api/admin/menu/items/{id}/stock` 传 `{stockQuantity:2147483647}` 返回 200；随后传 `{adjustBy:1}` 返回 500。验收：越界受控拒绝，库存不被部分修改；并发加减仍原子。
 
 ## 5. 本轮产生的测试数据（**未清理**）
 
@@ -109,6 +134,10 @@
 
 ## 6. 接力指引
 
+本地数据收尾：新增的 3 个未支付订单均 Cancelled，库存各恢复为 1，专用订单菜品已下架；保留订单/审计证据。随机测试菜品已删除，早期限流遗留的购物车条目按精确 ID 清理；空购物车等待正常过期。这与第 5 节尚未清理的**生产**数据不同。
+
+邮箱接力：用户已完成两个 Gmail 账号登录；下一轮只测本地应用邮件链路。尚未记录本地邮件测试 PASS，不能沿用生产邮件结论。
+
 环境、seed 账号、餐厅 ID、跑法与注意事项，与
 [production-test-report-2026-09-15.md 第 6 节](production-test-report-2026-09-15.md#6-接力指引其他-session-接着跑)完全一致，此处不重复。
 两点补充：
@@ -121,6 +150,7 @@
 **优先接力项**
 
 1. **修问题 #1 现金上限**（前后端各一处 + 回归测试）
+   同时优先处理本地 P1 **#12 Guest 重试凭证**、**#13 菜品删除 500**；#14–15 为输入边界修复。
 2. **查 `theunknownfish.com` 的邮件投递配置**（问题 #6）——注册漏斗断在这里
 3. **PROF-MFA-29/30/31**（P0）：Magic Link / Google OAuth / Passkey 三条登录路径是否绕过 MFA
 4. payment-system 剩余：3DS / 争议 / Klarna 异步
