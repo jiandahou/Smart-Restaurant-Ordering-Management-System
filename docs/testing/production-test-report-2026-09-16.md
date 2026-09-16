@@ -72,7 +72,7 @@
 | staff-orders | 212 | 🟡 抽测 | staff 可读订单、越权 → 403 |
 | cart | 294 | 🟡 抽测 | 下单→购物车→结账→下单、共享同步 |
 | notifications(SignalR) | — | 🟢 抽测 | Live 徽章、实时同步 |
-| **profile-security** | 157 | 🟠 **只读面已跑** | **09-16 新**，见 [profile-security-test-run-2026-09-16.md](profile-security-test-run-2026-09-16.md)；16/17 PASS，变更类用例待授权 |
+| **profile-security** | 157 | 🟡 **只读面 + TOTP 全生命周期已跑** | **09-16 新**，见 [profile-security-test-run-2026-09-16.md](profile-security-test-run-2026-09-16.md)；40 项 39 PASS；Passkey/Email MFA 需设备与收件箱 |
 | **real-device** | 69 | 🔴 **未跑** | 需真机/读屏 |
 
 图例：🟢 完成/较全 · 🟡 代表性抽测或单面深跑 · 🔴 未跑
@@ -86,9 +86,10 @@
 | 3 | **上线前必须补** | **餐厅主数据缺失**：`legalBusinessName` 为空、`abn` 与 `refundContactEmail` 为空/null。**会直接打在小票和收据上** | seed 数据缺口，非代码缺陷。Admin → Restaurants 补齐 |
 | 4 | **中（对账/合规）** | **payments 报表导出不含金额与币种**：`PaymentEventLog` 实体本身没有金额字段，唯一可能装金额的 `DataJson` 只对 PlatformOwner 导出。保留期 2555 天（7 年）的支付证据，餐厅 Owner/Admin 导出来**看不到多少钱** | 给 `PaymentEventLog` 加 `AmountCents`+`Currency` 并在写入时填充 |
 | 5 | 低（API 契约） | **不传 `sortBy` 时 audit/orders/payments 返回 400，activity 却正常**：`PagedRequest.SortBy` 默认 null 而排序无默认值。前端写死了 `createdAt` 所以 UI 碰不到，但直接调 API 会踩。**这也更正了 09-15 报告「需正确日期参数」的误判——与日期无关** | `ApplyAuditSorting` 给 `createdAt` 默认值 |
-| 6 | 提示 | Klarna 在连接账户上是启用的，但异步支付路径（`checkout.session.async_payment_*`）零覆盖 | 要么正式环境关掉，要么补测 |
-| 7 | 待确认（承接 09-15） | MENU-ALG-04 的 `allergenInfoLastVerifiedAt` | 浏览器复核 |
-| 8 | 说明（承接 09-15） | `owner@dineflow.com` 密码已被改动 | Platform Owner 专属用例需新密码后补测 |
+| 6 | **中（影响注册漏斗）** | **注册确认信进 Gmail 垃圾箱**（「与过去被判定为垃圾邮件的消息相似」，发信域 `noreply@theunknownfish.com`）。不点确认信就无法登录，等于新顾客注册在最后一步断掉，而接口返回的是 `confirmationEmailSent: true`，用户侧看不出原因 | **非代码缺陷**——邮件确实发出且被 Resend 接受。查 `theunknownfish.com` 的 SPF/DKIM/DMARC 是否为 Resend 正确配置、该域是否已在 Resend 完成验证 |
+| 7 | 提示 | Klarna 在连接账户上是启用的，但异步支付路径（`checkout.session.async_payment_*`）零覆盖 | 要么正式环境关掉，要么补测 |
+| 8 | 待确认（承接 09-15） | MENU-ALG-04 的 `allergenInfoLastVerifiedAt` | 浏览器复核 |
+| 9 | 说明（承接 09-15） | `owner@dineflow.com` 密码已被改动 | Platform Owner 专属用例需新密码后补测 |
 
 ## 5. 本轮产生的测试数据（**未清理**）
 
@@ -96,6 +97,8 @@
 
 - 1 笔真实沙盒收款 A$48.00 并已全额退款（`ORD-20260916-551113`）
 - 1 笔 decline 失败单
+- **2 个测试账号**：`qa.sec.20260916@dineflow.test`（未确认、惰性、24h 自动清理）与
+  `burnmydread4+dineflowqa20260916@gmail.com`（已确认、MFA 已关闭、状态干净）
 - 若干柜台现金/刷卡收款、Void 与线下退款记录
 - 桌台 T3 / T4 上有开放 session
 
@@ -116,7 +119,8 @@
 **优先接力项**
 
 1. **修问题 #1 现金上限**（前后端各一处 + 回归测试）
-2. **授权 TOTP 变更类用例**（约 26 条含 4 条 P0 登录闸门），见 profile-security 报告第 5 节
-3. payment-system 剩余：3DS / 争议 / Klarna 异步
-4. front-counter 剩余：浏览器逐页、收据与打印路由
-5. admin-orders / admin-reports / cart / staff-orders 从抽测升级为深跑
+2. **查 `theunknownfish.com` 的邮件投递配置**（问题 #6）——注册漏斗断在这里
+3. **PROF-MFA-29/30/31**（P0）：Magic Link / Google OAuth / Passkey 三条登录路径是否绕过 MFA
+4. payment-system 剩余：3DS / 争议 / Klarna 异步
+5. front-counter 剩余：浏览器逐页、收据与打印路由
+6. admin-orders / cart / staff-orders 从抽测升级为深跑
