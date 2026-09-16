@@ -90,6 +90,11 @@ public sealed class PaymentEventLogResponse
 
     public string? Status { get; set; }
 
+    /// What this event was worth, in the smallest unit of <see cref="Currency"/>.
+    public long? AmountCents { get; set; }
+
+    public string? Currency { get; set; }
+
     public string Message { get; set; } = string.Empty;
 
     public string? DataJson { get; set; }

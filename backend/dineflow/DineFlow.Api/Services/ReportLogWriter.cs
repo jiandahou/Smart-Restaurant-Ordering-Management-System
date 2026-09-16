@@ -134,6 +134,9 @@ public sealed class ReportLogWriter
             PaymentId = payment?.Id ?? refund?.PaymentId,
             PaymentRefundId = refund?.Id,
             Provider = Trim(provider, 64),
+            // A refund event is worth the refund, not the payment it came out of.
+            AmountCents = refund?.AmountCents ?? payment?.AmountCents,
+            Currency = TrimNullable(refund?.Currency ?? payment?.Currency, 8),
             EventType = Trim(eventType, 120),
             ProviderEventId = TrimNullable(providerEventId, 255),
             Status = TrimNullable(status, 80),
