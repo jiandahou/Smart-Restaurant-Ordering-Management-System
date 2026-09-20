@@ -1,5 +1,31 @@
-import { useEffect, useState } from 'react'
+import { useSyncExternalStore } from 'react'
 import { WifiOff } from 'lucide-react'
+
+function subscribe(onChange: () => void) {
+  window.addEventListener('offline', onChange)
+  window.addEventListener('online', onChange)
+
+  return () => {
+    window.removeEventListener('offline', onChange)
+    window.removeEventListener('online', onChange)
+  }
+}
+
+/**
+ * Read rather than remembered, so there is no stored copy to go stale.
+ *
+ * <p>
+ * `online`/`offline` are edge-triggered: a tab restored from the back/forward cache, or one whose
+ * network died before this mounted, never fires one and would otherwise sit there claiming to be
+ * connected. Keeping the browser's own flag as the source of truth covers that without a state
+ * copy, and React re-reads it after subscribing, so a change in the gap between the first render
+ * and the subscription cannot be missed either.
+ * </p>
+ */
+const isOffline = () => navigator.onLine === false
+
+/** Nothing is offline before there is a browser to ask. */
+const isOfflineOnServer = () => false
 
 /**
  * Says so, persistently, while the browser has no network.
@@ -18,27 +44,7 @@ import { WifiOff } from 'lucide-react'
  * </p>
  */
 export function OfflineNotice() {
-  // Not read during render: a tab restored from the back/forward cache, or one whose network died
-  // before this mounted, is already offline and there would be no event to catch up on.
-  const [offline, setOffline] = useState(() =>
-    typeof navigator !== 'undefined' && navigator.onLine === false,
-  )
-
-  useEffect(() => {
-    const goOffline = () => setOffline(true)
-    const goOnline = () => setOffline(false)
-
-    window.addEventListener('offline', goOffline)
-    window.addEventListener('online', goOnline)
-    // The events are edge-triggered, so a change between the initial read and this subscription
-    // would otherwise be missed.
-    setOffline(navigator.onLine === false)
-
-    return () => {
-      window.removeEventListener('offline', goOffline)
-      window.removeEventListener('online', goOnline)
-    }
-  }, [])
+  const offline = useSyncExternalStore(subscribe, isOffline, isOfflineOnServer)
 
   if (!offline) {
     return null
