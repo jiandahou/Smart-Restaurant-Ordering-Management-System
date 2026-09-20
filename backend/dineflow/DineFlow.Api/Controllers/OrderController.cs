@@ -908,6 +908,17 @@ public class OrderController : ControllerBase
             return OrderItemOptionRefund.Explain(reason, option.OptionNameSnapshot);
         }
 
+        // The stored row is constrained to a positive quantity, and an extra's price comes from its
+        // own contribution rather than from this number, so nothing further down would have
+        // objected to a zero. Without this check a caller that omits the field — which the contract
+        // allows, and which the whole-line branch answers with a plain 400 — reaches the database
+        // and is told about the failure as a 500.
+        if (!RefundRequestItemPolicy.IsValidQuantity(selectedItem.Quantity, orderItem.Quantity))
+        {
+            return $"Quantity for \"{option.OptionNameSnapshot}\" must be between 1 and "
+                + $"{orderItem.Quantity}.";
+        }
+
         var contributionCents = OrderItemOptionRefund.ContributionCents(option, orderItem.Quantity);
         var alreadyCents = Math.Min(
             contributionCents,
