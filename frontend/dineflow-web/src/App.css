@@ -618,6 +618,47 @@
   line-height: 1.35;
 }
 
+/* Pinned rather than placed in the flow: the page it interrupts is usually scrolled, and a notice
+   about the network is worthless if you have to scroll back up to find it. Sits above the customer
+   cart bar and the staff toolbars, below dialogs, which are modal and own the screen while open. */
+.offline-notice {
+  position: fixed;
+  z-index: 60;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 11px;
+  padding: 10px 14px calc(10px + env(safe-area-inset-top, 0px));
+  border-bottom: 1px solid color-mix(in srgb, #f59e0b 48%, var(--border));
+  background: color-mix(in srgb, #f59e0b 12%, var(--panel-bg));
+  box-shadow: 0 12px 28px -24px rgba(15, 23, 42, 0.6);
+}
+
+.offline-notice-icon {
+  display: inline-flex;
+  color: #f59e0b;
+}
+
+.offline-notice > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.offline-notice strong {
+  color: var(--text-h);
+  font-size: 13px;
+}
+
+.offline-notice span {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .mobile-user-menu {
   width: min(320px, calc(100vw - 24px));
   padding: 10px;
