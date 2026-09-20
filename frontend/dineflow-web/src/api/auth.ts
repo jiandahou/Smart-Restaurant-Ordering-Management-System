@@ -2004,6 +2004,57 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The request never reached the server, so there is no status and no server message.
+ *
+ * <p>
+ * `fetch` rejects with a bare `TypeError` whose message is "Failed to fetch" — copy written for a
+ * console, which went straight into a toast the moment a diner's phone lost signal. It says nothing
+ * about what happened or what to do, and on a dropped connection the most useful thing to say is
+ * that nothing was sent, so retrying is safe.
+ * </p>
+ * <p>
+ * Extends {@link ApiError} so the callers that already branch on `instanceof ApiError` keep working;
+ * `status` is 0 because no response existed, which is distinguishable from every real one.
+ * </p>
+ */
+export class NetworkError extends ApiError {
+  constructor(offline: boolean) {
+    super(
+      offline
+        ? 'You appear to be offline. Nothing was sent — reconnect and try again.'
+        : 'Could not reach DineFlow. Nothing was sent — check your connection and try again.',
+      0,
+      'network_unavailable',
+    )
+    this.name = 'NetworkError'
+  }
+}
+
+/**
+ * Runs a fetch, turning a transport failure into a {@link NetworkError}.
+ *
+ * <p>
+ * Only the rejection is translated. An HTTP error is a real answer from the server and stays with
+ * the caller, which has the status and the server's own wording to work from.
+ * </p>
+ */
+export async function fetchOrNetworkError(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  try {
+    return await fetch(input, init)
+  } catch (error) {
+    // An aborted request was asked for by the app and must not be reported as a dead network.
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error
+    }
+
+    throw new NetworkError(typeof navigator !== 'undefined' && navigator.onLine === false)
+  }
+}
+
 export async function request<T>(path: string, options: RequestInit = {}) {
   const performFetch = async () => {
     const token = getStoredToken()
@@ -2023,7 +2074,7 @@ export async function request<T>(path: string, options: RequestInit = {}) {
       headers.set('Authorization', `Bearer ${token}`)
     }
 
-    return fetch(path, { ...options, headers })
+    return fetchOrNetworkError(path, { ...options, headers })
   }
 
   let response = await performFetch()
@@ -2092,7 +2143,7 @@ async function requestBlob(path: string, options: RequestInit = {}) {
       headers.set('Authorization', `Bearer ${token}`)
     }
 
-    return fetch(path, { ...options, headers })
+    return fetchOrNetworkError(path, { ...options, headers })
   }
 
   let response = await performFetch()
@@ -2280,7 +2331,7 @@ async function uploadCurrentUserAvatarWithPresignedUrl(file: File) {
       fileSize: file.size,
     }),
   })
-  const response = await fetch(upload.uploadUrl, {
+  const response = await fetchOrNetworkError(upload.uploadUrl, {
     method: 'PUT',
     headers: upload.headers,
     body: file,
@@ -2812,7 +2863,7 @@ export async function uploadMenuItemImage(restaurantId: string, file: File) {
       fileSize: file.size,
     }),
   })
-  const uploadResponse = await fetch(upload.uploadUrl, {
+  const uploadResponse = await fetchOrNetworkError(upload.uploadUrl, {
     method: 'PUT',
     headers: upload.headers,
     body: file,

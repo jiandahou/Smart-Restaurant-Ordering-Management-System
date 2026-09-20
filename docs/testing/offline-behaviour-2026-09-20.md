@@ -12,8 +12,8 @@
 | 用例 | 结果 |
 |---|---|
 | OFF-01 断网后购物车内容是否保留 | ✅ 完整保留 |
-| OFF-02 页面是否告知顾客已断网 | ❌ **完全没有任何提示** |
-| OFF-03 断网时加菜的报错文案 | ❌ **直接显示 "Failed to fetch"** |
+| OFF-02 页面是否告知顾客已断网 | ❌ **完全没有任何提示** → 已修 |
+| OFF-03 断网时加菜的报错文案 | ❌ **直接显示 "Failed to fetch"** → 已修 |
 | OFF-04 断网时加菜会不会产生脏状态 | ✅ 拒绝加入，前后端都没留痕 |
 | OFF-05 断网时点结算 | ✅ 被拦住，**后端零幽灵订单** |
 | OFF-06 恢复后是否需要刷新 | ✅ 不需要，自愈 |
@@ -91,8 +91,32 @@
 断网时加菜、点结算，弹出的提示是字面的 **"Failed to fetch"**——这是 `TypeError` 的
 `message` 直接进了 toast。对顾客毫无意义，也不告诉他该怎么办（等一下、还是叫店员）。
 
-两条其实是同一个根因：前端没有断网感知。合理的修法是加一个 `online`/`offline` 监听，
-断网时挂一条持久提示条，并把网络类错误统一映射成「网络连接中断，请稍后重试」。
+两条其实是同一个根因：前端没有断网感知。
+
+### 已修
+
+**OFF-02** 新增 `src/components/OfflineNotice.tsx`，挂在 `App` 里路由之上，
+所以顾客页和员工页一起覆盖（店里平板掉 Wi-Fi 是同一个问题）。断网时置顶显示一条常驻提示条。
+初始状态直接读 `navigator.onLine` 而不是等事件——`online`/`offline` 是边沿触发的，
+从 bfcache 恢复、或挂载前网络就已经断了的标签页，永远等不到那个事件。
+
+文案只承诺「没有东西被发出去」，**不承诺购物车已保存**：购物车在服务端，
+屏幕上显示的是最后一次拉取到的状态，说「已保存」是猜测。
+
+**OFF-03** `src/api/auth.ts` 新增 `NetworkError`（继承 `ApiError`，`status: 0`、
+`code: 'network_unavailable'`，保证已有的 5 处 `instanceof ApiError` 判断不受影响）
+和 `fetchOrNetworkError()`，把 `fetch` 的传输层异常翻译成人话。
+只翻译 rejection——HTTP 错误是服务端给的真实答复，仍然交给调用方。
+`AbortError` 原样放行，那是应用自己取消的，报成断网是撒谎。
+
+区分了两种情况：设备断网说「You appear to be offline」，设备在线但连不上 DineFlow 说
+「Could not reach DineFlow」——对着满格信号的人说他断网了，会让他去修错的东西。
+
+已接入 `request`、`requestBlob` 和两处直传存储的上传。
+
+回归测试 `src/api/networkError.test.ts`（8 条）和
+`src/components/OfflineNotice.test.tsx`（6 条）。两份都把修复退掉验证过会失败
+（分别挂 4 条和 3 条）。前端全量 1106 passed，`tsc --noEmit` 干净，生产构建通过。
 
 ---
 

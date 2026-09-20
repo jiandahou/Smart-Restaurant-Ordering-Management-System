@@ -4,6 +4,7 @@ import './App.css'
 import { ProtectedRoute } from './routes/ProtectedRoute'
 import { Toaster } from './components/ui/sonner'
 import { LegalFooter } from './components/LegalFooter'
+import { OfflineNotice } from './components/OfflineNotice'
 
 /**
  * Every page is a chunk of its own.
@@ -129,6 +130,7 @@ function App() {
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </Suspense>
+      <OfflineNotice />
       <LegalFooter />
       <Toaster position="top-center" richColors />
     </>
