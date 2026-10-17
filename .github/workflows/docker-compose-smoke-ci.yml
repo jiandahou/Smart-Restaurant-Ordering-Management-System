@@ -5,7 +5,7 @@ on:
     paths:
       - "backend/**"
       - "docker-compose.yml"
-      - ".env.example"
+      - "docker-compose.ci.yml"
       - ".github/workflows/docker-compose-smoke-ci.yml"
   push:
     branches:
@@ -14,7 +14,7 @@ on:
     paths:
       - "backend/**"
       - "docker-compose.yml"
-      - ".env.example"
+      - "docker-compose.ci.yml"
       - ".github/workflows/docker-compose-smoke-ci.yml"
 
 jobs:
@@ -27,11 +27,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create CI env file
-        run: cp .env.example .env
-
       - name: Build backend image
-        run: docker compose build backend
+        run: docker compose -f docker-compose.ci.yml build backend
 
       - name: Pull service images
         run: |
@@ -39,7 +36,7 @@ jobs:
             service="$1"
 
             for attempt in 1 2 3; do
-              if docker compose pull "$service"; then
+              if docker compose -f docker-compose.ci.yml pull "$service"; then
                 return 0
               fi
 
@@ -52,33 +49,31 @@ jobs:
           }
 
           pull_with_retry postgres
-          pull_with_retry minio
-          pull_with_retry minio-init
 
       - name: Start backend stack
-        run: docker compose up -d postgres backend
+        run: docker compose -f docker-compose.ci.yml up -d postgres backend
 
       - name: Wait for backend health
         run: |
           for i in {1..40}; do
-            if curl -fsS http://localhost:5000/health; then
+            if curl -fsS http://localhost:15000/health; then
               exit 0
             fi
 
             sleep 3
           done
 
-          docker compose ps
-          docker compose logs backend
+          docker compose -f docker-compose.ci.yml ps
+          docker compose -f docker-compose.ci.yml logs backend
           exit 1
 
       - name: Check database readiness
-        run: curl -fsS http://localhost:5000/health/ready
+        run: curl -fsS http://localhost:15000/health/ready
 
       - name: Show logs on failure
         if: failure()
-        run: docker compose logs
+        run: docker compose -f docker-compose.ci.yml logs
 
       - name: Cleanup
         if: always()
-        run: docker compose down -v
+        run: docker compose -f docker-compose.ci.yml down -v

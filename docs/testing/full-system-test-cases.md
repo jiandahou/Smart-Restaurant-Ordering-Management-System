@@ -38,6 +38,13 @@
 | A06 | 执行 `dotnet list package --vulnerable --include-transitive` | 无 high/critical 漏洞 | FAIL：2 high |
 | A07 | 检查 CI workflow | PR 必须运行 build、test、lint、依赖审计 | FAIL：当前只 build |
 
+### A.1 CI 与对象存储专项（2026-10-17 新增）
+
+| ID | 优先级 | 条件与步骤 | 预期 | 类型 |
+|---|---|---|---|---|
+| CI-SMK-01 | P1 | 使用独立 `docker-compose.ci.yml` 构建并启动后端与 PostgreSQL，访问 `/health`、`/health/ready`，核查服务列表 | 两端点返回 2xx，ready 确认数据库连接；服务列表中没有 MinIO；不依赖本机缓存镜像 | Auto |
+| S3-INT-01 | P1 | 用专用私有 `dineflow-ci-*` S3 桶和限权 OIDC 角色运行独立工作流，上传随机对象、字节比对读取、匿名读取、删除后 HEAD | 上传/读取/删除成功；匿名读取 403；删除后 404；临时对象已清理；生产桶不受影响 | Auto（需先配置测试桶与角色） |
+
 ## B. 认证与账号生命周期
 
 | ID | 账号/条件 | 操作步骤 | 预期 | 2026-08-09 |

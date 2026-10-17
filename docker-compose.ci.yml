@@ -1,0 +1,38 @@
+# Disposable API/database smoke stack. The readiness endpoint checks PostgreSQL,
+# not object storage; storage has its own integration workflow and test bucket.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: dineflow_user
+      POSTGRES_PASSWORD: dineflow_ci_only
+      POSTGRES_DB: dineflow_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dineflow_user -d dineflow_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build:
+      context: ./backend/dineflow
+      dockerfile: DineFlow.Api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=dineflow_db;Username=dineflow_user;Password=dineflow_ci_only
+      Jwt__SecretKey: ci-only-secret-never-use-outside-this-disposable-stack
+      Stripe__SecretKey: sk_test_ci_smoke_no_external_calls
+      Database__MigrateOnStartup: "true"
+      Seed__DemoData: "false"
+      AvatarStorage__Provider: Local
+    ports:
+      - "127.0.0.1:15000:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8080/health/ready > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20

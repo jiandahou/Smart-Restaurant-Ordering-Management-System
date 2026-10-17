@@ -1,0 +1,42 @@
+name: S3 Object Storage Integration
+
+# Intentionally separate from PR CI: this test writes only to an explicitly
+# configured, private AWS test bucket and never receives production credentials.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  storage:
+    name: Test private S3 bucket
+    runs-on: ubuntu-latest
+    environment: s3-integration
+    env:
+      S3_TEST_BUCKET: ${{ vars.S3_TEST_BUCKET }}
+      S3_TEST_REGION: ${{ vars.S3_TEST_REGION }}
+      S3_TEST_ACCOUNT_ID: ${{ vars.S3_TEST_ACCOUNT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify dedicated test configuration
+        env:
+          S3_TEST_ROLE_ARN: ${{ vars.S3_TEST_ROLE_ARN }}
+        run: |
+          test -n "$S3_TEST_ROLE_ARN" || { echo 'Missing S3_TEST_ROLE_ARN'; exit 1; }
+          test -n "$S3_TEST_BUCKET" || { echo 'Missing S3_TEST_BUCKET'; exit 1; }
+          test -n "$S3_TEST_REGION" || { echo 'Missing S3_TEST_REGION'; exit 1; }
+          test -n "$S3_TEST_ACCOUNT_ID" || { echo 'Missing S3_TEST_ACCOUNT_ID'; exit 1; }
+
+      - name: Assume test-only AWS role via GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.S3_TEST_ROLE_ARN }}
+          aws-region: ${{ vars.S3_TEST_REGION }}
+
+      - name: Verify object storage
+        run: bash scripts/test-s3-storage.sh
