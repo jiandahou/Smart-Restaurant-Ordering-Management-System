@@ -6,6 +6,16 @@
 
 ## 0. 运行信息
 
+09-20 实机接力记录：[打印机接力验收](printing-handoff-2026-09-20.md)。QZ / `star` 已恢复；诊断票、真实订单厨房票和前台收据均只出一张并自动切纸。Takeaway 订单 `ORD-20260920-579220` 的厨房票 `PRINT-02 / DEVICE-PRINT-03` PASS。前台现金收据金额、tender、找零、Paid/Completed、商品、排版、单张及切纸正确，但 The DineFlow Kitchen 身份配置为空，实体票缺 ABN 与明确退款联系方式，当时按原口径把 `PRINT-03 / DEVICE-PRINT-04` 判为 FAIL。09-20 的 [DEC-01](release-decisions-2026-09-20.md) 已将此项改为散客场景下的已接受风险，不再是 P0 阻断；断连恢复和批量压力仍未跑。
+
+### 09-18 覆盖复核与本地回归补充
+
+追加：[非打印点餐与退款补测](non-printing-followup-2026-09-18.md)。34 项自动化通过（含 8 个新增场景）及 6 项浏览器检查；其中 Guest 先提交的行为记录测试确认了 **GAP-0918-01 / P1 归属规则差异**，不能据自动化绿色当作需求验收通过。退款审核为真实本地 API + Stripe 替身，不是 Sandbox/live 验收。
+
+最新剩余工作以 [上线测试缺口与接力清单](release-gap-review-2026-09-18.md) 为准。后续 cart、shared-cart、admin-modules、write-paths 等专项已经覆盖了下文矩阵中的部分待测项，不应据旧矩阵全部重跑。
+
+本地分支 `jianda-payment-test-2026-09-16` @ `34362f9`：前端 1093 项全部通过，build/lint 通过；后端核心定向回归使用独立临时 PostgreSQL，513 PASS / 0 FAIL / 0 SKIP。这是自动化回归补充，不计入原生产黑盒统计，也不代表新的生产、浏览器双会话、Stripe live 或打印机验收。剩余优先项为多身份同桌归属、跨角色实时恢复、退款审批正向链路及部署/实机验收，详见链接。
+
 | 字段 | 值 |
 |---|---|
 | 日期 | 2026-09-16 (ACST) |
@@ -99,6 +109,28 @@
 > 本地这个账号若还要复用，需要先用邮件验证码关掉，或直接废弃。
 
 ## 3. 各模块覆盖进度矩阵
+
+夜间本地点餐核心抽测追加：[完整结果与边界](local-order-core-test-2026-09-16.md)。前端 42 PASS；后端独立 PostgreSQL 474 PASS / 2 FAIL / 0 SKIP；运行中购物车 API 15 PASS、另 2 项清理检查 PASS。两条失败已隔离为测试餐厅营业时间导致 join 409 的夹具问题，不是新确认的产品删除错误。真实 Stripe Sandbox 付款退款闭环仍未跑；本地打印机 PAUSED，未新建会进入打印链路的订单。
+
+### 本地邮箱追加检查（09-16，接力进行中）
+
+以下单独计数，不并入 §2.4 的阶段统计：7 PASS / 0 BLOCKED / 4 NOT RUN。
+
+| 检查 | 状态 | 观察 / 后续 |
+|---|---|---|
+| MFA 挑战刷新 | PASS | 账号 8 的新 Magic Link 进入挑战后刷新，仍显示六位验证码表单；仅确认界面恢复，刷新后正确验证码提交尚未测 |
+| 未完成 MFA 时重放 Magic Link | PASS | 同一封 16:54 邮件再次打开，显示 Magic link sign-in failed；没有登录 |
+| MFA 返回普通登录 | PASS | Back to password 恢复密码/Email link 登录入口，没有卡死 |
+| 第二账号 Magic Link 仍要求 MFA | PASS | 账号 4 的 16:56 本地邮件进入 MFA，提供 Authenticator / Email code；切换后正确显示邮箱验证码提示；该邮件也在 Spam |
+| 第二账号 MFA 完成及身份 | PASS | 旧挑战提示 expired 后重新使用 21:49 邮件，用户完成邮箱验证码；浏览器 `/me` 确认 Jianda Hou、burnmydread4@gmail.com、Customer，与账号 8 的资料不同，显示 Protected Login / Sensitive actions |
+| 第二账号 My Orders 空态 | PASS | 页面正常加载 No orders yet，页头为账号 4；没有足够订单样本，不能据此认定跨账号订单权限通过 |
+| 第二账号刷新保持会话 | PASS | 刷新 My Orders 后仍为账号 4，页面保持正常空态 |
+| 跨账号订单访问隔离 | NOT RUN | 需两个账号各自拥有可核对的订单，再做列表和直接访问对方订单的负向测试；本次仅确认资料身份正确 |
+| 新旧密码登录 | NOT RUN | 需用户在本地表单输入密码；不索取聊天中的密码 |
+| 已使用重置链接再次提交 | NOT RUN | 需用户完成密码表单提交；只打开页面不足以证明令牌被拒绝 |
+| 重置后旧会话失效 | NOT RUN（代码风险） | `AuthController.ResetPassword` 成功后没有调用 RevokeAllForUserAsync；`RefreshTokenService.RotateAsync` 未绑定 security stamp，`AuthController.Refresh` 使用当前 stamp 发新 JWT。`Program.cs` 会拒绝旧 stamp JWT，但旧 refresh token 可能恢复会话。需保留独立旧会话、重置密码后再触发刷新实测；尚未作为运行时确认缺陷计入问题总数 |
+
+业务代码未因本轮测试修改。工作区现有现金收款相关改动保留不动。
 
 | 模块 | 用例数 | 状态 | 说明 |
 |---|---:|---|---|

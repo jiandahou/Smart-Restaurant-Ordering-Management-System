@@ -1,13 +1,11 @@
 name: Deploy production (EC2 self-hosted)
 
-# Auto-redeploys the EC2 production stack on every push to `main`.
+# Deploys the EC2 production stack only when explicitly started.
 # Runs on the self-hosted runner (label `ec2-prod`) installed on the EC2 host,
 # against the canonical checkout at /home/ubuntu/Smart Restaurant Ordering System
 # so it reuses the host's .env.prod, S3 config and cloudflared credentials.
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 concurrency:
